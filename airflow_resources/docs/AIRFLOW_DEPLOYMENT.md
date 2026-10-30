@@ -5,8 +5,9 @@ universe tables in **Teradata**. It follows the layout and connection style of t
 Airflow package (`framework/airflow`, branch `feature/framework-package`): one DAG file, one DAG id, one
 `<name>_config_var` Variable, the Teradata login from the Airflow Connection named in `td_conn_var`.
 
-The engine itself (`sampling/engine.py`, `db.py`, `settings.py`) is the same code in the Airflow version and the
-local version (`local/`, see [Local version](#local-version-command-line)); a test fails if the two copies drift.
+The engine itself (`sampling/engine.py`, `db.py`, `settings.py`) exists once, in `airflow/sampling`: the local
+version (`local/`, see [Local version](#local-version-command-line)) imports it from there. Only `dags.py` imports
+Airflow; a test checks that the local command line starts in a Python without Airflow.
 
 ```
 airflow/                                    copied into the DAGs folder
@@ -33,7 +34,7 @@ sql/                                        shared by both versions
   seed/umcm_sample_config.sql               example configuration rows (every kind of rule once)
   seed/odag1_config_template.sql            the ODAG1 (COMO) configuration, inactive, TODOs open
 
-local/                                      the local version (command line, dev.env)
+local/                                      the local version (command line, dev.env); uses airflow/sampling
 ```
 
 ## How it fits together
@@ -133,13 +134,16 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `schedule_timezone` | Default `America/Chicago` |
 | `timezone` | Business time zone for the as-of date and the timestamps written (default `America/Chicago`) |
 | `log_level` | `INFO` (default) or `DEBUG` (adds every SQL statement's text and row count; never data) |
-| `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried |
+| `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried. A GATE rule not met (`GATE_NOT_MET`, the data is not ready) is retried the same way |
+| `retry_delay_minutes` | Minutes between retries (default 5). With GATE rules, `retries` × `retry_delay_minutes` is how long a run waits for the data |
 | `execution_timeout_minutes` / `dagrun_timeout_minutes` | Task limit (default 120) / DAG run limit (default 480) |
 | `fail_on_shortfall` | true = fail the task when a sample has fewer than `target_volume` cases (default false: a warning) |
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
-| `email_recipient` | Adds `success_email` / `fail_email` tasks |
+| `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
+| `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, output table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `process_name`, `run_key`, `as_of`) |
+| `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
 | `trigger_keys` | Optional list of the keys a trigger may set (default: all of `config_id`, `project`, `process_name`, `run_key`, `run_params`, `seed`, `as_of`, `dry_run`, `log_level`). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
 | `snow_assignment_group` | ServiceNow assignment group of the failure ticket |
 | `owner`, `tags`, `pool` | As usual |
@@ -157,10 +161,29 @@ environment) is ignored with a warning - set it in the Variable. Examples:
 {"config_id": "1", "run_key": "2026-10-30", "seed": "1234567890123"}
 ```
 
+### Started by the compliance framework
+
+A framework step DAG starts the DAGs in its own Variable's `trigger_dags` when it succeeds, passing `project`,
+`table_group`, `table`, `run_type`, `source` and `as_of`, and waits for them to finish (it fails if the triggered
+DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no code changes on either side:
+
+1. In the framework step's Variable, add `CMS_COMPLIANCE_UMCM_SAMPLING` to `trigger_dags`.
+2. In this DAG's Variable: `"schedule_interval": null`, `"trigger_keys": ["as_of"]` (the framework's `project` is
+   its own, not this DAG's scope), and `"trigger_run_params": [...]` for any of its values the rules use.
+3. Give the sample a PARAM rule for the batch (e.g. the latest `BTCH_ID` of the universe) and `"run_key":
+   "{batch_id}"`, and a GATE rule that returns a row only when that batch is ready, with `retries` and
+   `retry_delay_minutes` covering how late it can be.
+
+```json
+{"schedule_interval": null, "trigger_keys": ["as_of"], "trigger_run_params": ["run_type"],
+ "run_key": "{batch_id}", "retries": 6, "retry_delay_minutes": 30}
+```
+
 ## DAG
 
 - One task, `run_sampling` (or `run_sampling_<name>` per `runs` entry), then a `trigger_<dag id>` task per
-  `trigger_dags` entry, then `success_email` / `fail_email`. `max_active_runs` is 1.
+  `trigger_dags` entry, then `success_email` / `fail_email`, and `sample_ready_email` with `notify_recipients`.
+  `max_active_runs` is 1.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task fails with
   the reason when run.
 - Every task has `on_failure_callback`: a failed task opens a ServiceNow incident through
@@ -194,7 +217,7 @@ the universe is never logged.
 
 ## Local version (command line)
 
-`local/` holds the same engine with a command line, for development, DEV rehearsal and admin work. Credentials
+`local/` runs the same engine (imported from `airflow/sampling`) with a command line, for development, DEV rehearsal and admin work. Credentials
 come from `local/dev.env` (copy `dev.env.example`; gitignored) or the shell.
 
 ```bash
@@ -258,7 +281,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (68 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (73 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

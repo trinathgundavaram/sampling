@@ -55,6 +55,7 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 |---|---|---|---|
 | 1. Parameters | Each PARAM rule runs in `seq_no` order; the first column of the first row becomes `{rule_name}`. Values passed with the run win. `{as_of_date}` is always there. The `run_key` template is filled (`{batch_id}` → `B42`) | PARAM rules, the run's `run_params`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
 | 2. Run row | `gre_sampling_run` row, status `RUNNING`, with the `config_hash` of the rules loaded. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
+| 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
 | 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
 | 4. Pull | One `SELECT` of the universe rows in `scope_sql`. Teradata evaluates every bucket condition, exclusion rule and priority criterion as a column of that pull | `gre_sampling_config` | `PULL_FAILURE` |
 | 5. Exclude | A row matching any EXCLUSION rule is not a candidate; the first matching rule (`seq_no`) is its reason. History rules read earlier runs | EXCLUSION rules | |
@@ -76,7 +77,7 @@ All in the metadata database (`meta_db`), DDL in `sql/schema.sql`.
 | Table | Role | Who writes |
 |---|---|---|
 | `gre_sampling_config` | One row per sample | you |
-| `gre_sampling_rule` | One row per rule: PARAM, EXCLUSION, PRIORITY, LEVEL, BUCKET, OUTPUT | you |
+| `gre_sampling_rule` | One row per rule: PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, OUTPUT | you |
 | `gre_sampling_run` | One row per run attempt: outcome, totals, errors, counts per rule and bucket | engine |
 | `gre_sample_selections` | One row per case considered: candidate, selected, excluded | engine |
 | *`output_table`* | The snapshot of the selected cases (optional, one per config, you create it: `sql/output_table_template.sql`) | engine |
@@ -131,23 +132,28 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
 Common columns: `rule_id`, `config_id`, `act_ind`, `rule_class`, `seq_no`, `rule_name`, `description`. The others,
 by class:
 
-| Column | PARAM | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT |
-|---|---|---|---|---|---|---|
-| `rule_name` | the `{token}` | the reason stored | name | name | the value / bucket name (no `/`) | the output column |
-| `rule_type` | | `SQL` (default) / `PRIOR_SELECTION` | `CONDITION` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | | |
-| `rule_sql` | a `SELECT` | SQL: the condition | CONDITION / EXPRESSION | the expression whose values are the buckets, or NULL (buckets by condition) | condition-level: the condition | the expression |
-| `level_order` | | | | 0, 1, … | its level | |
-| `parent_path` | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) | |
-| `unlisted_policy` | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | | |
-| `quota_mode` | | | | | `FRACTION` (default) / `ALL` / `REMAINDER` | |
-| `target_fraction` | | | | | FRACTION: 0 to 1 | |
-| `max_count` | | | | | optional cap | |
-| `sort_dir` | | | EXPRESSION: `ASC` (default) / `DESC` | | | |
-| `lookback_days`, `history_scope` | | PRIOR_SELECTION | PRIOR_* | | | |
+| Column | PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT |
+|---|---|---|---|---|---|---|---|
+| `rule_name` | the `{token}` | name (in the message) | the reason stored | name | name | the value / bucket name (no `/`) | the output column |
+| `rule_type` | | | `SQL` (default) / `PRIOR_SELECTION` | `CONDITION` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | | |
+| `rule_sql` | a `SELECT` | a `SELECT`: a row = ready | SQL: the condition | CONDITION / EXPRESSION | the expression whose values are the buckets, or NULL (buckets by condition) | condition-level: the condition | the expression |
+| `level_order` | | | | | 0, 1, … | its level | |
+| `parent_path` | | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) | |
+| `unlisted_policy` | | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | | |
+| `quota_mode` | | | | | | `FRACTION` (default) / `ALL` / `REMAINDER` | |
+| `target_fraction` | | | | | | FRACTION: 0 to 1 | |
+| `max_count` | | | | | | optional cap | |
+| `sort_dir` | | | | EXPRESSION: `ASC` (default) / `DESC` | | | |
+| `lookback_days`, `history_scope` | | | PRIOR_SELECTION | PRIOR_* | | | |
 
 **PARAM** – a run parameter. The first column of the first row of `rule_sql` becomes `{rule_name}`; a later PARAM
 may use an earlier one. No value (no row, or NULL) fails the run as `PARAM_FAILURE`, which is retried: typically the
 load has not finished. A value passed with the run (`run_params`) is used instead of the lookup.
+
+**GATE** – a readiness check, run after the PARAM rules (so it may use `{batch_id}`). Its `SELECT` returning no
+row means "not ready": the run ends as `GATE_NOT_MET` and Airflow retries it (`retries`, `retry_delay_minutes`).
+Nothing is pulled or written but the run row. Example – sample only a closed batch:
+`SELECT 1 FROM <control table> WHERE <batch column> = '{batch_id}' AND <status column> = '<closed>'`.
 
 **EXCLUSION** – `SQL`: `rule_sql` true = excluded (a NULL result, unknown, does **not** exclude).
 `PRIOR_SELECTION`: selected by a current run of another `run_key` within `lookback_days` (by `sample_cycle`), of
@@ -221,7 +227,7 @@ counts per bucket, are a `GROUP BY` on it.
 ### 6.2 Rule classes and their values
 | Column | Values |
 |---|---|
-| `gre_sampling_rule.rule_class` | `PARAM`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `OUTPUT` |
+| `gre_sampling_rule.rule_class` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `OUTPUT` |
 | `rule_type` (EXCLUSION) | `SQL`, `PRIOR_SELECTION` |
 | `rule_type` (PRIORITY) | `CONDITION`, `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
 | `quota_mode` (BUCKET) | `FRACTION`, `ALL`, `REMAINDER` |
@@ -234,7 +240,7 @@ counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `gre_sampling_run.status` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
-| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
 | `gre_sample_selections.selection_status` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
@@ -255,6 +261,7 @@ The worked example is `sql/seed/umcm_sample_config.sql` (every kind of rule once
 
 | Requirement | Rows |
 |---|---|
+| Sample only after the batch is closed | GATE: `SELECT 1 FROM <control table> WHERE … = '{batch_id}' AND <closed>` |
 | Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `scope_sql` `BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
 | Never audit auto-approvals | EXCLUSION, `SQL` |
 | Never audit a case twice in 90 days | EXCLUSION, `PRIOR_SELECTION`, `lookback_days` 90 |
@@ -277,6 +284,10 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
   of the service account, `{"logmech": "LDAP"}` in extra.
 - **Variable** `cms_compliance_umcm_sampling_config_var`: `meta_db`, `load_env`, the scope (`project` /
   `process_name` / `config_id`), `schedule_interval`, emails, retries.
+- **Started by the framework**: add this DAG to a framework step Variable's `trigger_dags`; here
+  `trigger_keys` `["as_of"]` and `trigger_run_params` for the values the rules use (AIRFLOW_DEPLOYMENT.md,
+  "Started by the compliance framework").
+- **Auditors** get `sample_ready_email` (counts, run key, output table, rules hash) with `notify_recipients`.
 - **Triggering** (UI "Trigger DAG w/ config", CLI, REST, or an upstream DAG): `config_id`, `project`,
   `process_name`, `run_key`, `run_params`, `seed`, `as_of`, `dry_run`, `log_level` – limited by the Variable's
   `trigger_keys` when set. The database, the Connection and the environment are never taken from a trigger.
@@ -343,6 +354,11 @@ than its target is short; with `TOPUP` the rest came from other buckets.
 2. `CONFIG_ERROR`: fix the rows (`validate --check-sql`), then rerun. `PARAM_FAILURE`: is the load finished?
    Others: `error_message` and `error_detail` (traceback); rerun when the cause is gone.
 3. Rerun with the same `run_key`: the new run becomes current, the failed attempt stays recorded.
+
+### 10.4a The run is waiting for data (GATE_NOT_MET)
+The message names the GATE rules not met. Airflow retries the task `retries` times, `retry_delay_minutes` apart;
+each attempt is a run row. When the retries run out the task fails: check the load, then clear the task (or
+rerun locally) once the data is there.
 
 ### 10.5 A run is stuck in RUNNING
 The worker was killed mid-run (nothing of the run was written: the writes are one transaction).

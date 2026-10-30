@@ -64,6 +64,38 @@ def test_trigger_keys_limit_what_an_upstream_dag_can_change(variable):
         dags.resolve_config(VAR_KEY, {})
 
 
+FRAMEWORK_CONF = {"project": "UMCM_FRAMEWORK", "table_group": "UM", "table": "ODAG1", "run_type": "WEEKLY",
+                  "source": "", "as_of": "2026-08-08"}   # what a framework DAG passes to the DAGs it triggers
+
+
+def test_triggered_by_the_framework(variable):
+    variable({**BASE, "trigger_keys": ["as_of"], "trigger_run_params": ["run_type", "table"]})
+    config = dags.resolve_config(VAR_KEY, FRAMEWORK_CONF)
+    assert config["project"] == "UMCM" and config["as_of"] == "2026-08-08"          # its project is not taken
+    assert config["run_params"] == {"batch_id": "2026-08-01", "run_type": "WEEKLY", "table": "ODAG1"}
+    assert "trigger_run_params" not in config
+
+
+def test_sample_ready_email_and_its_summary(variable):
+    variable({**BASE, "notify_recipients": "auditors@example.com", "retry_delay_minutes": 30})
+    dag = _load_dag_file()
+    ready = dag.task_dict["sample_ready_email"]
+    assert ready.to == ["auditors@example.com"] and ready.upstream_task_ids == {"run_sampling"}
+    assert dag.task_dict["run_sampling"].retry_delay.total_seconds() == 1800
+
+    class TI:
+        def xcom_pull(self, task_ids):
+            return {"runs": [{"sample_name": "S<1>", "run_key": "B42", "status": "COMPLETED", "selected": 150,
+                              "target_volume": 150, "shortfall": 0, "output_table": "DB.OUT",
+                              "config_hash": "abcdef0123456789"}]}
+    text = dags.sample_summary(TI(), ["run_sampling"])
+    assert "S&lt;1&gt;" in text and "<td>B42</td>" in text and "abcdef012345<" in text and "DB.OUT" in text
+    assert dags.sample_summary(type("E", (), {"xcom_pull": lambda self, task_ids: None})(), ["x"]) == \
+        "<p>No sample was made.</p>"
+    rendered = dag.get_template_env().from_string(ready.html_content).render(run_id="manual__1", ti=TI())
+    assert rendered.startswith("<p>DAG CMS_COMPLIANCE_UMCM_SAMPLING run manual__1:</p><table") and "B42" in rendered
+
+
 def test_layering_and_blocked_trigger_keys(variable):
     variable({**BASE, "runs": [{"config_id": 5}]})
     config = dags.resolve_config(VAR_KEY, {"RUN_KEY": "rk", "meta_db": "PROD_DB", "td_conn_var": "PROD"}, 0)

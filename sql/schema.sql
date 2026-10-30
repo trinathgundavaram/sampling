@@ -8,7 +8,7 @@
 --
 --   gre_sampling_config     you    one row per sample: universe, scope, size, method, output
 --   gre_sampling_rule       you    every rule of a sample, one row each (like gre_rules):
---                                  PARAM, EXCLUSION, PRIORITY, LEVEL, BUCKET, OUTPUT
+--                                  PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, OUTPUT
 --   gre_sampling_run        engine one row per run attempt: status, totals, errors, report
 --   gre_sample_selections   engine one row per case considered by a run
 --
@@ -64,6 +64,10 @@ CREATE INDEX gre_sampling_config_scope_ix (project_name, process_name) ON {{META
 --   PARAM      a run parameter: rule_name = the {token}, rule_sql = a SELECT
 --              returning one value (first column, first row). Run first, in
 --              seq_no order. A value passed with the run wins.
+--   GATE       a readiness check: rule_sql is a SELECT that must return at
+--              least one row (e.g. "the batch is closed"). Run after the
+--              PARAM rules: no row = GATE_NOT_MET, retried like a technical
+--              error. rule_name and description go into the message.
 --   EXCLUSION  rule_type SQL: rule_sql is a condition, true = excluded |
 --              PRIOR_SELECTION: selected by an earlier run (lookback_days,
 --              history_scope). The first match (seq_no) is the reason stored.
@@ -87,7 +91,7 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_rule (
     rule_id            INTEGER NOT NULL,               -- unique in the table
     config_id          INTEGER NOT NULL,
     act_ind            BYTEINT DEFAULT 1,
-    rule_class         VARCHAR(20) NOT NULL,           -- PARAM | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT
+    rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT
     seq_no             INTEGER DEFAULT 100,            -- order within the class
     rule_name          VARCHAR(200) NOT NULL,
     rule_type          VARCHAR(30),                    -- EXCLUSION: SQL (default) | PRIOR_SELECTION
@@ -138,7 +142,9 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_run (
     error_type         VARCHAR(50),                    -- CONFIG_ERROR | PARAM_FAILURE | PULL_FAILURE |
                                                        -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
                                                        -- ABANDONED (closed by mark-failed) |
-                                                       -- FINALIZED (its run_key's sample is final)
+                                                       -- FINALIZED (its run_key's sample is final) |
+                                                       -- GATE_NOT_MET (a GATE rule returned no row: retried) |
+                                                       -- GATE_FAILURE (a GATE rule's SQL failed)
     error_message      VARCHAR(2000),
     error_detail       CLOB,                           -- traceback (technical errors)
     run_report         CLOB,                           -- JSON: count per exclusion rule, candidates / target /

@@ -7,6 +7,7 @@ read on Airflow. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -123,7 +124,15 @@ def allowed_trigger_keys(variable: dict) -> tuple:
     return tuple(n for n in TRIGGER_KEYS if n in names)
 
 
-def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS) -> dict:
+def _list(value) -> list:
+    """A list setting given as a JSON list or as one comma-separated string, lower case."""
+    if value in (None, "", []):
+        return []
+    items = value if isinstance(value, list) else str(value).split(",")
+    return [str(v).strip().lower() for v in items if str(v).strip()]
+
+
+def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS, quiet: tuple = ()) -> dict:
     """What a trigger may change: the scope, the run's inputs and the log level (only the `allowed` ones). The
     database, the Connection and the environment stay the Variable's."""
     out, ignored = {}, []
@@ -132,7 +141,7 @@ def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS) -> dict
             continue
         if key in allowed:
             out[key] = value
-        else:
+        elif key not in quiet:
             ignored.append(key)
     if ignored:
         logger.warning("not taken from the trigger (set them in the Variable): %s", ", ".join(sorted(ignored)))
@@ -145,8 +154,15 @@ def resolve_config(variable_key: str, overrides: Optional[dict] = None, scope_in
     scope = dict(run_scopes(variable)[scope_index]) if scope_index is not None else {}
     if scope and any(k in scope for k in SCOPE_KEYS):  # a runs entry names its own scope: it replaces the Variable's
         variable = {k: v for k, v in variable.items() if k not in SCOPE_KEYS}
-    given = trigger_values(overrides, allowed_trigger_keys(variable))
-    config = {k: v for layer in (variable, scope, given) for k, v in layer.items() if k not in ("runs", "trigger_keys")}
+    as_params = _list(variable.get("trigger_run_params"))
+    given = trigger_values(overrides, allowed_trigger_keys(variable), quiet=tuple(as_params))
+    config = {k: v for layer in (variable, scope, given) for k, v in layer.items()
+              if k not in ("runs", "trigger_keys", "trigger_run_params")}
+    # trigger_run_params: values an upstream DAG passes (the framework's run_type, table ...) become run parameters
+    picked = {k: v for k, v in _keys(overrides).items() if k in as_params and v not in (None, "", [])}
+    if picked:
+        config["run_params"] = {**_run_params(config.get("run_params")), **picked}
+        logger.info("run parameters from the trigger: %s", ", ".join(sorted(picked)))
     if not config.get("meta_db"):
         raise ConfigError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
     return config
@@ -239,6 +255,26 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
 # The DAG
 # ---------------------------------------------------------------------------
 
+def sample_summary(ti, task_ids: list) -> str:
+    """HTML table of the samples a DAG run made (from its tasks' reports): counts and names only, never case data."""
+    runs = []
+    for task_id in task_ids:
+        report = ti.xcom_pull(task_ids=task_id) or {}
+        runs += report.get("runs", []) if isinstance(report, dict) else []
+    if not runs:
+        return "<p>No sample was made.</p>"
+    head = ("Sample", "Run key", "As of", "Status", "Selected", "Target", "Short", "Output table", "Rules (hash)")
+    cells = [[r.get("sample_name") or r.get("config_id"), r.get("run_key"), r.get("as_of_date"), r.get("status"),
+              r.get("selected"), r.get("target_volume"), r.get("shortfall"), r.get("output_table") or "",
+              str(r.get("config_hash") or "")[:12]] for r in runs]
+    rows = "".join("<tr>" + "".join(f"<td>{html.escape(str(c if c is not None else ''))}</td>" for c in row)
+                   + "</tr>" for row in cells)
+    return ("<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\"><tr>"
+            + "".join(f"<th>{h}</th>" for h in head) + f"</tr>{rows}</table>"
+            + "<p>The selected cases are in gre_sample_selections (selected_flag = 1, etl_is_curr_ind = 'Y') "
+              "and in the output table.</p>")
+
+
 def _failure_alert_ticket(assignment_group: str):
     def failure_alert_ticket(context):
         try:
@@ -311,7 +347,7 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
         "depends_on_past": False,
         "start_date": start_date,
         "retries": _retries(dag_config),
-        "retry_delay": timedelta(minutes=5),
+        "retry_delay": _minutes(dag_config, "retry_delay_minutes", timedelta(minutes=5)),
         "on_failure_callback": _failure_alert_ticket(dag_config.get("snow_assignment_group")
                                                      or DEFAULT_ASSIGNMENT_GROUP),
     }
@@ -319,7 +355,8 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     dag = DAG(dag_id=dag_id, description=f"config-driven stratified sampling ({variable_key})",
               default_args=default_args, schedule=dag_config.get("schedule_interval"), catchup=False,
               max_active_runs=1, dagrun_timeout=_minutes(dag_config, "dagrun_timeout_minutes", timedelta(hours=8)),
-              params=params, user_defined_macros={"conf_value": conf_value},
+              params=params, user_defined_macros={"conf_value": conf_value,
+                                                  "sample_summary": lambda ti: sample_summary(ti, task_ids)},
               tags=_names(dag_config.get("tags")) or DEFAULT_TAGS)
 
     def run(scope_index: Optional[int], **context):
@@ -333,10 +370,12 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
         scopes = [{}]
     timeout = _minutes(dag_config, "execution_timeout_minutes", DEFAULT_TIMEOUT)
     pool = {"pool": dag_config["pool"]} if dag_config.get("pool") else {}
+    task_ids = []   # filled below: the summary macro reads the run tasks' reports
     tasks = [PythonOperator(task_id=_task_id(scope, i, scopes), dag=dag, python_callable=run,
                             op_kwargs={"scope_index": i if dag_config.get("runs") else None},
                             execution_timeout=timeout, show_return_value_in_logs=False, **pool)
              for i, scope in enumerate(scopes)]
+    task_ids.extend(t.task_id for t in tasks)
 
     given = "{{ conf_value(dag_run, params, '%s') }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
@@ -358,4 +397,12 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
                              html_content=f"DAG {dag_id} run {{{{ run_id }}}} failed")
         upstream >> success
         upstream >> fail
+
+    notify = _names(dag_config.get("notify_recipients"))
+    if notify:
+        load_env = dag_config.get("load_env") or dag_config.get("environment") or ""
+        ready = EmailOperator(task_id="sample_ready_email", dag=dag, to=notify, trigger_rule="all_success",
+                              subject=f"{load_env} sample ready: {dag_id} {{{{ ds }}}}".strip(),
+                              html_content=f"<p>DAG {dag_id} run {{{{ run_id }}}}:</p>{{{{ sample_summary(ti) }}}}")
+        tasks >> ready
     return dag

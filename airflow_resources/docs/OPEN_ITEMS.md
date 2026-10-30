@@ -17,8 +17,9 @@ any answer: they become rows.
 | Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) | LEVEL `parent_path`, `shortfall_policy`, `fail_on_shortfall` |
 | Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation | `diversity_expr`, `diversity_cap` |
 | Q10 | The output table's database and name, its columns, and whether GRE exceptions go into it | `output_table`, OUTPUT rules |
-| Q11 | Scheduled (which day and time, Central) or triggered by the framework after its load (which DAG, and which of its values to accept: `trigger_keys`) | Variable `schedule_interval`, `trigger_keys` |
+| Q11 | Scheduled (which day and time, Central), or started by a framework step (which one: EXPORT_LOAD, BATCH_CLOSE …)? Which framework table and status say a batch is ready to sample? How late can it be (retries × delay)? | Variable `schedule_interval` / framework `trigger_dags`, `trigger_keys`, a GATE rule, `retries`, `retry_delay_minutes` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
+| Q13 | Who receives the "sample ready" email | Variable `notify_recipients` |
 
 ## B. Data the requirements need that sampling cannot supply
 

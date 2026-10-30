@@ -31,8 +31,11 @@ from datetime import date, datetime
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+# one engine for both versions: the package deployed to Airflow (airflow/sampling); its DAG module (dags.py) is
+# the only part that imports Airflow, and it is not imported here
+_ENGINE_DIR = _HERE.parent / "airflow"
+if str(_ENGINE_DIR) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_DIR))
 
 from sampling import __version__  # noqa: E402
 from sampling.db import connect_teradata, error_text  # noqa: E402

@@ -27,6 +27,10 @@ INSERT INTO {{META_DB}}.gre_sampling_config (
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
 VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'TODO(Q6) SELECT ... FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1');
 
+-- TODO(Q11): sample only when the framework says the batch is ready
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, description)
+VALUES (205, 2, 0, 'GATE', 1, 'BATCH_READY', 'TODO(Q11) SELECT 1 FROM <framework control table> WHERE ... = ''{batch_id}'' AND <ready>', 'the batch is ready to sample');
+
 -- TODO(Q4): exclusions (auto-approvals, SHRPA / no PA required, diabetic supplies)
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
 VALUES (211, 2, 0, 'EXCLUSION', 1, 'AUTO_APPROVED', 'SQL', 'TODO(Q4)');

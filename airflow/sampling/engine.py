@@ -6,6 +6,7 @@ value is known to this code (sql/schema.sql describes every table):
     gre_sampling_config   universe, scope_sql, key columns, size, method, diversity, output table
     gre_sampling_rule     one row per rule, rule_class saying what it is:
         PARAM             a run parameter looked up by SQL ({batch_id} = the latest batch, ...)
+        GATE              a readiness check: a SELECT that must return a row, or the run waits (is retried)
         EXCLUSION         an exclusion rule (SQL condition, or "selected by an earlier run")
         PRIORITY          a priority criterion (SQL condition / expression, or history based)
         LEVEL             a stratification level (by an expression's value, or by its buckets' conditions),
@@ -18,6 +19,7 @@ One run = one gre_sampling_config row:
 
     look up parameters        PARAM rules
     run row (RUNNING)         gre_sampling_run
+    gates                     every GATE rule must return a row (e.g. "the batch is closed"), else GATE_NOT_MET
     pull                      one SELECT of the scope: key columns + one flag / value column per bucket condition,
                               level, exclusion rule and priority criterion (all evaluated by Teradata)
     exclude                   first matching exclusion rule is the reason; history rules read earlier runs
@@ -79,12 +81,13 @@ NULL_BUCKET = "NULL"
 OUTPUT_META_COLS = ("sample_run_id", "config_id", "run_key", "sample_cycle", "case_key", "selection_order",
                     "priority_rank", "stratum_path", "etl_is_curr_ind", "load_datetime")
 OUTPUT_KEY_CHUNK = 50
-RULE_CLASSES = ("PARAM", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "OUTPUT")
+RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "OUTPUT")
 # the optional gre_sampling_rule columns each class reads (any other one set is reported)
 _AUDIT_COLUMNS = ("load_datetime", "last_updated_datetime", "created_by", "last_updated_by")
 _RULE_COLUMNS = ("rule_type", "rule_sql", "level_order", "parent_path", "unlisted_policy", "quota_mode",
                  "target_fraction", "max_count", "sort_dir", "lookback_days", "history_scope")
 _USED = {"PARAM": {"rule_sql"},
+         "GATE": {"rule_sql"},
          "EXCLUSION": {"rule_type", "rule_sql", "lookback_days", "history_scope"},
          "PRIORITY": {"rule_type", "rule_sql", "sort_dir", "lookback_days", "history_scope"},
          "LEVEL": {"rule_sql", "level_order", "parent_path", "unlisted_policy"},
@@ -128,6 +131,7 @@ class Sample:
     """One gre_sampling_config row and its gre_sampling_rule rows, by class, each list in its order."""
     config: dict
     params: list = field(default_factory=list)
+    gates: list = field(default_factory=list)
     exclusions: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
     levels: list = field(default_factory=list)       # LEVEL rows, each with "buckets": [its BUCKET rows]
@@ -184,7 +188,7 @@ def build_sample(config: dict, rules: list) -> Sample:
     for r in ordered:
         r["rule_class"] = _up(r.get("rule_class"))
         by_class.get(r["rule_class"], sample.stray).append(r)
-    sample.params, sample.exclusions = by_class["PARAM"], by_class["EXCLUSION"]
+    sample.params, sample.gates, sample.exclusions = by_class["PARAM"], by_class["GATE"], by_class["EXCLUSION"]
     sample.priorities, sample.output_cols = by_class["PRIORITY"], by_class["OUTPUT"]
     levels = sorted(by_class["LEVEL"], key=lambda r: (r.get("level_order") is None, r.get("level_order") or 0,
                                                       r["rule_id"]))
@@ -247,6 +251,10 @@ def config_problems(sample: Sample) -> list:
         if not _text(p):
             problems.append(f"PARAM rule {p.get('rule_name')}: rule_sql is empty")
 
+    for g in sample.gates:
+        if not _text(g):
+            problems.append(f"GATE rule {g.get('rule_name')}: rule_sql is empty")
+
     for x in sample.exclusions:
         name, kind = x.get("rule_name"), _up(x.get("rule_type"), "SQL")
         if kind not in EXCLUSION_TYPES:
@@ -299,7 +307,7 @@ def config_problems(sample: Sample) -> list:
 def _rules_of(sample: Sample, cls: str) -> list:
     if cls == "BUCKET":
         return [b for lvl in sample.levels for b in lvl["buckets"]]
-    return {"PARAM": sample.params, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
+    return {"PARAM": sample.params, "GATE": sample.gates, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
             "LEVEL": sample.levels, "OUTPUT": sample.output_cols}[cls]
 
 
@@ -429,6 +437,20 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
             raise LookupError(f"run parameter {name}: its rule_sql returned no value")
         params[name] = value.isoformat() if isinstance(value, date) else value
     return params
+
+
+def gate_queries(sample: Sample, s: Settings, params: dict) -> list:
+    """(rule, SQL) of every GATE rule, $env and parameters resolved."""
+    return [(g, substitute_params(s.resolve_env(_text(g), identifier=False), params)) for g in sample.gates]
+
+
+def unmet_gates(conn: Connection, s: Settings, sample: Sample, params: dict) -> list:
+    """The GATE rules whose SELECT returned no row: 'name (description)' each."""
+    out = []
+    for gate, text in gate_queries(sample, s, params):
+        if not conn.query(text):
+            out.append(f"{gate['rule_name']}" + (f" ({gate['description']})" if gate.get("description") else ""))
+    return out
 
 
 def case_key(row: dict, keys: list) -> str:
@@ -944,8 +966,17 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         return fail("config", "CONFIG_ERROR", "; ".join(problems))
     try:
         queries = build_queries(sample, s, params)
+        summary["output_table"] = queries.get("output_table")
+        gate_queries(sample, s, params)
     except (ValueError, KeyError) as e:
         return fail("config", "CONFIG_ERROR", e)
+    try:
+        waiting = unmet_gates(conn, s, sample, params)
+    except Exception as e:  # noqa: BLE001
+        return fail("technical", "GATE_FAILURE", e, traceback.format_exc())
+    if waiting:
+        # technical: the data may be ready on a retry
+        return fail("technical", "GATE_NOT_MET", "not ready yet: " + "; ".join(waiting))
 
     try:
         if queries["count"]:
@@ -1173,6 +1204,8 @@ def validate(conn: Connection, s: Settings, config_id=None, project: Optional[st
                 for key in ("pull", "count", "output"):
                     if queries.get(key):
                         conn.query("EXPLAIN " + queries[key] + (" AND 1=0" if key == "output" else ""))
+                for _, text in gate_queries(sample, s, params):
+                    conn.query("EXPLAIN " + text)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"SQL check failed: {error_text(e)}")
         out.append({"config_id": cid, "sample_name": sample.config.get("sample_name"), "problems": problems})

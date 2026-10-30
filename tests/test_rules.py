@@ -234,3 +234,33 @@ def test_rule_rows_are_validated(raw, conn, settings):
                  "add up to 1.3000", "not used with quota_mode ALL", "PARAM rule p: quota_mode is not used",
                  "rule_class 'TYPO'", "level_order 7, which has no LEVEL"):
         assert text in problems, (text, problems)
+
+
+# ── gates: wait until the data is ready ────────────────────────────────────
+
+def test_gate_waits_until_its_select_returns_a_row(raw, conn, settings):
+    _universe(raw.db, _cases("o", 5, "D", batch="B1"))
+    raw.db.execute("CREATE TABLE batch_control (batch VARCHAR, status VARCHAR)")
+    raw.db.execute("INSERT INTO batch_control VALUES ('B1', 'OPEN')")
+    _config(raw.db, 2)
+    set_config(raw.db, scope_sql="batch = '{batch_id}'")
+    insert_rule(raw.db, "PARAM", 1, "batch_id", seq_no=1, rule_sql="SELECT MAX(batch) FROM u")
+    insert_rule(raw.db, "GATE", 2, "BATCH_CLOSED", rule_sql="SELECT 1 FROM batch_control WHERE batch = '{batch_id}' "
+                                                            "AND status = 'CLOSED'", description="batch closed")
+    out = _run(conn, settings, run_key="{batch_id}")
+    assert out["error_type"] == "GATE_NOT_MET" and out["error_kind"] == "technical"   # Airflow retries it
+    assert "BATCH_CLOSED (batch closed)" in out["error"]
+    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0
+    raw.db.execute("UPDATE batch_control SET status = 'CLOSED'")
+    again = _run(conn, settings, run_key="{batch_id}")
+    assert again["status"] == "COMPLETED" and again["run_key"] == "B1" and again["selected"] == 2
+    assert _rows(raw, "SELECT status FROM gre_sampling_run ORDER BY started_at") == [("ERROR",), ("COMPLETED",)]
+
+
+def test_a_broken_gate_is_reported(raw, conn, settings):
+    _universe(raw.db, _cases("o", 3, "D"))
+    _config(raw.db, 2)
+    insert_rule(raw.db, "GATE", 1, "BROKEN", rule_sql="SELECT 1 FROM no_such_table")
+    assert _run(conn, settings)["error_type"] == "GATE_FAILURE"
+    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = NULL")
+    assert _run(conn, settings)["error_type"] == "CONFIG_ERROR"

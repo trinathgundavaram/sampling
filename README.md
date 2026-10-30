@@ -16,8 +16,8 @@ Every run keeps the rules it used (with a hash). A sample can be finalised (a re
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.
 
 ```
-airflow/                 DAG file + sampling/ package (engine.py, db.py, settings.py shared with local/)
-local/                   run_sampling.py, dev.env.example, sampling/ (same engine)
+airflow/                 DAG file + sampling/ package: the engine (engine.py, db.py, settings.py) and dags.py
+local/                   run_sampling.py, dev.env.example (imports the engine from airflow/sampling)
 sql/                     schema.sql (4 tables), schema_drop.sql, output_table_template.sql, seed/
 airflow_resources/       docs, the example Variable, worker requirements
 tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests need apache-airflow 3
