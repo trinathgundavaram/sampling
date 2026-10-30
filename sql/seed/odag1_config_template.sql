@@ -7,6 +7,12 @@
 -- act_ind = 1 on the rows and run
 --   python local/run_sampling.py validate --config-id 2 --check-sql
 --
+-- Decided (OPEN_ITEMS.md): one weekly sample per framework WKLY batch of
+-- ODAG1 (Q6), started by hand (Q11), cases identified by AUTHZN_ID +
+-- SRC_DATA_KEY (Q5), short buckets topped up without failing the run (Q8),
+-- no repeat within 90 days and the last 14 days' unselected cases first (Q12),
+-- no code-variety rule yet (Q9), every row kept 10 years: no purge (Q14).
+--
 -- Not loaded by deploy-schema --seed. Load it by hand once the TODOs are gone.
 -- ============================================================================
 
@@ -17,19 +23,26 @@ INSERT INTO {{META_DB}}.gre_sampling_config (
 ) VALUES (
     2, 0, 'UMCM', 'COMO_WEEKLY_SAMPLE', 'COMO_WEEKLY_SAMPLE',
     'EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1',
-    'TODO(Q5) the columns identifying one case, e.g. AUTHZN_ID',
-    'ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q6) batch or decision-date scope',
-    150, 'RANKED', 'FLOOR', 'TODO(Q9) code-variety expression or NULL', NULL,
-    'TODO(Q8) TOPUP or NONE', 1, 'TODO(Q10) database.table of the output snapshot', 'TEMPLATE'
+    'AUTHZN_ID, SRC_DATA_KEY',
+    'ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND BTCH_ID = ''{batch_id}''',
+    150, 'RANKED', 'FLOOR', NULL, NULL,
+    'TOPUP', 1, 'TODO(Q10) database.table of the output snapshot', 'TEMPLATE'
 );
 
--- TODO(Q6): a run parameter, e.g. the latest framework batch
+-- batch_id: the latest ODAG1 WKLY batch whose every source row is closed (a run
+-- given batch_id=... samples that batch instead). A framework batch is one
+-- ComplianceRequestControl row per source. TODO(Q15) that table's database per
+-- environment, and the Project_Cd of ODAG1 there (CMSUNIV in its example setup).
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
-VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'TODO(Q6) SELECT ... FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1');
+VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM TODO_Q15.ComplianceRequestControl WHERE Project_Cd = ''CMSUNIV'' AND Table_Nm = ''ODAG1'' AND Run_Ty = ''WKLY'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches');
 
--- TODO(Q11): sample only when the framework says the batch is ready
+-- never sample a batch with a source still open (also when batch_id is given by hand)
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, description)
-VALUES (205, 2, 0, 'GATE', 1, 'BATCH_READY', 'TODO(Q11) SELECT 1 FROM <framework control table> WHERE ... = ''{batch_id}'' AND <ready>', 'the batch is ready to sample');
+VALUES (205, 2, 0, 'GATE', 1, 'BATCH_CLOSED', 'SELECT 1 FROM TODO_Q15.ComplianceRequestControl WHERE Btch_ID = ''{batch_id}'' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1', 'every source of the WKLY batch is closed');
+
+-- Q12: no case twice within 90 days
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
+VALUES (210, 2, 0, 'EXCLUSION', 0, 'SELECTED_IN_LAST_90_DAYS', 'PRIOR_SELECTION', 90, 'CONFIG');
 
 -- TODO(Q4): exclusions (auto-approvals, SHRPA / no PA required, diabetic supplies)
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
@@ -38,6 +51,10 @@ INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_cla
 VALUES (212, 2, 0, 'EXCLUSION', 2, 'NO_PA_REQUIRED', 'SQL', 'TODO(Q4)');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
 VALUES (213, 2, 0, 'EXCLUSION', 3, 'DIABETIC_SUPPLIES', 'SQL', 'TODO(Q4)');
+
+-- Q12: the unselected candidates of the last 14 days first
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
+VALUES (220, 2, 0, 'PRIORITY', 0, 'CARRY_OVER_14_DAYS', 'PRIOR_CANDIDATE', 14, 'CONFIG');
 
 -- TODO(Q3): priorities (Revision has no ODAG1 column yet), then the others in order
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
