@@ -1,0 +1,16 @@
+{
+  "td_conn_var": "DEV",
+  "meta_db": "HSABC_DEV",
+  "load_env": "DEV",
+  "email_recipient": "TRINATH_gundavaram@example.com",
+  "project": "UMCM",
+  "process_name": "UMCM_WEEKLY_SAMPLE",
+  "run_params": {},
+  "schedule_interval": null,
+  "log_level": "INFO",
+  "retries": 1,
+  "execution_timeout_minutes": 120,
+  "fail_on_shortfall": false,
+  "tags": ["Compliance", "Sampling", "UMCM"],
+  "trigger_dags": []
+}

@@ -1,0 +1,5 @@
+# Installed into the Airflow 3 workers' environment (not Airflow's own dependencies). Python >= 3.9.
+apache-airflow-providers-standard>=1.0   # PythonOperator, TriggerDagRunOperator (shipped with Airflow 3)
+apache-airflow-providers-smtp>=2.0       # success_email / fail_email
+teradatasql>=17.20.0.0
+tzdata>=2023.3
