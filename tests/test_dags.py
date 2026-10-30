@@ -96,6 +96,19 @@ def test_config_problem_fails_without_retry(monkeypatch, variable, raw):
         _run_task(monkeypatch, raw)
 
 
+def test_a_final_sample_is_not_replaced_by_the_dag(monkeypatch, variable, raw, settings):
+    from airflow.sdk.exceptions import AirflowFailException
+    from sampling.db import Connection
+    from sampling.engine import finalize_run
+    monkeypatch.setattr(raw, "close", lambda: None)   # the task closes its connection: keep the test DB
+    build_universe(raw.db)
+    um_config(raw.db)
+    _run_task(monkeypatch, raw)
+    finalize_run(Connection(raw, access_lock=False), settings, 1, "2026-08-01", "auditor")
+    with pytest.raises(AirflowFailException):        # FINALIZED is a configuration problem: no retry
+        _run_task(monkeypatch, raw)
+
+
 def test_technical_problem_is_retried(monkeypatch, variable, raw):
     build_universe(raw.db)
     um_config(raw.db)

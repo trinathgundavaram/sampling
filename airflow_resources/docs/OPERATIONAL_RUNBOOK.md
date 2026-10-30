@@ -39,8 +39,13 @@ and one rule row per rule. No field name and no value is in the code. A new samp
 not a release.
 
 Every run is recorded: what was in scope, what was excluded and why, every candidate's group and rank, what was
-selected, the counts per rule and per group, and the outcome. A rerun of the same cycle replaces the earlier sample
-as the current one; nothing is ever deleted.
+selected, the counts per rule and per group, the outcome, and **the exact configuration and rules it used** (with a
+hash, so two runs made by the same rules are recognisable). A rerun of the same cycle replaces the earlier sample as
+the current one; nothing is ever deleted.
+
+Once the auditors start on a sample it can be **finalised**: a rerun of that cycle is then refused unless someone
+gives a reason, which is recorded. A case the auditors cannot review can be **replaced** by the next candidate of
+its group, with the reason and who did it recorded on both cases.
 
 ## 2. The life of a run
 
@@ -49,7 +54,7 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 | Step | What happens | Configured in | Fails as |
 |---|---|---|---|
 | 1. Parameters | Each PARAM rule runs in `seq_no` order; the first column of the first row becomes `{rule_name}`. Values passed with the run win. `{as_of_date}` is always there. The `run_key` template is filled (`{batch_id}` → `B42`) | PARAM rules, the run's `run_params`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
-| 2. Run row | `gre_sampling_run` row, status `RUNNING` | – | – |
+| 2. Run row | `gre_sampling_run` row, status `RUNNING`, with the `config_hash` of the rules loaded. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
 | 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
 | 4. Pull | One `SELECT` of the universe rows in `scope_sql`. Teradata evaluates every bucket condition, exclusion rule and priority criterion as a column of that pull | `gre_sampling_config` | `PULL_FAILURE` |
 | 5. Exclude | A row matching any EXCLUSION rule is not a candidate; the first matching rule (`seq_no`) is its reason. History rules read earlier runs | EXCLUSION rules | |
@@ -59,6 +64,7 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 | 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap still holds) | `shortfall_policy` | |
 | 10. Snapshot | The selected cases' OUTPUT values are read back from the universe | `output_table`, OUTPUT rules | `OUTPUT_FAILURE` |
 | 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, snapshot; the earlier current run of the same `(config_id, run_key)` → `etl_is_curr_ind = 'N'`; run row → `COMPLETED`, current, with its `run_report` | `keep_excluded` | `PERSIST_FAILURE` (nothing half written) |
+| Later | `finalize` makes the sample `FINAL`; `replace` swaps a case (see [10.8](#108-finalise-a-sample), [10.9](#109-replace-a-case)) | – | – |
 
 A failure closes the run row as `ERROR` with `error_type`, `error_message` and (technical errors) the traceback in
 `error_detail`. A configuration problem fails the task at once; a technical one is retried (`retries`).
@@ -183,15 +189,22 @@ table once from `sql/output_table_template.sql` (the engine never creates or alt
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `gre_sampling_run` | run attempt | `status`, `etl_is_curr_ind`, `run_key`, `random_seed`, `run_params_txt`, totals, `shortfall`, `error_type`, `error_message`, `error_detail`, `run_report` |
-| `gre_sample_selections` | candidate and excluded row of a run | `selected_flag`, `selection_order`, `priority_rank`, `excluded_flag`, `exclusion_reason`, `stratum_path`, `etl_is_curr_ind` |
+| `gre_sampling_run` | run attempt | `status`, `etl_is_curr_ind`, `run_key`, `random_seed`, `run_params_txt`, totals, `shortfall`, `error_type`, `error_message`, `error_detail`, `run_report`, `config_hash`, `finalized_by` / `finalized_at`, `override_reason` |
+| `gre_sample_selections` | candidate and excluded row of a run | `selected_flag`, `selection_order`, `priority_rank`, `excluded_flag`, `exclusion_reason`, `stratum_path`, `selection_status`, `linked_case_key`, `status_reason` / `status_by` / `status_at`, `etl_is_curr_ind` |
 
 **Current sample** of a cycle: `etl_is_curr_ind = 'Y'` for its `(config_id, run_key)`, on the run row and on its
 selections. A successful rerun turns the earlier rows to `N` (with `last_updated_datetime`) in the same transaction
 that writes the new ones; a failed rerun leaves the earlier sample current.
 
-**`run_report`** (JSON): `{"exclusions": {rule_name: count}, "buckets": {path: {"candidates", "target",
-"selected"}}}` – every bucket node, not only the leaves (`Denied` and `Denied/Part B`).
+**`run_report`** (JSON): `{"config_hash", "config": {"config": the config row, "rules": [the active rule rows]},
+"exclusions": {rule_name: count}, "buckets": {path: {"candidates", "target", "selected"}}}` – every bucket node, not
+only the leaves (`Denied` and `Denied/Part B`). A failed run has the `config` part only. `config_hash` is the
+SHA-256 of that `config` part, without who changed a row and when: equal hashes = the same rules.
+
+**`selection_status`**: `SELECTED` for the cases the run picked; `REPLACED` for a case taken out later
+(`selected_flag` back to 0) and `REPLACEMENT` for the case put in for it (`selected_flag` 1, the same
+`selection_order`); `linked_case_key` points from each to the other. The current sample is always
+`selected_flag = 1`.
 
 **`stratum_path`** is the case's bucket at every level, `/` separated: the group per level of any candidate, and
 counts per bucket, are a `GROUP BY` on it.
@@ -220,8 +233,9 @@ counts per bucket, are a `GROUP BY` on it.
 ### 6.3 Statuses and error types
 | Column | Values |
 |---|---|
-| `gre_sampling_run.status` | `RUNNING`, `COMPLETED`, `ERROR` |
-| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `gre_sampling_run.status` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
+| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `gre_sample_selections.selection_status` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
 | Token | Value |
@@ -281,8 +295,10 @@ From `local/`, with `dev.env` (copy of `dev.env.example`: Teradata login and `SA
 | `deploy-schema [--dry-run] [--drop-first] [--seed]` | Creates the 4 tables (and the example rows) | DDL |
 | `validate --config-id N [--check-sql] [--run-param k=v]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
 | `show-config --config-id N` | Every rule of a config, by class, and its problems (JSON) | – |
-| `run --config-id N \| --project P \| --process-name X [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run]` | Runs the sample(s) | yes, except `--dry-run` |
-| `runs [--config-id N] [--status S]` | Recent run rows | – |
+| `run --config-id N \| --project P \| --process-name X [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
+| `finalize --config-id N --run-key K [--by U]` | Makes the current sample of the cycle `FINAL` | run row |
+| `replace --config-id N --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, output |
+| `runs [--config-id N] [--status S]` | Recent run rows (with `config_hash`, `finalized_by`, `override_reason`) | – |
 | `errors [--config-id N]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
 
@@ -338,7 +354,25 @@ turns `etl_is_curr_ind = 'N'` everywhere, the snapshot table included.
 
 ### 10.7 Change a mix, a rule, a priority
 New rule rows, or `act_ind = 0` on the old ones, then `validate --check-sql` and a `--dry-run`. The next run uses
-them; earlier runs are not changed.
+them; earlier runs are not changed. The new run's `config_hash` differs from the previous one; the old rules stay
+readable in the old run's `run_report`.
+
+### 10.8 Finalise a sample
+When the auditors start on a cycle: `finalize --config-id N --run-key K`. From then on a run of that run key, by the
+DAG or by hand, fails as `FINALIZED` (no retry) and the final sample stays current. To replace it anyway (e.g. the
+rules were wrong), with sign-off: `run --config-id N --run-key K --force-reason "<why, approved by whom>"` – the
+reason is stored on the new run row, and the final run stays recorded with `etl_is_curr_ind = 'N'`. A force is only
+possible from the command line, never from a DAG trigger.
+
+### 10.9 Replace a case
+A selected case cannot be reviewed (no record, duplicate …):
+`replace --config-id N --run-key K --case-key "<case_key>" --reason "<why>"`. The next candidate of the same bucket
+in priority order goes in (RANDOM: a draw seeded by the run's seed, the same every time), with the same
+`selection_order`; the output snapshot gets its row and the old row turns `etl_is_curr_ind = 'N'`, evaluated with
+the rules of that run (its snapshot), not today's. When the bucket has no candidate left, `--any-bucket` takes the
+next one overall (the mix then differs from the quotas: the reason records why). Allowed on a `FINAL` sample. A
+replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycles. Not checked by a replacement:
+`diversity_cap`.
 
 ## 11. First run on DEV (checklist)
 
@@ -349,3 +383,4 @@ them; earlier runs are not changed.
 5. `run --config-id N --dry-run`: check the report's `exclusions`, `buckets` and `by_stratum`.
 6. `run --config-id N`; check 10.1 – 10.3 and the snapshot table.
 7. Deploy the DAG, set the Connection and the Variable, trigger with `dry_run`, then for real.
+8. Try `finalize`, a rerun (expect `FINALIZED`) and `replace` on a DEV cycle, so the team knows them before audit.

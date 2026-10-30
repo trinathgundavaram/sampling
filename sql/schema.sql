@@ -133,14 +133,21 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_run (
     total_candidates   INTEGER,
     total_selected     INTEGER,
     shortfall          INTEGER,                        -- target_volume - total_selected
-    status             VARCHAR(20),                    -- RUNNING | COMPLETED | ERROR
+    status             VARCHAR(20),                    -- RUNNING | COMPLETED | ERROR | FINAL (finalised:
+                                                       -- a rerun of its run_key needs a force reason)
     error_type         VARCHAR(50),                    -- CONFIG_ERROR | PARAM_FAILURE | PULL_FAILURE |
                                                        -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
-                                                       -- ABANDONED (closed by mark-failed)
+                                                       -- ABANDONED (closed by mark-failed) |
+                                                       -- FINALIZED (its run_key's sample is final)
     error_message      VARCHAR(2000),
     error_detail       CLOB,                           -- traceback (technical errors)
     run_report         CLOB,                           -- JSON: count per exclusion rule, candidates / target /
-                                                       -- selected per bucket
+                                                       -- selected per bucket, the config and rule rows used
+    config_hash        VARCHAR(64),                    -- SHA-256 of the config and rule rows used: equal
+                                                       -- hashes = same rules
+    override_reason    VARCHAR(1000),                  -- why this run replaced a FINAL run (force)
+    finalized_by       VARCHAR(100),
+    finalized_at       TIMESTAMP(6),
     etl_is_curr_ind    CHAR(1) DEFAULT 'N',            -- Y = the run whose sample is current for its
                                                        -- (config_id, run_key)
     triggered_by       VARCHAR(100),                   -- airflow-scheduled, airflow-manual-<user>, local-<user>
@@ -170,9 +177,15 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sample_selections (
     excluded_flag      BYTEINT DEFAULT 0,              -- 1 = left out by an exclusion rule
     exclusion_reason   VARCHAR(200),                   -- the first exclusion rule that matched
     stratum_path       VARCHAR(1000),                  -- the case's bucket at every level, e.g. Denied/Part B
+    selection_status   VARCHAR(20),                    -- SELECTED | REPLACED (taken out of the sample) |
+                                                       -- REPLACEMENT (put in for a REPLACED case) | NULL
+    linked_case_key    VARCHAR(500),                   -- REPLACED: its replacement, REPLACEMENT: the case replaced
+    status_reason      VARCHAR(1000),                  -- why it was replaced
+    status_by          VARCHAR(100),
+    status_at          TIMESTAMP(6),
     etl_is_curr_ind    CHAR(1) DEFAULT 'Y',            -- Y = current run of its (config_id, run_key)
     load_datetime      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    last_updated_datetime TIMESTAMP(6)                 -- set when etl_is_curr_ind turns N
+    last_updated_datetime TIMESTAMP(6)                 -- set when etl_is_curr_ind turns N or the case is replaced
 )
 PRIMARY INDEX (sample_run_id);
 

@@ -6,6 +6,9 @@
     python run_sampling.py show-config --config-id 1
     python run_sampling.py runs --config-id 1
     python run_sampling.py errors
+    python run_sampling.py finalize --config-id 1 --run-key B42
+    python run_sampling.py replace --config-id 1 --run-key B42 --case-key "AUTHZN_ID=123" --reason "no record"
+    python run_sampling.py run --config-id 1 --run-key B42 --force-reason "rules corrected, approved by ..."
     python run_sampling.py mark-failed --run-id <run_id>
     python run_sampling.py test-connection
     python run_sampling.py deploy-schema --dry-run [--drop-first] [--seed]
@@ -33,7 +36,8 @@ if str(_HERE) not in sys.path:
 
 from sampling import __version__  # noqa: E402
 from sampling.db import connect_teradata, error_text  # noqa: E402
-from sampling.engine import config_problems, load_config, run_scope, validate  # noqa: E402
+from sampling.engine import (config_problems, finalize_run, load_config, replace_case, run_scope,  # noqa: E402
+                             validate)
 from sampling.settings import ConfigError, Settings  # noqa: E402
 
 log = logging.getLogger("sampling.cli")
@@ -124,9 +128,22 @@ def cmd_run(conn, s, args) -> tuple:
     as_of = date.fromisoformat(args.as_of) if args.as_of else None
     out = run_scope(conn, s, **_scope(args), run_key=args.run_key, run_params=_run_params(args), seed=args.seed,
                     as_of=as_of, triggered_by=args.triggered_by or f"local-{getpass.getuser()}",
-                    dry_run=args.dry_run)
+                    dry_run=args.dry_run, force_reason=args.force_reason)
     problems = out["failed"] or any(r.get("shortfall") for r in out["runs"])
     return out, 1 if problems else 0
+
+
+def _user(args) -> str:
+    return args.by or getpass.getuser()
+
+
+def cmd_finalize(conn, s, args) -> tuple:
+    return finalize_run(conn, s, args.config_id, args.run_key, _user(args)), 0
+
+
+def cmd_replace(conn, s, args) -> tuple:
+    return replace_case(conn, s, args.config_id, args.run_key, args.case_key, args.reason, _user(args),
+                        any_bucket=args.any_bucket), 0
 
 
 def cmd_validate(conn, s, args) -> tuple:
@@ -148,7 +165,7 @@ def cmd_runs(conn, s, args) -> tuple:
             where.append(f"{col} = ?")
             params.append(value)
     rows = conn.query(f"SELECT TOP {int(args.limit)} run_id, run_key, config_id, sample_name, status, "
-                      f"etl_is_curr_ind, sampling_method, random_seed, target_volume, total_in_scope, "
+                      f"etl_is_curr_ind, config_hash, finalized_by, override_reason, sampling_method, random_seed, target_volume, total_in_scope, "
                       f"total_excluded, total_candidates, total_selected, shortfall, started_at, ended_at, "
                       f"triggered_by, error_type, error_message FROM {s.meta_db}.gre_sampling_run "
                       f"WHERE {' AND '.join(where)} ORDER BY started_at DESC", params)
@@ -237,7 +254,7 @@ def cmd_deploy_schema(conn, s, args) -> tuple:
 
 COMMANDS = {"run": cmd_run, "validate": cmd_validate, "show-config": cmd_show_config, "runs": cmd_runs,
             "errors": cmd_errors, "mark-failed": cmd_mark_failed, "test-connection": cmd_test_connection,
-            "deploy-schema": cmd_deploy_schema}
+            "deploy-schema": cmd_deploy_schema, "finalize": cmd_finalize, "replace": cmd_replace}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -262,6 +279,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--seed", type=int, help="RANDOM / SYSTEMATIC seed (default: a new one)")
     r.add_argument("--triggered-by", help="recorded on the run row (default local-<user>)")
     r.add_argument("--dry-run", action="store_true", help="count and select, write nothing")
+    r.add_argument("--force-reason", help="replace a FINAL sample of the run key (recorded on the run row)")
+
+    fz = sub.add_parser("finalize", help="make the current sample of a run key final")
+    fz.add_argument("--config-id", type=int, required=True)
+    fz.add_argument("--run-key", required=True)
+    fz.add_argument("--by", help="recorded as finalized_by (default: your user name)")
+
+    rp = sub.add_parser("replace", help="replace one selected case by the next candidate of its bucket")
+    rp.add_argument("--config-id", type=int, required=True)
+    rp.add_argument("--run-key", required=True)
+    rp.add_argument("--case-key", required=True, help="as in gre_sample_selections.case_key")
+    rp.add_argument("--reason", required=True)
+    rp.add_argument("--any-bucket", action="store_true", help="take the next candidate of any bucket when its "
+                                                              "own has none left")
+    rp.add_argument("--by", help="recorded as status_by (default: your user name)")
 
     v = sub.add_parser("validate", help="check the configs of a scope")
     scope(v)
@@ -277,7 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-key")
         sp.add_argument("--limit", type=int, default=20)
         if name == "runs":
-            sp.add_argument("--status", choices=("RUNNING", "COMPLETED", "ERROR"))
+            sp.add_argument("--status", choices=("RUNNING", "COMPLETED", "FINAL", "ERROR"))
 
     mf = sub.add_parser("mark-failed", help="close a run left RUNNING by a crashed process")
     mf.add_argument("--run-id", required=True)

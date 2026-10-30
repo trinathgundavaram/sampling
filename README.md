@@ -12,6 +12,9 @@ Like the GRE rules engine, what a sample selects is **rows holding SQL**: exclus
 buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
 (no repeats, carry-over), code variety, and an output snapshot. No field name or value is in the code.
 
+Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
+and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.
+
 ```
 airflow/                 DAG file + sampling/ package (engine.py, db.py, settings.py shared with local/)
 local/                   run_sampling.py, dev.env.example, sampling/ (same engine)

@@ -33,11 +33,22 @@ One run = one gre_sampling_config row:
                               the counts per rule and bucket (run_report)
     on failure                run row -> ERROR with error_type, message and traceback (nothing half written)
 
+Audit defensibility:
+
+    rules snapshot            every run stores the config and rule rows it used (run_report) and their SHA-256
+                              (config_hash): a sample can always be explained by the rules that made it
+    finalise                  finalize_run(): the current sample of a run_key becomes FINAL; a rerun of that
+                              run_key is refused (FINALIZED) unless given a force_reason, which is recorded
+    replace a case            replace_case(): a selected case comes out (REPLACED, with the reason and who) and
+                              the next candidate of the same bucket goes in (REPLACEMENT), in priority order
+                              (RANDOM: a seeded draw); the output snapshot follows
+
 Reproducible: one seed per run (on the run row); every leaf draws from its own generator seeded with
 (seed, bucket path), so a draw never depends on the order buckets are visited.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -70,6 +81,7 @@ OUTPUT_META_COLS = ("sample_run_id", "config_id", "run_key", "sample_cycle", "ca
 OUTPUT_KEY_CHUNK = 50
 RULE_CLASSES = ("PARAM", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "OUTPUT")
 # the optional gre_sampling_rule columns each class reads (any other one set is reported)
+_AUDIT_COLUMNS = ("load_datetime", "last_updated_datetime", "created_by", "last_updated_by")
 _RULE_COLUMNS = ("rule_type", "rule_sql", "level_order", "parent_path", "unlisted_policy", "quota_mode",
                  "target_fraction", "max_count", "sort_dir", "lookback_days", "history_scope")
 _USED = {"PARAM": {"rule_sql"},
@@ -121,6 +133,8 @@ class Sample:
     levels: list = field(default_factory=list)       # LEVEL rows, each with "buckets": [its BUCKET rows]
     output_cols: list = field(default_factory=list)
     stray: list = field(default_factory=list)        # rows of an unknown class, or buckets of no level
+    snapshot: dict = field(default_factory=dict)     # {"config": row, "rules": [rows]} as loaded
+    config_hash: str = ""
 
     @property
     def config_id(self):
@@ -149,11 +163,25 @@ def load_config(conn: Connection, s: Settings, config_id) -> Sample:
     rows = conn.query(f"SELECT * FROM {db}.gre_sampling_config WHERE config_id = ? AND act_ind = 1", [config_id])
     if not rows:
         raise ConfigError(f"no active gre_sampling_config row for config_id={config_id}")
-    rules = conn.query(f"SELECT * FROM {db}.gre_sampling_rule WHERE config_id = ? AND act_ind = 1 "
-                       f"ORDER BY seq_no, rule_id", [config_id])
+    rules = conn.query(f"SELECT * FROM {db}.gre_sampling_rule WHERE config_id = ? AND act_ind = 1", [config_id])
+    return build_sample(rows[0], rules)
+
+
+def snapshot_hash(snapshot: dict) -> str:
+    """SHA-256 of a config + rules snapshot (who changed a row and when do not count, only what it says)."""
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def build_sample(config: dict, rules: list) -> Sample:
+    """A Sample from a config row and its active rule rows - read from the tables, or from a run's snapshot."""
+    def clean(row):
+        return {k: v for k, v in row.items() if k not in _AUDIT_COLUMNS}
+    snapshot = {"config": clean(config), "rules": sorted((clean(r) for r in rules), key=lambda r: r["rule_id"])}
+    ordered = sorted((dict(r) for r in snapshot["rules"]),     # copies: the levels get their buckets attached
+                     key=lambda r: (r.get("seq_no") is not None, r.get("seq_no") or 0, r["rule_id"]))
     by_class = {c: [] for c in RULE_CLASSES}
-    sample = Sample(config=rows[0])
-    for r in rules:
+    sample = Sample(config=dict(config), snapshot=snapshot, config_hash=snapshot_hash(snapshot))
+    for r in ordered:
         r["rule_class"] = _up(r.get("rule_class"))
         by_class.get(r["rule_class"], sample.stray).append(r)
     sample.params, sample.exclusions = by_class["PARAM"], by_class["EXCLUSION"]
@@ -431,10 +459,12 @@ def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key:
     else:
         where.append("config_id = ?")
         params.append(sample.config_id)
-    rows = conn.query(f"SELECT case_key, MAX(selected_flag) AS sel FROM {s.meta_db}.gre_sample_selections "
-                      f"WHERE {' AND '.join(where)} GROUP BY case_key", params)
+    rows = conn.query(f"SELECT case_key, MAX(selected_flag) AS sel, "
+                      f"MAX(CASE WHEN selection_status = 'REPLACED' THEN 1 ELSE 0 END) AS replaced "
+                      f"FROM {s.meta_db}.gre_sample_selections WHERE {' AND '.join(where)} GROUP BY case_key", params)
+    # a REPLACED case was not audited (not "selected"), and was taken out on purpose (no carry-over)
     out = {"selected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 1},
-           "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0}}
+           "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["replaced"] or 0) == 0}}
     cache[(scope, days)] = out
     return out
 
@@ -710,21 +740,34 @@ def count_prior_attempts(conn: Connection, s: Settings, config_id, run_key: str)
     return int(rows[0]["cnt"]) if rows else 0
 
 
-def _start_run(conn, s, run_id, run_key, config, method, seed, target, as_of, params, triggered_by, started):
+def current_run(conn: Connection, s: Settings, config_id, run_key: str) -> Optional[dict]:
+    """The run row whose sample is current for (config_id, run_key), or None."""
+    rows = conn.query(f"SELECT * FROM {s.meta_db}.gre_sampling_run "
+                      f"WHERE config_id = ? AND run_key = ? AND etl_is_curr_ind = 'Y'", [config_id, run_key])
+    return rows[0] if rows else None
+
+
+def _start_run(conn, s, run_id, run_key, sample: Sample, seed, target, as_of, params, triggered_by, started,
+               override_reason=None):
+    config = sample.config
     conn.execute(f"""
         INSERT INTO {s.meta_db}.gre_sampling_run (
             run_id, config_id, project_name, process_name, sample_name, run_key, as_of_date, sampling_method,
-            random_seed, target_volume, run_params_txt, status, etl_is_curr_ind, triggered_by, started_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'N', ?, ?)""",
+            random_seed, target_volume, run_params_txt, status, etl_is_curr_ind, config_hash, override_reason,
+            triggered_by, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'N', ?, ?, ?, ?)""",
         [run_id, config.get("config_id"), config.get("project_name"), config.get("process_name"),
-         config.get("sample_name"), run_key, as_of, method, seed, target, json.dumps(params, default=str)[:4000],
-         triggered_by, started])
+         config.get("sample_name"), run_key, as_of, sample.method, seed, target,
+         json.dumps(params, default=str)[:4000], sample.config_hash, override_reason, triggered_by, started])
 
 
-def _finish_run(conn, s, run_id, summary, error_type=None, message=None, detail=None):
-    """Close the run row: COMPLETED (current, with its run_report) or ERROR (error_type, message, detail)."""
-    report = None if error_type else json.dumps({"exclusions": summary.get("exclusions"),
-                                                 "buckets": summary.get("buckets")}, default=str)
+def _finish_run(conn, s, run_id, summary, sample: Sample, error_type=None, message=None, detail=None):
+    """Close the run row: COMPLETED (current) or ERROR (error_type, message, detail). The run_report always
+    holds the config and rule rows used."""
+    report = {"config_hash": sample.config_hash, "config": sample.snapshot}
+    if not error_type:
+        report.update(exclusions=summary.get("exclusions"), buckets=summary.get("buckets"))
+    report = json.dumps(report, default=str)
     conn.execute(f"""
         UPDATE {s.meta_db}.gre_sampling_run
         SET status = ?, ended_at = ?, total_in_scope = ?, total_excluded = ?, total_candidates = ?,
@@ -760,6 +803,16 @@ def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) 
     return out
 
 
+def _write_output(conn, s, queries, sample: Sample, run_id, run_key, as_of, output: dict, cases: list, now):
+    """cases: (case_key, selection_order, priority_rank, stratum_path) of each row to write."""
+    names = [str(o["rule_name"]) for o in sample.output_cols]
+    conn.executemany(
+        f"INSERT INTO {queries['output_table']} ({', '.join([*OUTPUT_META_COLS, *names])}) "
+        f"VALUES ({', '.join(['?'] * (len(OUTPUT_META_COLS) + len(names)))})",
+        [[run_id, sample.config_id, run_key, as_of, key, order, rank, path, "Y", now,
+          *(output[key].get(n.lower()) for n in names)] for key, order, rank, path in cases], s.chunk_rows)
+
+
 def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, output,
              as_of: date) -> int:
     """Write the run's rows and retire earlier runs of the same (config_id, run_key); returns how many earlier
@@ -769,24 +822,21 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
     cid, project, process = sample.config_id, c.get("project_name"), c.get("process_name")
     order = {r["_key"]: i + 1 for i, r in enumerate(chosen)}
     rows = [[run_id, cid, project, process, run_key, as_of, r["_key"], r["_order"] + 1,
-             1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"), now] for r in candidates]
+             1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"),
+             "SELECTED" if r["_key"] in order else None, now] for r in candidates]
     if _up(c.get("keep_excluded"), "1") not in ("0", "N", "FALSE"):
         rows += [[run_id, cid, project, process, run_key, as_of, r["_key"], None, 0, None, 1, r["_reason"], None,
-                  now] for r in excluded]
+                  None, now] for r in excluded]
     conn.executemany(f"""
         INSERT INTO {s.meta_db}.gre_sample_selections (
             sample_run_id, config_id, project_name, process_name, run_key, sample_cycle, case_key, priority_rank,
-            selected_flag, selection_order, excluded_flag, exclusion_reason, stratum_path, etl_is_curr_ind,
-            load_datetime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y', ?)""", rows, s.chunk_rows)
+            selected_flag, selection_order, excluded_flag, exclusion_reason, stratum_path, selection_status,
+            etl_is_curr_ind, load_datetime
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y', ?)""", rows, s.chunk_rows)
     tables = [f"{s.meta_db}.gre_sample_selections"]
     if output is not None:
-        names = [str(o["rule_name"]) for o in sample.output_cols]
-        conn.executemany(
-            f"INSERT INTO {queries['output_table']} ({', '.join([*OUTPUT_META_COLS, *names])}) "
-            f"VALUES ({', '.join(['?'] * (len(OUTPUT_META_COLS) + len(names)))})",
-            [[run_id, cid, run_key, as_of, r["_key"], order[r["_key"]], r["_order"] + 1, r.get("_path"), "Y", now,
-              *(output[r["_key"]].get(n.lower()) for n in names)] for r in chosen], s.chunk_rows)
+        _write_output(conn, s, queries, sample, run_id, run_key, as_of, output,
+                      [(r["_key"], order[r["_key"]], r["_order"] + 1, r.get("_path")) for r in chosen], now)
         tables.append(queries["output_table"])
 
     for table in tables:
@@ -808,7 +858,7 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
 
 def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str] = None,
                  run_params: Optional[dict] = None, seed: Optional[int] = None, triggered_by: str = "SYSTEM",
-                 as_of: Optional[date] = None, dry_run: bool = False) -> dict:
+                 as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None) -> dict:
     """Run one sampling config. Returns its report (status COMPLETED / ERROR; error_kind 'config' when retrying
     cannot help, 'technical' otherwise). Raises ConfigError only when the config row itself cannot be loaded.
 
@@ -819,6 +869,8 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     seed       : RANDOM / SYSTEMATIC seed (default: a new one, stored on the run row).
     as_of      : the business date of the run (default: today in Settings.timezone) -> sample_cycle.
     dry_run    : do everything but write (no run row).
+    force_reason: replace a FINAL sample of this run_key (recorded on the new run row); without it a rerun of a
+                 finalised run_key fails as FINALIZED.
     """
     as_of = as_of or s.today()
     started = s.now()
@@ -855,7 +907,8 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
                "sample_run_id": None if dry_run else run_id, "run_key": run_key, "as_of_date": as_of.isoformat(),
                "method": method, "seed": run_seed, "target_volume": target, "params": params, "in_scope": None,
                "excluded": None, "candidates": 0, "selected": 0, "shortfall": None, "exclusions": {},
-               "by_stratum": {}, "buckets": {}, "retired_runs": 0, "dry_run": dry_run}
+               "by_stratum": {}, "buckets": {}, "retired_runs": 0, "dry_run": dry_run,
+               "config_hash": sample.config_hash}
     log.info("sampling starting: config_id=%s sample=%s run_key=%s method=%s target=%s meta_db=%s host=%s%s",
              config_id, label, run_key, method, target, s.meta_db, conn.host, " (dry run)" if dry_run else "")
 
@@ -865,16 +918,27 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         summary.update(status="ERROR", error_kind=kind, error_type=error_type, error=message)
         if not dry_run:
             try:
-                _finish_run(conn, s, run_id, summary, error_type, message, detail)
+                _finish_run(conn, s, run_id, summary, sample, error_type, message, detail)
             except Exception as e:  # noqa: BLE001 - must not hide the real error
                 log.error("could not close the run row of %s: %s", run_id, e)
         return summary
 
+    final = None if early else current_run(conn, s, config_id, run_key)
+    final = final if final and final.get("status") == "FINAL" else None
+    force_reason = str(force_reason or "").strip() or None
     if not dry_run:
-        _start_run(conn, s, run_id, run_key, config, method, run_seed, target, as_of, params, triggered_by,
-                   started)
+        _start_run(conn, s, run_id, run_key, sample, run_seed, target, as_of, params, triggered_by, started,
+                   force_reason if final else None)
     if early:
         return fail(early[0], early[1], early[2])
+    if final:
+        summary["finalized_run"] = final["run_id"]
+        if not force_reason and not dry_run:
+            return fail("config", "FINALIZED", f"the sample of run_key {run_key} is final (run {final['run_id']}, "
+                                               f"finalised by {final.get('finalized_by')} at "
+                                               f"{final.get('finalized_at')}): rerun with a force reason to replace it")
+        if force_reason:
+            log.warning("replacing the FINAL sample %s of run_key %s: %s", final["run_id"], run_key, force_reason)
     problems = config_problems(sample)
     if problems:
         return fail("config", "CONFIG_ERROR", "; ".join(problems))
@@ -936,7 +1000,7 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         with conn.transaction():
             summary["retired_runs"] = _persist(conn, s, run_id, run_key, sample, queries, candidates, excluded,
                                                chosen, output, as_of)
-            _finish_run(conn, s, run_id, summary)
+            _finish_run(conn, s, run_id, summary, sample)
     except Exception as e:  # noqa: BLE001
         return fail("technical", "PERSIST_FAILURE", e, traceback.format_exc())
 
@@ -944,6 +1008,102 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     log.info("sampling complete: %s in_scope=%s excluded=%s candidates=%d selected=%d/%d retired_runs=%d", run_id,
              in_scope, summary["excluded"], len(candidates), len(chosen), target, summary["retired_runs"])
     return summary
+
+
+# ---------------------------------------------------------------------------
+# After a run: finalise, replace a case
+# ---------------------------------------------------------------------------
+
+def finalize_run(conn: Connection, s: Settings, config_id, run_key: str, by: str) -> dict:
+    """Make the current sample of (config_id, run_key) FINAL: a later run of that run_key needs a force reason."""
+    run = current_run(conn, s, config_id, run_key)
+    if not run:
+        raise ConfigError(f"config_id={config_id} has no current sample for run_key {run_key!r}")
+    if run["status"] == "FINAL":
+        raise ConfigError(f"run {run['run_id']} is already final (by {run.get('finalized_by')})")
+    conn.execute(f"UPDATE {s.meta_db}.gre_sampling_run SET status = 'FINAL', finalized_by = ?, finalized_at = ?, "
+                 f"last_updated_datetime = ? WHERE run_id = ? AND status = 'COMPLETED'",
+                 [by, s.now(), s.now(), run["run_id"]])
+    log.info("run %s (config_id=%s run_key=%s) finalised by %s", run["run_id"], config_id, run_key, by)
+    return {"run_id": run["run_id"], "config_id": config_id, "run_key": run_key, "status": "FINAL",
+            "finalized_by": by}
+
+
+def parse_case_key(text: str, keys: list) -> dict:
+    """{key column: value} of a 'col1=val1|col2=val2' case key (values as text, NULL -> None)."""
+    parts = str(text).split("|")
+    if len(parts) != len(keys):
+        raise ConfigError(f"case_key {text!r} does not have the {len(keys)} key column(s) {keys}")
+    out = {}
+    for column, part in zip(keys, parts):
+        name, _, value = part.partition("=")
+        if name.strip().lower() != column.lower():
+            raise ConfigError(f"case_key {text!r}: expected column {column}, found {name}")
+        out[column.lower()] = None if value == NULL_BUCKET else value
+    return out
+
+
+def replace_case(conn: Connection, s: Settings, config_id, run_key: str, case_key_text: str, reason: str, by: str,
+                 any_bucket: bool = False) -> dict:
+    """Take one selected case out of the current sample of (config_id, run_key) and put the next candidate in:
+    the same bucket (any_bucket: anywhere), never selected or replaced before, in priority order (RANDOM: a
+    draw seeded by the run's seed). Allowed on a FINAL sample. The output snapshot follows. One transaction."""
+    if not str(reason or "").strip():
+        raise ConfigError("a reason is required to replace a case")
+    run = current_run(conn, s, config_id, run_key)
+    if not run or run["status"] not in ("COMPLETED", "FINAL"):
+        raise ConfigError(f"config_id={config_id} has no completed current sample for run_key {run_key!r}")
+    db, run_id = s.meta_db, run["run_id"]
+    rows = conn.query(f"SELECT case_key, selected_flag, selection_order, priority_rank, excluded_flag, stratum_path, "
+                      f"selection_status FROM {db}.gre_sample_selections WHERE sample_run_id = ?", [run_id])
+    old = next((r for r in rows if r["case_key"] == case_key_text), None)
+    if not old or int(old["selected_flag"] or 0) != 1:
+        raise ConfigError(f"{case_key_text!r} is not in the current sample of run_key {run_key!r}")
+    pool = [r for r in rows if int(r["selected_flag"] or 0) == 0 and int(r["excluded_flag"] or 0) == 0
+            and r["selection_status"] is None]
+    if not any_bucket:
+        pool = [r for r in pool if r["stratum_path"] == old["stratum_path"]]
+    if not pool:
+        raise ConfigError(f"no candidate left to replace {case_key_text!r}"
+                          + ("" if any_bucket else f" in bucket {old['stratum_path']!r} (allow any bucket)"))
+    pool.sort(key=lambda r: (r["priority_rank"] is None, r["priority_rank"] or 0, r["case_key"]))
+    if _up(run.get("sampling_method")) == "RANDOM":
+        new = random.Random(f"{run.get('random_seed')}|{run_id}|{case_key_text}").choice(pool)
+    else:
+        new = pool[0]
+
+    output = queries = sample = None
+    report = json.loads(run.get("run_report") or "{}")
+    snap = report.get("config") or {}
+    if str((snap.get("config") or {}).get("output_table") or "").strip():
+        sample = build_sample(snap["config"], snap.get("rules") or [])   # the rules that made this sample
+        params = json.loads(run.get("run_params_txt") or "{}")
+        queries = build_queries(sample, s, params)
+        row = {**parse_case_key(new["case_key"], sample.keys), "_key": new["case_key"]}
+        output = fetch_output(conn, queries, sample, [row])
+
+    now = s.now()
+    with conn.transaction():
+        for key, flag, order, status, linked in ((old["case_key"], 0, None, "REPLACED", new["case_key"]),
+                                                 (new["case_key"], 1, old["selection_order"], "REPLACEMENT",
+                                                  old["case_key"])):
+            conn.execute(f"""
+                UPDATE {db}.gre_sample_selections
+                SET selected_flag = ?, selection_order = ?, selection_status = ?, linked_case_key = ?,
+                    status_reason = ?, status_by = ?, status_at = ?, last_updated_datetime = ?
+                WHERE sample_run_id = ? AND case_key = ?""",
+                [flag, order, status, linked, reason[:1000], by, now, now, run_id, key])
+        if output is not None:
+            conn.execute(f"UPDATE {queries['output_table']} SET etl_is_curr_ind = 'N', last_updated_datetime = ? "
+                         f"WHERE sample_run_id = ? AND case_key = ? AND etl_is_curr_ind = 'Y'",
+                         [now, run_id, old["case_key"]])
+            _write_output(conn, s, queries, sample, run_id, run_key, run.get("as_of_date"), output,
+                          [(new["case_key"], old["selection_order"], new["priority_rank"], new["stratum_path"])], now)
+        conn.execute(f"UPDATE {db}.gre_sampling_run SET last_updated_datetime = ? WHERE run_id = ?", [now, run_id])
+    log.info("run %s: %s replaced by %s (%s) by %s", run_id, old["case_key"], new["case_key"], reason, by)
+    return {"run_id": run_id, "replaced": old["case_key"], "replacement": new["case_key"],
+            "stratum_path": new["stratum_path"], "selection_order": old["selection_order"], "reason": reason,
+            "by": by}
 
 
 # ---------------------------------------------------------------------------

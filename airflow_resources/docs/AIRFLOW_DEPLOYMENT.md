@@ -240,6 +240,9 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 - 4 MULTISET tables (`sql/schema.sql`); no identity columns, no foreign keys (`validate` checks the
   configuration).
+- A cycle whose sample was finalised (`finalize`, local version) is never replaced by the DAG: the task fails as
+  `FINALIZED` without retry, and the final sample stays current. Replacing it needs `--force-reason` from the
+  command line; there is no trigger key for it.
 - `etl_is_curr_ind` on `gre_sampling_run` and `gre_sample_selections` marks the current sample of each
   `(config_id, run_key)`. Errors are on the run row (`error_type`, `error_message`, `error_detail`), and the counts per
   exclusion rule and bucket are its `run_report` (JSON in a CLOB: read it with Teradata's JSON functions, e.g.
@@ -255,7 +258,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (58 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (68 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with
