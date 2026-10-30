@@ -43,9 +43,11 @@ class Settings:
     access_lock: bool = True              # prefix SELECTs with LOCKING ROW FOR ACCESS (Teradata dirty read)
 
     def __post_init__(self):
+        object.__setattr__(self, "environment", str(self.environment or "DEV").strip().upper())
+        # meta_db may carry $env too: HSABC_$ENV is HSABC_DEV in DEV, HSABC in PROD
+        object.__setattr__(self, "meta_db", self.resolve_env(str(self.meta_db or "").strip()))
         if not self.meta_db or not _IDENT.match(self.meta_db):
             raise ConfigError(f"meta_db {self.meta_db!r} must be a plain Teradata database name")
-        object.__setattr__(self, "environment", str(self.environment or "DEV").strip().upper())
         try:
             ZoneInfo(self.timezone)
         except Exception as e:  # noqa: BLE001

@@ -254,3 +254,5 @@ def test_settings_validation():
         Settings(meta_db="bad name")
     s = Settings.from_mapping({"META_DB": "HSABC_DEV", "load_env": "qa", "access_lock": "false"})
     assert (s.environment, s.access_lock) == ("QA", False)
+    assert [Settings.from_mapping({"meta_db": "HSABC_$ENV", "environment": e}).meta_db
+            for e in ("DEV", "QA", "UAT", "PROD")] == ["HSABC_DEV", "HSABC_QA", "HSABC", "HSABC"]

@@ -31,14 +31,15 @@ INSERT INTO {{META_DB}}.gre_sampling_config (
 
 -- batch_id: the latest ODAG1 WKLY batch whose every source row is closed (a run
 -- given batch_id=... samples that batch instead). A framework batch is one
--- ComplianceRequestControl row per source. TODO(Q15) that table's database per
--- environment, and the Project_Cd of ODAG1 there (CMSUNIV in its example setup).
+-- ComplianceRequestControl row per source, in the framework's HSABC_$ENV
+-- (HSABC_DEV in DEV, HSABC in UAT / PROD). TODO(Q15) the Project_Cd of ODAG1
+-- there (CMSUNIV in its example setup).
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
-VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM TODO_Q15.ComplianceRequestControl WHERE Project_Cd = ''CMSUNIV'' AND Table_Nm = ''ODAG1'' AND Run_Ty = ''WKLY'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches');
+VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM HSABC_$ENV.ComplianceRequestControl WHERE Project_Cd = ''CMSUNIV'' AND Table_Nm = ''ODAG1'' AND Run_Ty = ''WKLY'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches');
 
 -- never sample a batch with a source still open (also when batch_id is given by hand)
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, description)
-VALUES (205, 2, 0, 'GATE', 1, 'BATCH_CLOSED', 'SELECT 1 FROM TODO_Q15.ComplianceRequestControl WHERE Btch_ID = ''{batch_id}'' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1', 'every source of the WKLY batch is closed');
+VALUES (205, 2, 0, 'GATE', 1, 'BATCH_CLOSED', 'SELECT 1 FROM HSABC_$ENV.ComplianceRequestControl WHERE Btch_ID = ''{batch_id}'' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1', 'every source of the WKLY batch is closed');
 
 -- Q12: no case twice within 90 days
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)

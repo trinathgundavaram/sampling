@@ -9,7 +9,7 @@ from conftest import ROOT, insert_config, insert_rule, insert_strata, load_cli
 from sampling.admin import (CONFIG_COLUMNS, RULE_COLUMNS, export_config, history_days, load_config_file,
                             purge_selections)
 from sampling.engine import finalize_run, load_config, run_sampling, sql_problems
-from sampling.settings import ConfigError
+from sampling.settings import ConfigError, Settings
 
 AS_OF = date(2026, 8, 7)
 
@@ -69,6 +69,19 @@ def test_the_seeds_pass_the_sql_check(raw, conn, settings):
     for r in conn.query("SELECT rule_name, rule_class, rule_sql FROM gre_sampling_rule WHERE config_id = 2"):
         if "TODO" not in str(r["rule_sql"] or ""):
             assert sql_problems(r["rule_sql"], r["rule_name"], select=r["rule_class"] in ("PARAM", "GATE")) == []
+
+
+def test_the_odag1_batch_lookup_follows_the_environment(raw, conn):
+    """The framework's ComplianceRequestControl is in HSABC_$ENV: HSABC_DEV in DEV, HSABC in UAT / PROD."""
+    cli = load_cli()
+    for stmt in cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "odag1_config_template.sql", "main")):
+        raw.db.execute(stmt)
+    rules = conn.query("SELECT rule_sql FROM gre_sampling_rule WHERE rule_class IN ('PARAM', 'GATE') AND config_id = 2")
+    assert len(rules) == 2
+    for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
+        for r in rules:
+            text = Settings(meta_db="M", environment=env).resolve_env(r["rule_sql"], identifier=False)
+            assert f" {db}.ComplianceRequestControl " in text and "$" not in text
 
 
 # ── configuration from a file ──────────────────────────────────────────────

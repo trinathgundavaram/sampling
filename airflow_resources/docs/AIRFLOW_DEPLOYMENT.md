@@ -121,7 +121,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | Key | Meaning |
 |---|---|
 | `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `compliance_teradata` |
-| `meta_db` | **Required.** Teradata database holding the `gre_sampling_*` tables |
+| `meta_db` | **Required.** Teradata database holding the `gre_sampling_*` tables. May carry `$env` (`HSABC_$ENV`: `HSABC_DEV` in DEV, `HSABC` in UAT / PROD) |
 | `load_env` | DEV / QA / INT / UAT / PROD: replaces `$env` in every configured table name and SQL text (default DEV). `environment` is accepted too |
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
 | `config_id` / `project` / `process_name` | **The scope** (at least one): one config, or every active config of the project and / or process. Matched against `gre_sampling_config` |
@@ -283,7 +283,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (94 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (95 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with
