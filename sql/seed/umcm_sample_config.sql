@@ -5,15 +5,13 @@
 -- its column names are illustrative, not the ODAG1 table). It shows how a
 -- requirement becomes rows, with no field name or value in the code:
 --
---   gre_sampling_param      {batch_id} = the latest batch loaded
---   gre_sampling_exclusion  three SQL rules + "selected in the last 90 days"
---   gre_sampling_priority   carry-over of last cycle's unselected cases first,
---                           then four SQL conditions
---   gre_sampling_strata     level 0 by disposition, level 1 by functional
---   gre_sampling_bucket     area under Denied only (applies_to/parent_path)
---                           Denied takes the REMAINDER the others leave
---   gre_sampling_config     diversity_expr rotates picks across code families
---   gre_sampling_output_col the snapshot columns of each selected case
+--   PARAM      {batch_id} = the latest batch loaded
+--   EXCLUSION  three SQL rules + "selected in the last 90 days"
+--   PRIORITY   last cycle's unselected cases first, then four SQL conditions
+--   LEVEL 0    by disposition: Denied takes the REMAINDER the others leave
+--   LEVEL 1    by functional area, only within Denied (parent_path)
+--   OUTPUT     the snapshot columns of each selected case
+--   config     diversity_expr rotates picks across code families
 --
 -- The real ODAG1 configuration is sql/seed/odag1_config_template.sql.
 -- {{META_DB}} is replaced by deploy-schema --seed, or by hand.
@@ -31,56 +29,56 @@ INSERT INTO {{META_DB}}.gre_sampling_config (
     1, '{{META_DB}}.um_sample_output', '0 8 * * FRI', 'SEED'
 );
 
--- Run parameter: the latest batch (a value passed with the run wins)
-INSERT INTO {{META_DB}}.gre_sampling_param (param_id, config_id, act_ind, seq_no, param_name, param_sql, description)
-VALUES (1, 1, 1, 1, 'batch_id', 'SELECT MAX(batch_id) FROM {{META_DB}}.um_universe', 'Latest batch loaded');
+-- PARAM: the latest batch (a value passed with the run wins)
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (1, 1, 1, 'PARAM', 1, 'batch_id', 'SELECT MAX(batch_id) FROM {{META_DB}}.um_universe');
 
--- Exclusions: the first matching rule is the reason stored
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (1, 1, 1, 1, 'AUTO_APPROVED', 'SQL', 'auto_approved = ''Y''');
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (2, 1, 1, 2, 'NO_PA_REQUIRED', 'SQL', 'shrpa_no_pa_flag = ''Y''');
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (3, 1, 1, 3, 'DIABETIC_SUPPLIES', 'SQL', 'issue_type = ''DIABETIC_SUPPLIES''');
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, lookback_days, history_scope)
-VALUES (4, 1, 1, 4, 'SELECTED_LAST_90_DAYS', 'PRIOR_SELECTION', 90, 'CONFIG');
+-- EXCLUSION: the first matching rule is the reason stored
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (11, 1, 1, 'EXCLUSION', 1, 'AUTO_APPROVED', 'SQL', 'auto_approved = ''Y''');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (12, 1, 1, 'EXCLUSION', 2, 'NO_PA_REQUIRED', 'SQL', 'shrpa_no_pa_flag = ''Y''');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (13, 1, 1, 'EXCLUSION', 3, 'DIABETIC_SUPPLIES', 'SQL', 'issue_type = ''DIABETIC_SUPPLIES''');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
+VALUES (14, 1, 1, 'EXCLUSION', 4, 'SELECTED_LAST_90_DAYS', 'PRIOR_SELECTION', 90, 'CONFIG');
 
--- Priority: criterion 1 first, then 2, ...
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, lookback_days, history_scope)
-VALUES (1, 1, 1, 1, 'CARRY_OVER', 'PRIOR_CANDIDATE', 14, 'CONFIG');
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (2, 1, 1, 2, 'REVISION', 'CONDITION', 'revision = 1');
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (3, 1, 1, 3, 'INPATIENT', 'CONDITION', 'place_of_service = ''Inpatient''');
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (4, 1, 1, 4, 'EXPEDITED', 'CONDITION', 'service_type IN (''EXPEDITED'', ''EXPEDITED_PART_B'')');
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (5, 1, 1, 5, 'CLINICAL_REVIEW', 'CONDITION', 'clinical_review_required_flag = ''Y''');
+-- PRIORITY: criterion 1 first, then 2, ...
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
+VALUES (21, 1, 1, 'PRIORITY', 1, 'CARRY_OVER', 'PRIOR_CANDIDATE', 14, 'CONFIG');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (22, 1, 1, 'PRIORITY', 2, 'REVISION', 'CONDITION', 'revision = 1');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (23, 1, 1, 'PRIORITY', 3, 'INPATIENT', 'CONDITION', 'place_of_service = ''Inpatient''');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (24, 1, 1, 'PRIORITY', 4, 'EXPEDITED', 'CONDITION', 'service_type IN (''EXPEDITED'', ''EXPEDITED_PART_B'')');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (25, 1, 1, 'PRIORITY', 5, 'CLINICAL_REVIEW', 'CONDITION', 'clinical_review_required_flag = ''Y''');
 
--- Level 0: by disposition. Denied takes what Withdrawn / Dismissed / Approved leave
-INSERT INTO {{META_DB}}.gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, applies_to, unlisted_policy, act_ind)
-VALUES (1, 1, 0, 'request_disposition', 'request_disposition', '*', 'SKIP', 1);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode, target_fraction)
-VALUES (1, 1, 1, '*', 1, 'Withdrawn', 'FRACTION', 0.10);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode, target_fraction)
-VALUES (2, 1, 1, '*', 2, 'Dismissed', 'FRACTION', 0.02);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode, target_fraction)
-VALUES (3, 1, 1, '*', 3, 'Approved', 'FRACTION', 0.08);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode)
-VALUES (4, 1, 1, '*', 4, 'Denied', 'REMAINDER');
+-- LEVEL 0: by disposition. Denied takes what Withdrawn / Dismissed / Approved leave
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
+VALUES (31, 1, 1, 'LEVEL', 1, 'request_disposition', 'request_disposition', 0, '*', 'SKIP');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction)
+VALUES (32, 1, 1, 'BUCKET', 1, 'Withdrawn', 0, '*', 'FRACTION', 0.10);
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction)
+VALUES (33, 1, 1, 'BUCKET', 2, 'Dismissed', 0, '*', 'FRACTION', 0.02);
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction)
+VALUES (34, 1, 1, 'BUCKET', 3, 'Approved', 0, '*', 'FRACTION', 0.08);
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode)
+VALUES (35, 1, 1, 'BUCKET', 4, 'Denied', 0, '*', 'REMAINDER');
 
--- Level 1: functional area, only within Denied (other areas share what is left)
-INSERT INTO {{META_DB}}.gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, applies_to, unlisted_policy, act_ind)
-VALUES (2, 1, 1, 'functional_area', 'functional_area', 'Denied', 'SHARE', 1);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode, target_fraction)
-VALUES (5, 2, 1, 'Denied', 1, 'Part B', 'FRACTION', 0.13);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode, target_fraction)
-VALUES (6, 2, 1, 'Denied', 2, 'Behavioral Health', 'FRACTION', 0.08);
+-- LEVEL 1: functional area, only within Denied (other areas share what is left)
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
+VALUES (41, 1, 1, 'LEVEL', 1, 'functional_area', 'functional_area', 1, 'Denied', 'SHARE');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction)
+VALUES (42, 1, 1, 'BUCKET', 1, 'Part B', 1, 'Denied', 'FRACTION', 0.13);
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction)
+VALUES (43, 1, 1, 'BUCKET', 2, 'Behavioral Health', 1, 'Denied', 'FRACTION', 0.08);
 
--- Output snapshot columns (the table: sql/output_table_template.sql)
-INSERT INTO {{META_DB}}.gre_sampling_output_col (output_col_id, config_id, act_ind, seq_no, column_name, expr_sql)
-VALUES (1, 1, 1, 1, 'request_disposition', 'request_disposition');
-INSERT INTO {{META_DB}}.gre_sampling_output_col (output_col_id, config_id, act_ind, seq_no, column_name, expr_sql)
-VALUES (2, 1, 1, 2, 'functional_area', 'functional_area');
-INSERT INTO {{META_DB}}.gre_sampling_output_col (output_col_id, config_id, act_ind, seq_no, column_name, expr_sql)
-VALUES (3, 1, 1, 3, 'procedure_code_family', 'procedure_code_family');
+-- OUTPUT: snapshot columns (the table: sql/output_table_template.sql)
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (51, 1, 1, 'OUTPUT', 1, 'request_disposition', 'request_disposition');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (52, 1, 1, 'OUTPUT', 2, 'functional_area', 'functional_area');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (53, 1, 1, 'OUTPUT', 3, 'procedure_code_family', 'procedure_code_family');

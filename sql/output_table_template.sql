@@ -2,8 +2,8 @@
 -- Output snapshot table - TEMPLATE (one per config with output_table set)
 --
 -- Replace {{OUTPUT_TABLE}} with gre_sampling_config.output_table and add one
--- column per active gre_sampling_output_col row (column_name, a type fitting
--- its expr_sql). The engine writes the first 11 columns itself and never
+-- column per active OUTPUT rule (its rule_name, a type fitting
+-- its rule_sql). The engine writes the first 11 columns itself and never
 -- creates or alters this table. A rerun of the same (config_id, run_key)
 -- marks the earlier rows etl_is_curr_ind = 'N'.
 -- ============================================================================

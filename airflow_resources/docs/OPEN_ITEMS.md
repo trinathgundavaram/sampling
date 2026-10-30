@@ -8,15 +8,15 @@ any answer: they become rows.
 | # | Question | Fills |
 |---|---|---|
 | Q1 | The values of `AUTHZN_REQ_DETRMTN_TY` (approved / denied / withdrawn / dismissed …) and each one's share or mode (fraction, all there is, the remainder). How expedited is coded in `AUTHZN_REQ_STD_OR_EXPDT_IND` | level 0 buckets, a priority condition |
-| Q2 | How a case maps to a functional area: which of `ISS_DESC`, `SVC_CTGRY_CD`, `REQ_PROV_TY`, `SVC_PROV_TY` … and the values / conditions per area, with each area's share | level 1 buckets (`bucket_sql`) |
+| Q2 | How a case maps to a functional area: which of `ISS_DESC`, `SVC_CTGRY_CD`, `REQ_PROV_TY`, `SVC_PROV_TY` … and the values / conditions per area, with each area's share | level 1 BUCKET rules (`rule_sql`) |
 | Q3 | Where "Revision" comes from: ODAG1 has no such column | a priority condition |
 | Q4 | How to identify auto-approvals, SHRPA / no prior authorisation required, diabetic supplies (columns, values, or another table to join) | exclusion rules |
 | Q5 | The columns that identify one case uniquely in the scope (`AUTHZN_ID`? with `SRC_DATA_KEY`?) | `key_columns` |
-| Q6 | Which rows a cycle samples: the latest framework batch (`BTCH_ID`), or a decision-date window (`DETRMTN_NOTFTN_DT`, stored as VARCHAR(10): its format?). How the 7–14 day reporting lag of the requirements applies | `scope_sql`, `gre_sampling_param`, `run_key` |
+| Q6 | Which rows a cycle samples: the latest framework batch (`BTCH_ID`), or a decision-date window (`DETRMTN_NOTFTN_DT`, stored as VARCHAR(10): its format?). How the 7–14 day reporting lag of the requirements applies | `scope_sql`, a PARAM rule, `run_key` |
 | Q7 | The out-of-network share and how OON is identified | a bucket or priority |
-| Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) | `applies_to`, `shortfall_policy`, `fail_on_shortfall` |
+| Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) | LEVEL `parent_path`, `shortfall_policy`, `fail_on_shortfall` |
 | Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation | `diversity_expr`, `diversity_cap` |
-| Q10 | The output table's database and name, its columns, and whether GRE exceptions go into it | `output_table`, `gre_sampling_output_col` |
+| Q10 | The output table's database and name, its columns, and whether GRE exceptions go into it | `output_table`, OUTPUT rules |
 | Q11 | Scheduled (which day and time, Central) or triggered by the framework after its load (which DAG, and which of its values to accept: `trigger_keys`) | Variable `schedule_interval`, `trigger_keys` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
 

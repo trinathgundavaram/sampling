@@ -138,39 +138,42 @@ def cmd_show_config(conn, s, args) -> tuple:
     sample = load_config(conn, s, args.config_id)
     return {"config": sample.config, "params": sample.params, "exclusions": sample.exclusions,
             "priorities": sample.priorities, "levels": sample.levels, "output_columns": sample.output_cols,
-            "problems": config_problems(sample)}, 0
+            "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
 
 
 def cmd_runs(conn, s, args) -> tuple:
     where, params = ["1=1"], []
-    for col, value in (("sample_config_id", args.config_id), ("run_key", args.run_key), ("status", args.status)):
+    for col, value in (("config_id", args.config_id), ("run_key", args.run_key), ("status", args.status)):
         if value not in (None, ""):
             where.append(f"{col} = ?")
             params.append(value)
-    rows = conn.query(f"SELECT TOP {int(args.limit)} run_id, run_key, sample_config_id, sample_name, status, "
-                      f"sampling_method, random_seed, target_volume, total_in_scope, total_excluded, "
-                      f"total_candidates, total_selected, shortfall, started_at, ended_at, triggered_by, "
-                      f"error_message FROM {s.meta_db}.gre_sampling_audit WHERE {' AND '.join(where)} "
-                      f"ORDER BY started_at DESC", params)
+    rows = conn.query(f"SELECT TOP {int(args.limit)} run_id, run_key, config_id, sample_name, status, "
+                      f"etl_is_curr_ind, sampling_method, random_seed, target_volume, total_in_scope, "
+                      f"total_excluded, total_candidates, total_selected, shortfall, started_at, ended_at, "
+                      f"triggered_by, error_type, error_message FROM {s.meta_db}.gre_sampling_run "
+                      f"WHERE {' AND '.join(where)} ORDER BY started_at DESC", params)
     return {"runs": rows}, 0
 
 
 def cmd_errors(conn, s, args) -> tuple:
-    where, params = ["active_ind = 'Y'"], []
+    """Open errors: runs whose latest attempt of their (config_id, run_key) failed."""
+    where, params = ["1=1"], []
     for col, value in (("config_id", args.config_id), ("run_key", args.run_key)):
         if value not in (None, ""):
             where.append(f"{col} = ?")
             params.append(value)
-    rows = conn.query(f"SELECT TOP {int(args.limit)} run_id, config_id, process_name, run_key, error_type, "
-                      f"error_message, occurred_at FROM {s.meta_db}.gre_sampling_errors "
-                      f"WHERE {' AND '.join(where)} ORDER BY occurred_at DESC", params)
-    return {"errors": rows}, 0
+    rows = conn.query(f"SELECT run_id, config_id, process_name, run_key, error_type, error_message, started_at "
+                      f"FROM (SELECT run_id, config_id, process_name, run_key, status, error_type, error_message, "
+                      f"started_at FROM {s.meta_db}.gre_sampling_run WHERE {' AND '.join(where)} "
+                      f"QUALIFY ROW_NUMBER() OVER (PARTITION BY config_id, run_key ORDER BY started_at DESC) = 1"
+                      f") latest WHERE status = 'ERROR' ORDER BY started_at DESC", params)
+    return {"errors": rows[:int(args.limit)]}, 0
 
 
 def cmd_mark_failed(conn, s, args) -> tuple:
     """Close a run left RUNNING by a crashed process (it wrote no selections: persistence is one transaction)."""
-    n = conn.execute(f"UPDATE {s.meta_db}.gre_sampling_audit SET status = 'ERROR', ended_at = ?, "
-                     f"error_message = ? WHERE run_id = ? AND status = 'RUNNING'",
+    n = conn.execute(f"UPDATE {s.meta_db}.gre_sampling_run SET status = 'ERROR', ended_at = ?, "
+                     f"error_type = 'ABANDONED', error_message = ? WHERE run_id = ? AND status = 'RUNNING'",
                      [s.now(), f"marked failed by {getpass.getuser()}: {args.reason}"[:2000], args.run_id])
     return {"run_id": args.run_id, "updated": n}, 0 if n else 1
 
@@ -257,7 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--run-key", help="which logical run (default: the as-of date)")
     r.add_argument("--as-of", help="business date YYYY-MM-DD (default: today in SAMPLING_TIMEZONE)")
     r.add_argument("--seed", type=int, help="RANDOM / SYSTEMATIC seed (default: a new one)")
-    r.add_argument("--triggered-by", help="recorded on the audit row (default local-<user>)")
+    r.add_argument("--triggered-by", help="recorded on the run row (default local-<user>)")
     r.add_argument("--dry-run", action="store_true", help="count and select, write nothing")
 
     v = sub.add_parser("validate", help="check the configs of a scope")
@@ -268,7 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     sc = sub.add_parser("show-config", help="one config with every rule row and its problems")
     sc.add_argument("--config-id", type=int, required=True)
 
-    for name, helptext in (("runs", "recent runs (gre_sampling_audit)"), ("errors", "active errors")):
+    for name, helptext in (("runs", "recent runs (gre_sampling_run)"), ("errors", "open errors: latest attempt failed")):
         sp = sub.add_parser(name, help=helptext)
         sp.add_argument("--config-id", type=int)
         sp.add_argument("--run-key")

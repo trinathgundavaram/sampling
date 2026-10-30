@@ -3,20 +3,21 @@
 Like the GRE rules engine, everything a sample selects is configuration rows holding SQL - no field name or
 value is known to this code (sql/schema.sql describes every table):
 
-    gre_sampling_config      universe, scope_sql, key columns, size, method, diversity, output table
-    gre_sampling_param       run parameters looked up by SQL ({batch_id} = the latest batch, ...)
-    gre_sampling_exclusion   exclusion rules, in order (SQL condition, or "selected by an earlier run")
-    gre_sampling_priority    priority criteria, in order (SQL condition / expression, or history based)
-    gre_sampling_strata      stratification levels (VALUE: by an expression's value, CONDITION: by bucket SQL),
-                             each optionally only under some parent buckets (applies_to)
-    gre_sampling_bucket      a level's buckets: FRACTION of the parent's target, ALL there is, or the REMAINDER
-                             the others leave; a different mix per parent bucket (parent_path)
-    gre_sampling_output_col  the columns of the output snapshot of the selected cases
+    gre_sampling_config   universe, scope_sql, key columns, size, method, diversity, output table
+    gre_sampling_rule     one row per rule, rule_class saying what it is:
+        PARAM             a run parameter looked up by SQL ({batch_id} = the latest batch, ...)
+        EXCLUSION         an exclusion rule (SQL condition, or "selected by an earlier run")
+        PRIORITY          a priority criterion (SQL condition / expression, or history based)
+        LEVEL             a stratification level (by an expression's value, or by its buckets' conditions),
+                          optionally only under some parent buckets (parent_path)
+        BUCKET            a bucket of a level: FRACTION of the parent's target, ALL there is, or the REMAINDER
+                          the others leave; a different mix per parent bucket (parent_path)
+        OUTPUT            a column of the output snapshot of the selected cases
 
 One run = one gre_sampling_config row:
 
-    look up parameters        gre_sampling_param
-    audit row (RUNNING)       gre_sampling_audit
+    look up parameters        PARAM rules
+    run row (RUNNING)         gre_sampling_run
     pull                      one SELECT of the scope: key columns + one flag / value column per bucket condition,
                               level, exclusion rule and priority criterion (all evaluated by Teradata)
     exclude                   first matching exclusion rule is the reason; history rules read earlier runs
@@ -26,13 +27,13 @@ One run = one gre_sampling_config row:
     select per leaf           RANKED: in priority order | RANDOM: seeded shuffle | SYSTEMATIC: seeded start,
                               every k-th; rotating across diversity_expr values (diversity_cap per value)
     top up                    shortfall_policy TOPUP: from the rest of the candidates, in priority order
-    output snapshot           output_table: the selected cases' gre_sampling_output_col values
-    persist (one transaction) selections (+ excluded rows), bucket per level, counts per rule and bucket, output
-                              snapshot; earlier runs of the same (config_id, run_key) -> etl_is_curr_ind = 'N';
-                              audit row -> COMPLETED
-    on failure                gre_sampling_errors row, audit row -> ERROR (nothing half written)
+    output snapshot           output_table: the selected cases' OUTPUT values
+    persist (one transaction) selections (+ excluded rows) with their bucket path, output snapshot; earlier runs
+                              of the same (config_id, run_key) -> etl_is_curr_ind = 'N'; run row -> COMPLETED with
+                              the counts per rule and bucket (run_report)
+    on failure                run row -> ERROR with error_type, message and traceback (nothing half written)
 
-Reproducible: one seed per run (on the audit row); every leaf draws from its own generator seeded with
+Reproducible: one seed per run (on the run row); every leaf draws from its own generator seeded with
 (seed, bucket path), so a draw never depends on the order buckets are visited.
 """
 from __future__ import annotations
@@ -67,6 +68,16 @@ NULL_BUCKET = "NULL"
 OUTPUT_META_COLS = ("sample_run_id", "config_id", "run_key", "sample_cycle", "case_key", "selection_order",
                     "priority_rank", "stratum_path", "etl_is_curr_ind", "load_datetime")
 OUTPUT_KEY_CHUNK = 50
+RULE_CLASSES = ("PARAM", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "OUTPUT")
+# the optional gre_sampling_rule columns each class reads (any other one set is reported)
+_RULE_COLUMNS = ("rule_type", "rule_sql", "level_order", "parent_path", "unlisted_policy", "quota_mode",
+                 "target_fraction", "max_count", "sort_dir", "lookback_days", "history_scope")
+_USED = {"PARAM": {"rule_sql"},
+         "EXCLUSION": {"rule_type", "rule_sql", "lookback_days", "history_scope"},
+         "PRIORITY": {"rule_type", "rule_sql", "sort_dir", "lookback_days", "history_scope"},
+         "LEVEL": {"rule_sql", "level_order", "parent_path", "unlisted_policy"},
+         "BUCKET": {"rule_sql", "level_order", "parent_path", "quota_mode", "target_fraction", "max_count"},
+         "OUTPUT": {"rule_sql"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 _NEEDS_ORDER = ("RANKED", "SYSTEMATIC")
 
@@ -102,13 +113,14 @@ def _specificity(pattern: str) -> tuple:
 
 @dataclass
 class Sample:
-    """One gre_sampling_config row and its rule rows."""
+    """One gre_sampling_config row and its gre_sampling_rule rows, by class, each list in its order."""
     config: dict
     params: list = field(default_factory=list)
     exclusions: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
-    levels: list = field(default_factory=list)       # each: strata row + "buckets": [bucket rows]
+    levels: list = field(default_factory=list)       # LEVEL rows, each with "buckets": [its BUCKET rows]
     output_cols: list = field(default_factory=list)
+    stray: list = field(default_factory=list)        # rows of an unknown class, or buckets of no level
 
     @property
     def config_id(self):
@@ -127,31 +139,33 @@ def key_columns(config: dict) -> list:
     return [c.strip() for c in str(config.get("key_columns") or "").split(",") if c.strip()]
 
 
+def _text(row: dict, col: str = "rule_sql") -> str:
+    return str(row.get(col) or "").strip()
+
+
 def load_config(conn: Connection, s: Settings, config_id) -> Sample:
-    """The active gre_sampling_config row of config_id with its active rule rows, each list in its order."""
+    """The active gre_sampling_config row of config_id with its active gre_sampling_rule rows."""
     db = s.meta_db
     rows = conn.query(f"SELECT * FROM {db}.gre_sampling_config WHERE config_id = ? AND act_ind = 1", [config_id])
     if not rows:
         raise ConfigError(f"no active gre_sampling_config row for config_id={config_id}")
-
-    def rules(table, order, id_col):
-        return conn.query(f"SELECT * FROM {db}.{table} WHERE config_id = ? AND act_ind = 1 "
-                          f"ORDER BY {order}, {id_col}", [config_id])
-
-    sample = Sample(config=rows[0],
-                    params=rules("gre_sampling_param", "seq_no", "param_id"),
-                    exclusions=rules("gre_sampling_exclusion", "seq_no", "exclusion_id"),
-                    priorities=rules("gre_sampling_priority", "seq_no", "priority_id"),
-                    output_cols=rules("gre_sampling_output_col", "seq_no", "output_col_id"))
-    strata = rules("gre_sampling_strata", "level_order", "strata_id")
-    buckets = conn.query(f"SELECT b.* FROM {db}.gre_sampling_bucket b "
-                         f"JOIN {db}.gre_sampling_strata t ON t.strata_id = b.strata_id "
-                         f"WHERE t.config_id = ? AND t.act_ind = 1 AND b.act_ind = 1 "
-                         f"ORDER BY b.seq_no, b.bucket_id", [config_id])
-    for level in strata:
-        level["buckets"] = [b for b in buckets if b["strata_id"] == level["strata_id"]]
-        level["value_level"] = bool(str(level.get("stratify_expr") or "").strip())
-    sample.levels = strata
+    rules = conn.query(f"SELECT * FROM {db}.gre_sampling_rule WHERE config_id = ? AND act_ind = 1 "
+                       f"ORDER BY seq_no, rule_id", [config_id])
+    by_class = {c: [] for c in RULE_CLASSES}
+    sample = Sample(config=rows[0])
+    for r in rules:
+        r["rule_class"] = _up(r.get("rule_class"))
+        by_class.get(r["rule_class"], sample.stray).append(r)
+    sample.params, sample.exclusions = by_class["PARAM"], by_class["EXCLUSION"]
+    sample.priorities, sample.output_cols = by_class["PRIORITY"], by_class["OUTPUT"]
+    levels = sorted(by_class["LEVEL"], key=lambda r: (r.get("level_order") is None, r.get("level_order") or 0,
+                                                      r["rule_id"]))
+    for level in levels:
+        level["buckets"] = [b for b in by_class["BUCKET"] if b.get("level_order") == level.get("level_order")]
+        level["value_level"] = bool(_text(level))
+    orders = {lvl.get("level_order") for lvl in levels}
+    sample.stray += [b for b in by_class["BUCKET"] if b.get("level_order") not in orders]
+    sample.levels = levels
     return sample
 
 
@@ -164,7 +178,7 @@ def config_problems(sample: Sample) -> list:
     ordered = any(p for p in sample.priorities if _up(p.get("rule_type"), "CONDITION") in PRIORITY_TYPES) \
         or str(c.get("priority_rank_sql") or "").strip()
     if method in _NEEDS_ORDER and not ordered:
-        problems.append(f"sampling_method {method} needs gre_sampling_priority rows or priority_rank_sql")
+        problems.append(f"sampling_method {method} needs PRIORITY rules or priority_rank_sql")
     if _up(c.get("rounding_mode"), "FLOOR") not in VALID_ROUNDING:
         problems.append(f"rounding_mode must be one of {', '.join(VALID_ROUNDING)}")
     if _up(c.get("shortfall_policy"), "TOPUP") not in SHORTFALL_POLICIES:
@@ -186,55 +200,79 @@ def config_problems(sample: Sample) -> list:
     if str(c.get("diversity_expr") or "").strip() and method == "SYSTEMATIC":
         problems.append("diversity_expr cannot be combined with SYSTEMATIC (it steps through a fixed order)")
 
+    for r in sample.stray:
+        problems.append(f"rule {r['rule_id']}: rule_class {r['rule_class']!r} is not one of "
+                        f"{', '.join(RULE_CLASSES)}" if r["rule_class"] != "BUCKET"
+                        else f"rule {r['rule_id']}: BUCKET of level_order {r.get('level_order')}, which has no LEVEL")
+    for cls in RULE_CLASSES:
+        for r in _rules_of(sample, cls):
+            for col in _RULE_COLUMNS:
+                value = r.get(col)
+                if col not in _USED[cls] and value not in (None, "") and not (col == "parent_path" and value == "*"):
+                    problems.append(f"{cls} rule {r['rule_name']}: {col} is not used by this class")
+            if not str(r.get("rule_name") or "").strip():
+                problems.append(f"{cls} rule {r['rule_id']}: rule_name is empty")
+
     for p in sample.params:
-        if not _IDENT.match(str(p.get("param_name") or "")):
-            problems.append(f"param {p.get('param_id')}: param_name must be a plain name")
-        if not str(p.get("param_sql") or "").strip():
-            problems.append(f"param {p.get('param_name')}: param_sql is empty")
+        if not _IDENT.match(str(p.get("rule_name") or "")):
+            problems.append(f"PARAM rule {p.get('rule_id')}: rule_name must be a plain name")
+        if not _text(p):
+            problems.append(f"PARAM rule {p.get('rule_name')}: rule_sql is empty")
 
     for x in sample.exclusions:
-        name, kind = x.get("exclusion_name") or x.get("exclusion_id"), _up(x.get("rule_type"), "SQL")
+        name, kind = x.get("rule_name"), _up(x.get("rule_type"), "SQL")
         if kind not in EXCLUSION_TYPES:
-            problems.append(f"exclusion {name}: rule_type must be one of {', '.join(EXCLUSION_TYPES)}")
-        elif kind == "SQL" and not str(x.get("exclusion_sql") or "").strip():
-            problems.append(f"exclusion {name}: exclusion_sql is empty")
+            problems.append(f"EXCLUSION rule {name}: rule_type must be one of {', '.join(EXCLUSION_TYPES)}")
+        elif kind == "SQL" and not _text(x):
+            problems.append(f"EXCLUSION rule {name}: rule_sql is empty")
         elif kind in HISTORY_TYPES:
-            problems += _history_problems(f"exclusion {name}", x)
+            problems += _history_problems(f"EXCLUSION rule {name}", x)
 
     for p in sample.priorities:
-        name, kind = p.get("criterion_name") or p.get("priority_id"), _up(p.get("rule_type"), "CONDITION")
+        name, kind = p.get("rule_name"), _up(p.get("rule_type"), "CONDITION")
         if kind not in PRIORITY_TYPES:
-            problems.append(f"priority {name}: rule_type must be one of {', '.join(PRIORITY_TYPES)}")
-        elif kind in ("CONDITION", "EXPRESSION") and not str(p.get("criterion_sql") or "").strip():
-            problems.append(f"priority {name}: criterion_sql is empty")
+            problems.append(f"PRIORITY rule {name}: rule_type must be one of {', '.join(PRIORITY_TYPES)}")
+        elif kind in ("CONDITION", "EXPRESSION") and not _text(p):
+            problems.append(f"PRIORITY rule {name}: rule_sql is empty")
         elif kind in HISTORY_TYPES:
-            problems += _history_problems(f"priority {name}", p)
+            problems += _history_problems(f"PRIORITY rule {name}", p)
         if kind == "EXPRESSION" and _up(p.get("sort_dir"), "ASC") not in ("ASC", "DESC"):
-            problems.append(f"priority {name}: sort_dir must be ASC or DESC")
+            problems.append(f"PRIORITY rule {name}: sort_dir must be ASC or DESC")
+        elif kind != "EXPRESSION" and p.get("sort_dir") not in (None, ""):
+            problems.append(f"PRIORITY rule {name}: sort_dir is only used by rule_type EXPRESSION")
 
-    orders = [lvl["level_order"] for lvl in sample.levels]
+    orders = [lvl.get("level_order") for lvl in sample.levels]
+    if None in orders:
+        problems.append("every LEVEL rule needs level_order")
     if len(orders) != len(set(orders)):
-        problems.append(f"gre_sampling_strata level_order values repeat: {orders}")
+        problems.append(f"LEVEL rules repeat a level_order: {orders}")
     for lvl in sample.levels:
         problems += _level_problems(lvl)
 
     if str(c.get("output_table") or "").strip():
         if not sample.output_cols:
-            problems.append("output_table needs gre_sampling_output_col rows")
-        names = [_up(o.get("column_name")) for o in sample.output_cols]
+            problems.append("output_table needs OUTPUT rules")
+        names = [_up(o.get("rule_name")) for o in sample.output_cols]
         for o in sample.output_cols:
-            n = str(o.get("column_name") or "")
+            n = str(o.get("rule_name") or "")
             if not _IDENT.match(n):
-                problems.append(f"output column {n!r} must be a plain column name")
+                problems.append(f"OUTPUT rule {n!r}: rule_name must be a plain column name")
             elif n.lower() in (*OUTPUT_META_COLS, "last_updated_datetime"):
-                problems.append(f"output column {n!r} is one the engine writes itself")
-            if not str(o.get("expr_sql") or "").strip():
-                problems.append(f"output column {n}: expr_sql is empty")
+                problems.append(f"OUTPUT rule {n!r}: a column the engine writes itself")
+            if not _text(o):
+                problems.append(f"OUTPUT rule {n}: rule_sql is empty")
         if len(names) != len(set(names)):
-            problems.append("output column names repeat")
+            problems.append("OUTPUT rule names repeat")
     elif sample.output_cols:
-        problems.append("gre_sampling_output_col rows need gre_sampling_config.output_table")
+        problems.append("OUTPUT rules need gre_sampling_config.output_table")
     return problems
+
+
+def _rules_of(sample: Sample, cls: str) -> list:
+    if cls == "BUCKET":
+        return [b for lvl in sample.levels for b in lvl["buckets"]]
+    return {"PARAM": sample.params, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
+            "LEVEL": sample.levels, "OUTPUT": sample.output_cols}[cls]
 
 
 def _history_problems(what: str, row: dict) -> list:
@@ -250,21 +288,21 @@ def _history_problems(what: str, row: dict) -> list:
 
 
 def _level_problems(lvl: dict) -> list:
-    name, out = lvl.get("level_name") or lvl["strata_id"], []
+    name, out = lvl.get("rule_name"), []
     if _up(lvl.get("unlisted_policy"), "SHARE") not in UNLISTED_POLICIES:
         out.append(f"level {name}: unlisted_policy must be one of {', '.join(UNLISTED_POLICIES)}")
     if not lvl["value_level"] and not lvl["buckets"]:
-        out.append(f"level {name}: no stratify_expr and no gre_sampling_bucket rows")
+        out.append(f"level {name}: no rule_sql (an expression) and no BUCKET rules (conditions)")
     groups = {}
     for b in lvl["buckets"]:
-        bname, mode = str(b.get("bucket_name") or ""), _up(b.get("quota_mode"), "FRACTION")
+        bname, mode = str(b.get("rule_name") or ""), _up(b.get("quota_mode"), "FRACTION")
         what = f"level {name} bucket {bname!r}"
-        if not bname.strip() or "/" in bname:
-            out.append(f"{what}: bucket_name must be set and must not contain '/'")
-        if lvl["value_level"] and str(b.get("bucket_sql") or "").strip():
-            out.append(f"{what}: bucket_sql is only used on a level without stratify_expr")
-        if not lvl["value_level"] and not str(b.get("bucket_sql") or "").strip():
-            out.append(f"{what}: bucket_sql is empty")
+        if "/" in bname:
+            out.append(f"{what}: rule_name must not contain '/'")
+        if lvl["value_level"] and _text(b):
+            out.append(f"{what}: rule_sql is only used on a level without an expression")
+        if not lvl["value_level"] and not _text(b):
+            out.append(f"{what}: rule_sql (the bucket's condition) is empty")
         if mode not in QUOTA_MODES:
             out.append(f"{what}: quota_mode must be one of {', '.join(QUOTA_MODES)}")
         fraction = b.get("target_fraction")
@@ -291,8 +329,9 @@ def _level_problems(lvl: dict) -> list:
 # Queries
 # ---------------------------------------------------------------------------
 
-def _col(prefix: str, row_id) -> str:
-    return f"smp_{prefix}_{row_id}"
+def _col(rule: dict) -> str:
+    """The pulled column holding a rule's flag or value (rule_id is unique in gre_sampling_rule)."""
+    return f"smp_r_{rule['rule_id']}"
 
 
 def _flag(sql: str) -> str:
@@ -313,18 +352,18 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     columns = list(keys)
     for lvl in sample.levels:
         if lvl["value_level"]:
-            columns.append(f"{sql(lvl['stratify_expr'])} AS {_col('strata', lvl['strata_id'])}")
+            columns.append(f"({sql(lvl['rule_sql'])}) AS {_col(lvl)}")
         else:
-            columns += [f"{_flag(sql(b['bucket_sql']))} AS {_col('b', b['bucket_id'])}" for b in lvl["buckets"]]
+            columns += [f"{_flag(sql(b['rule_sql']))} AS {_col(b)}" for b in lvl["buckets"]]
     for x in sample.exclusions:
         if _up(x.get("rule_type"), "SQL") == "SQL":
-            columns.append(f"{_flag(sql(x['exclusion_sql']))} AS {_col('x', x['exclusion_id'])}")
+            columns.append(f"{_flag(sql(x['rule_sql']))} AS {_col(x)}")
     for p in sample.priorities:
         kind = _up(p.get("rule_type"), "CONDITION")
         if kind == "CONDITION":
-            columns.append(f"{_flag(sql(p['criterion_sql']))} AS {_col('p', p['priority_id'])}")
+            columns.append(f"{_flag(sql(p['rule_sql']))} AS {_col(p)}")
         elif kind == "EXPRESSION":
-            columns.append(f"({sql(p['criterion_sql'])}) AS {_col('p', p['priority_id'])}")
+            columns.append(f"({sql(p['rule_sql'])}) AS {_col(p)}")
     if str(c.get("diversity_expr") or "").strip():
         columns.append(f"({sql(c['diversity_expr'])}) AS {DIVERSITY}")
     priority = sql(c.get("priority_rank_sql"))
@@ -339,7 +378,7 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
            "count": f"SELECT COUNT(*) AS cnt FROM {universe} WHERE ({scope})" if quick_exclusion else None,
            "pull": f"SELECT {', '.join(columns)} FROM {universe} WHERE {where}", "output": None}
     if str(c.get("output_table") or "").strip():
-        exprs = [f"{sql(o['expr_sql'])} AS {o['column_name']}" for o in sample.output_cols]
+        exprs = [f"{sql(o['rule_sql'])} AS {o['rule_name']}" for o in sample.output_cols]
         out["output_table"] = sql(c["output_table"], identifier=True)
         aliases = [f"{k} AS smp_key_{i}" for i, k in enumerate(keys)]
         out["output"] = f"SELECT {', '.join([*aliases, *exprs])} FROM {universe} WHERE ({scope})"
@@ -347,19 +386,19 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
 
 
 def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
-    """{as_of_date} + the run's parameters + every gre_sampling_param lookup (a given value wins).
+    """{as_of_date} + the run's parameters + every PARAM rule's lookup (a given value wins).
     A lookup with no value raises LookupError (often: the data is not loaded yet - retrying can help)."""
     params = {"as_of_date": as_of.isoformat(), **(given or {})}
     given_names = {str(k).lower() for k in (given or {})}
     for p in sample.params:
-        name = str(p["param_name"])
+        name = str(p["rule_name"])
         if name.lower() in given_names:
             continue
-        text = substitute_params(s.resolve_env(str(p["param_sql"]).strip(), identifier=False), params)
+        text = substitute_params(s.resolve_env(_text(p), identifier=False), params)
         rows = conn.query(text)
         value = next(iter(rows[0].values()), None) if rows else None
         if value is None:
-            raise LookupError(f"run parameter {name}: its param_sql returned no value")
+            raise LookupError(f"run parameter {name}: its rule_sql returned no value")
         params[name] = value.isoformat() if isinstance(value, date) else value
     return params
 
@@ -406,17 +445,17 @@ def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key:
 
 def apply_exclusions(rows: list, sample: Sample, history: dict) -> tuple:
     """(candidates, excluded, counts): each excluded row gets row['_reason'] = the first matching rule."""
-    counts = {str(x["exclusion_name"]): 0 for x in sample.exclusions}
+    counts = {str(x["rule_name"]): 0 for x in sample.exclusions}
     candidates, excluded = [], []
     for row in rows:
         reason = None
         for x in sample.exclusions:
             if _up(x.get("rule_type"), "SQL") == "SQL":
-                hit = row.get(_col("x", x["exclusion_id"])) == 1
+                hit = row.get(_col(x)) == 1
             else:
-                hit = row["_key"] in history[x["exclusion_id"]]["selected"]
+                hit = row["_key"] in history[x["rule_id"]]["selected"]
             if hit:
-                reason = str(x["exclusion_name"])
+                reason = str(x["rule_name"])
                 break
         if reason:
             row["_reason"] = reason
@@ -439,7 +478,7 @@ def order_candidates(rows: list, sample: Sample, history: dict) -> list:
     if any(BASE_RANK in r for r in rows[:1]):
         rows.sort(key=lambda r: r[BASE_RANK])
     for p in reversed(sample.priorities):
-        kind, col = _up(p.get("rule_type"), "CONDITION"), _col("p", p["priority_id"])
+        kind, col = _up(p.get("rule_type"), "CONDITION"), _col(p)
         if kind == "CONDITION":
             rows.sort(key=lambda r: 0 if r.get(col) == 1 else 1)
         elif kind == "EXPRESSION":
@@ -449,10 +488,10 @@ def order_candidates(rows: list, sample: Sample, history: dict) -> list:
             else:
                 rows.sort(key=lambda r: _sortable(r.get(col)))
         elif kind == "PRIOR_CANDIDATE":
-            seen = history[("p", p["priority_id"])]["unselected"]
+            seen = history[p["rule_id"]]["unselected"]
             rows.sort(key=lambda r: 0 if r["_key"] in seen else 1)
         elif kind == "PRIOR_SELECTION":
-            seen = history[("p", p["priority_id"])]["selected"]
+            seen = history[p["rule_id"]]["selected"]
             rows.sort(key=lambda r: 1 if r["_key"] in seen else 0)
     for i, r in enumerate(rows):
         r["_order"] = i
@@ -565,10 +604,10 @@ class Stratifier:
         if not by_pattern:
             return {}
         best = min(by_pattern, key=_specificity)
-        return {_norm(b["bucket_name"]): b for b in by_pattern[best]}
+        return {_norm(b["rule_name"]): b for b in by_pattern[best]}
 
     def _allocate(self, rows: list, target: int, index: int, path: str) -> list:
-        while index < len(self.levels) and not _matches(path, self.levels[index].get("applies_to")):
+        while index < len(self.levels) and not _matches(path, self.levels[index].get("parent_path")):
             index += 1
         if index >= len(self.levels) or not rows:
             chosen = self.pick(rows, target, path or "ALL")
@@ -586,16 +625,15 @@ class Stratifier:
         buckets, labels = {}, {}
         for r in rows:
             if level["value_level"]:
-                value = r.get(_col("strata", level["strata_id"]))
+                value = r.get(_col(level))
                 key = _norm(value)
-                label = str(group[key]["bucket_name"]).rstrip() if key in group else _label(value)
+                label = str(group[key]["rule_name"]).rstrip() if key in group else _label(value)
             else:
-                hit = next((b for b in group.values() if r.get(_col("b", b["bucket_id"])) == 1), None)
-                key, label = (_norm(hit["bucket_name"]), str(hit["bucket_name"]).rstrip()) if hit \
+                hit = next((b for b in group.values() if r.get(_col(b)) == 1), None)
+                key, label = (_norm(hit["rule_name"]), str(hit["rule_name"]).rstrip()) if hit \
                     else (_norm(OTHER_BUCKET), OTHER_BUCKET)
             buckets.setdefault(key, []).append(r)
             labels.setdefault(key, label)
-            r.setdefault("_buckets", {})[level["strata_id"]] = label
 
         unlisted = _up(level.get("unlisted_policy"), "SHARE")
 
@@ -663,55 +701,39 @@ class Stratifier:
 
 
 # ---------------------------------------------------------------------------
-# Audit, errors, persistence
+# The run row, persistence
 # ---------------------------------------------------------------------------
 
 def count_prior_attempts(conn: Connection, s: Settings, config_id, run_key: str) -> int:
-    rows = conn.query(f"SELECT COUNT(*) AS cnt FROM {s.meta_db}.gre_sampling_audit "
-                      f"WHERE sample_config_id = ? AND run_key = ?", [config_id, run_key])
+    rows = conn.query(f"SELECT COUNT(*) AS cnt FROM {s.meta_db}.gre_sampling_run "
+                      f"WHERE config_id = ? AND run_key = ?", [config_id, run_key])
     return int(rows[0]["cnt"]) if rows else 0
 
 
-def _start_audit(conn, s, run_id, run_key, config, method, seed, target, as_of, params, triggered_by, started):
+def _start_run(conn, s, run_id, run_key, config, method, seed, target, as_of, params, triggered_by, started):
     conn.execute(f"""
-        INSERT INTO {s.meta_db}.gre_sampling_audit (
-            run_id, run_key, sample_config_id, project_name, process_name, sample_name, sampling_method,
-            random_seed, target_volume, as_of_date, run_params_txt, started_at, status, triggered_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?)""",
-        [run_id, run_key, config.get("config_id"), config.get("project_name"), config.get("process_name"),
-         config.get("sample_name"), method, seed, target, as_of, json.dumps(params, default=str)[:4000],
-         started, triggered_by])
+        INSERT INTO {s.meta_db}.gre_sampling_run (
+            run_id, config_id, project_name, process_name, sample_name, run_key, as_of_date, sampling_method,
+            random_seed, target_volume, run_params_txt, status, etl_is_curr_ind, triggered_by, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', 'N', ?, ?)""",
+        [run_id, config.get("config_id"), config.get("project_name"), config.get("process_name"),
+         config.get("sample_name"), run_key, as_of, method, seed, target, json.dumps(params, default=str)[:4000],
+         triggered_by, started])
 
 
-def _finish_audit(conn, s, run_id, status, summary, message=None):
+def _finish_run(conn, s, run_id, summary, error_type=None, message=None, detail=None):
+    """Close the run row: COMPLETED (current, with its run_report) or ERROR (error_type, message, detail)."""
+    report = None if error_type else json.dumps({"exclusions": summary.get("exclusions"),
+                                                 "buckets": summary.get("buckets")}, default=str)
     conn.execute(f"""
-        UPDATE {s.meta_db}.gre_sampling_audit
+        UPDATE {s.meta_db}.gre_sampling_run
         SET status = ?, ended_at = ?, total_in_scope = ?, total_excluded = ?, total_candidates = ?,
-            total_selected = ?, shortfall = ?, error_message = ?
+            total_selected = ?, shortfall = ?, error_type = ?, error_message = ?, error_detail = ?, run_report = ?,
+            etl_is_curr_ind = ?, last_updated_datetime = ?
         WHERE run_id = ?""",
-        [status, s.now(), summary.get("in_scope"), summary.get("excluded"), summary.get("candidates"),
-         summary.get("selected"), summary.get("shortfall"), (message or None) and message[:2000], run_id])
-
-
-def log_error(conn: Connection, s: Settings, run_id, config: dict, run_key, error_type: str, message: str,
-              detail: Optional[str] = None) -> None:
-    """One gre_sampling_errors row; earlier runs' errors for the same (config_id, run_key) go inactive.
-    Never raises: a failure here must not hide the real error."""
-    try:
-        conn.execute(f"""
-            UPDATE {s.meta_db}.gre_sampling_errors
-            SET active_ind = 'N', last_updated_datetime = ?
-            WHERE config_id = ? AND run_key = ? AND run_id <> ? AND active_ind = 'Y'""",
-            [s.now(), config.get("config_id"), run_key, run_id])
-        conn.execute(f"""
-            INSERT INTO {s.meta_db}.gre_sampling_errors (
-                run_id, config_id, process_name, run_key, error_type, error_message, error_detail, active_ind,
-                occurred_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Y', ?)""",
-            [run_id, config.get("config_id"), config.get("process_name"), run_key, error_type, message[:2000],
-             detail, s.now()])
-    except Exception as e:  # noqa: BLE001
-        log.error("could not write gre_sampling_errors (run_id=%s): %s", run_id, e)
+        ["ERROR" if error_type else "COMPLETED", s.now(), summary.get("in_scope"), summary.get("excluded"),
+         summary.get("candidates"), summary.get("selected"), summary.get("shortfall"), error_type,
+         (message or None) and message[:2000], detail, report, "N" if error_type else "Y", s.now(), run_id])
 
 
 def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) -> dict:
@@ -738,22 +760,16 @@ def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) 
     return out
 
 
-def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, stats, output,
+def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, output,
              as_of: date) -> int:
-    """Write the run and retire earlier runs of the same (config_id, run_key); returns how many earlier runs
-    were retired. Runs inside the caller's transaction."""
+    """Write the run's rows and retire earlier runs of the same (config_id, run_key); returns how many earlier
+    runs were retired. Runs inside the caller's transaction."""
     now = s.now()
     c = sample.config
     cid, project, process = sample.config_id, c.get("project_name"), c.get("process_name")
     order = {r["_key"]: i + 1 for i, r in enumerate(chosen)}
-    rows, attrs = [], []
-    for r in candidates:
-        rows.append([run_id, cid, project, process, run_key, as_of, r["_key"], r["_order"] + 1,
-                     1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"), now])
-        for lvl in sample.levels:
-            if lvl["strata_id"] in r.get("_buckets", {}):
-                attrs.append([run_id, cid, run_key, r["_key"], lvl["strata_id"], lvl["level_order"],
-                              r["_buckets"][lvl["strata_id"]], now])
+    rows = [[run_id, cid, project, process, run_key, as_of, r["_key"], r["_order"] + 1,
+             1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"), now] for r in candidates]
     if _up(c.get("keep_excluded"), "1") not in ("0", "N", "FALSE"):
         rows += [[run_id, cid, project, process, run_key, as_of, r["_key"], None, 0, None, 1, r["_reason"], None,
                   now] for r in excluded]
@@ -763,21 +779,9 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
             selected_flag, selection_order, excluded_flag, exclusion_reason, stratum_path, etl_is_curr_ind,
             load_datetime
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y', ?)""", rows, s.chunk_rows)
-    conn.executemany(f"""
-        INSERT INTO {s.meta_db}.gre_sample_selection_attrs (
-            sample_run_id, config_id, run_key, case_key, strata_id, level_order, bucket_value, etl_is_curr_ind,
-            load_datetime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Y', ?)""", attrs, s.chunk_rows)
-    conn.executemany(f"""
-        INSERT INTO {s.meta_db}.gre_sampling_run_stats (
-            sample_run_id, config_id, run_key, sample_cycle, stat_type, stat_name, candidate_cnt, target_cnt,
-            selected_cnt, etl_is_curr_ind, load_datetime
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y', ?)""",
-        [[run_id, cid, run_key, as_of, *st, now] for st in stats], s.chunk_rows)
-    tables = [f"{s.meta_db}.gre_sample_selections", f"{s.meta_db}.gre_sample_selection_attrs",
-              f"{s.meta_db}.gre_sampling_run_stats"]
+    tables = [f"{s.meta_db}.gre_sample_selections"]
     if output is not None:
-        names = [str(o["column_name"]) for o in sample.output_cols]
+        names = [str(o["rule_name"]) for o in sample.output_cols]
         conn.executemany(
             f"INSERT INTO {queries['output_table']} ({', '.join([*OUTPUT_META_COLS, *names])}) "
             f"VALUES ({', '.join(['?'] * (len(OUTPUT_META_COLS) + len(names)))})",
@@ -785,16 +789,17 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
               *(output[r["_key"]].get(n.lower()) for n in names)] for r in chosen], s.chunk_rows)
         tables.append(queries["output_table"])
 
-    prior = conn.query(f"SELECT DISTINCT sample_run_id FROM {s.meta_db}.gre_sample_selections "
-                       f"WHERE config_id = ? AND run_key = ? AND sample_run_id <> ? AND etl_is_curr_ind = 'Y'",
-                       [cid, run_key, run_id])
     for table in tables:
         conn.execute(f"""
             UPDATE {table}
             SET etl_is_curr_ind = 'N', last_updated_datetime = ?
             WHERE config_id = ? AND run_key = ? AND sample_run_id <> ? AND etl_is_curr_ind = 'Y'""",
             [now, cid, run_key, run_id])
-    return len(prior)
+    return conn.execute(f"""
+        UPDATE {s.meta_db}.gre_sampling_run
+        SET etl_is_curr_ind = 'N', last_updated_datetime = ?
+        WHERE config_id = ? AND run_key = ? AND run_id <> ? AND etl_is_curr_ind = 'Y'""",
+        [now, cid, run_key, run_id])
 
 
 # ---------------------------------------------------------------------------
@@ -809,11 +814,11 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
 
     run_key    : which logical run this is; may hold {name} tokens (e.g. '{batch_id}'). Default: the as-of
                  date. A rerun of the same (config_id, run_key) replaces the earlier one as the current sample.
-    run_params : values for {name} / $name tokens in any configured SQL; gre_sampling_param lookups add more.
+    run_params : values for {name} / $name tokens in any configured SQL; PARAM rules' lookups add more.
                  {as_of_date} and {run_key} are always available.
-    seed       : RANDOM / SYSTEMATIC seed (default: a new one, stored on the audit row).
+    seed       : RANDOM / SYSTEMATIC seed (default: a new one, stored on the run row).
     as_of      : the business date of the run (default: today in Settings.timezone) -> sample_cycle.
-    dry_run    : do everything but write (no audit row).
+    dry_run    : do everything but write (no run row).
     """
     as_of = as_of or s.today()
     started = s.now()
@@ -829,7 +834,7 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         run_seed = int(seed) if seed not in (None, "") else random.SystemRandom().getrandbits(63)
     template = str(run_key or "{as_of_date}")
 
-    early = None   # (kind, error_type, exception) of a failure before the audit row exists
+    early = None   # (kind, error_type, exception) of a failure before the run row exists
     try:
         params = resolve_params(conn, s, sample, run_params, as_of)
         run_key = substitute_params(template, params, escape=False)
@@ -859,16 +864,15 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         log.error("sampling config_id=%s %s: %s", config_id, error_type, message)
         summary.update(status="ERROR", error_kind=kind, error_type=error_type, error=message)
         if not dry_run:
-            log_error(conn, s, run_id, config, run_key, error_type, message, detail)
             try:
-                _finish_audit(conn, s, run_id, "ERROR", summary, f"{error_type}: {message}")
-            except Exception as e:  # noqa: BLE001
-                log.error("could not close the audit row of %s: %s", run_id, e)
+                _finish_run(conn, s, run_id, summary, error_type, message, detail)
+            except Exception as e:  # noqa: BLE001 - must not hide the real error
+                log.error("could not close the run row of %s: %s", run_id, e)
         return summary
 
     if not dry_run:
-        _start_audit(conn, s, run_id, run_key, config, method, run_seed, target, as_of, params, triggered_by,
-                     started)
+        _start_run(conn, s, run_id, run_key, config, method, run_seed, target, as_of, params, triggered_by,
+                   started)
     if early:
         return fail(early[0], early[1], early[2])
     problems = config_problems(sample)
@@ -888,10 +892,10 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         history, cache = {}, {}
         for x in sample.exclusions:
             if _up(x.get("rule_type"), "SQL") in HISTORY_TYPES:
-                history[x["exclusion_id"]] = _history(conn, s, sample, x, run_key, as_of, cache)
+                history[x["rule_id"]] = _history(conn, s, sample, x, run_key, as_of, cache)
         for p in sample.priorities:
             if _up(p.get("rule_type"), "CONDITION") in HISTORY_TYPES:
-                history[("p", p["priority_id"])] = _history(conn, s, sample, p, run_key, as_of, cache)
+                history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache)
     except Exception as e:  # noqa: BLE001
         return fail("technical", "PULL_FAILURE", e, traceback.format_exc())
 
@@ -928,13 +932,11 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         summary["status"] = "COMPLETED"
         return summary
 
-    stats = [("EXCLUSION", name, n, None, None) for name, n in counts.items()]
-    stats += [("BUCKET", path, v["candidates"], v["target"], v["selected"]) for path, v in sorted(strat.nodes.items())]
     try:
         with conn.transaction():
             summary["retired_runs"] = _persist(conn, s, run_id, run_key, sample, queries, candidates, excluded,
-                                               chosen, stats, output, as_of)
-            _finish_audit(conn, s, run_id, "COMPLETED", summary)
+                                               chosen, output, as_of)
+            _finish_run(conn, s, run_id, summary)
     except Exception as e:  # noqa: BLE001
         return fail("technical", "PERSIST_FAILURE", e, traceback.format_exc())
 

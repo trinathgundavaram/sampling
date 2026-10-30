@@ -56,7 +56,7 @@ def test_a_most_specific_parent_path_wins(raw, conn, settings):
     _config(raw.db, 20)
     insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
     insert_strata(raw.db, 2, 1, 1, "area", "area", {"P": {"target_fraction": 0.2, "parent_path": "*"}})
-    insert_bucket(raw.db, 300, 2, "P", parent_path="Denied", target_fraction=0.8)
+    insert_bucket(raw.db, 300, 1, "P", parent_path="Denied", target_fraction=0.8)
     out = _run(conn, settings)
     assert _selected(out) == {"Denied/P": 8, "Denied/Q": 2, "Withdrawn/P": 2, "Withdrawn/Q": 8}
 
@@ -90,16 +90,15 @@ def test_c_condition_buckets_share_equally_and_refill(raw, conn, settings):
     _universe(raw.db, _cases("a", 2, "D", code="IP") + _cases("b", 50, "D", code="OP")
               + _cases("c", 50, "D", code="BH") + _cases("z", 50, "D", code="ZZ"))
     _config(raw.db, 20)
-    raw.db.execute("INSERT INTO gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, "
-                   "applies_to, unlisted_policy, act_ind) VALUES (1, 1, 0, 'area', NULL, '*', 'SKIP', 1)")
+    insert_rule(raw.db, "LEVEL", 10, "area", level_order=0, unlisted_policy="SKIP")   # no rule_sql: conditions
     for i, (name, sql) in enumerate((("Inpatient", "code = 'IP'"), ("Outpatient", "code = 'OP'"),
                                      ("Behavioral", "code IN ('BH', 'OP')")), 1):
-        insert_bucket(raw.db, i, 1, name, seq_no=i, bucket_sql=sql, quota_mode="REMAINDER")
+        insert_bucket(raw.db, 10 + i, 0, name, seq_no=i, rule_sql=sql, quota_mode="REMAINDER")
     out = _run(conn, settings)
     # the first true condition wins (OP rows are Outpatient), IP has 2: the other two share the rest
     assert _selected(out) == {"Inpatient": 2, "Outpatient": 9, "Behavioral": 9, "OTHER": 0}
-    attrs = _rows(raw, "SELECT bucket_value, COUNT(*) FROM gre_sample_selection_attrs GROUP BY 1 ORDER BY 1")
-    assert attrs == [("Behavioral", 50), ("Inpatient", 2), ("OTHER", 50), ("Outpatient", 50)]
+    paths = _rows(raw, "SELECT stratum_path, COUNT(*) FROM gre_sample_selections GROUP BY 1 ORDER BY 1")
+    assert paths == [("Behavioral", 50), ("Inpatient", 2), ("OTHER", 50), ("Outpatient", 50)]
 
 
 # ── D: variety across codes ───────────────────────────────────────────────
@@ -125,10 +124,8 @@ def test_e_output_snapshot_of_the_selected_cases(raw, conn, settings):
                    "case_key VARCHAR, selection_order INTEGER, priority_rank INTEGER, stratum_path VARCHAR, "
                    "etl_is_curr_ind VARCHAR, load_datetime TIMESTAMP, last_updated_datetime TIMESTAMP, "
                    "case_id VARCHAR, code_lc VARCHAR)")
-    insert_rule(raw.db, "gre_sampling_output_col", output_col_id=1, config_id=1, act_ind=1, seq_no=1,
-                column_name="case_id", expr_sql="case_id")
-    insert_rule(raw.db, "gre_sampling_output_col", output_col_id=2, config_id=1, act_ind=1, seq_no=2,
-                column_name="code_lc", expr_sql="LOWER(code)")
+    insert_rule(raw.db, "OUTPUT", 1, "case_id", seq_no=1, rule_sql="case_id")
+    insert_rule(raw.db, "OUTPUT", 2, "code_lc", seq_no=2, rule_sql="LOWER(code)")
     first = _run(conn, settings)
     assert first["status"] == "COMPLETED", first
     assert _rows(raw, "SELECT selection_order, case_id, code_lc FROM out_t ORDER BY 1") == \
@@ -140,7 +137,7 @@ def test_e_output_snapshot_of_the_selected_cases(raw, conn, settings):
 def test_e_output_without_columns_is_a_config_problem(raw, conn, settings):
     _universe(raw.db, _cases("d", 3, "D"))
     _config(raw.db, 2, output_table="out_t")
-    assert config_problems(load_config(conn, settings, 1)) == ["output_table needs gre_sampling_output_col rows"]
+    assert config_problems(load_config(conn, settings, 1)) == ["output_table needs OUTPUT rules"]
 
 
 # ── F: history: dedupe and carry-over ─────────────────────────────────────
@@ -150,8 +147,7 @@ def test_f_prior_selection_excluded_and_unselected_carried_over(raw, conn, setti
     _config(raw.db, 3)
     first = _run(conn, settings, run_key="W1", as_of=AS_OF)
     assert first["selected"] == 3
-    insert_rule(raw.db, "gre_sampling_exclusion", exclusion_id=1, config_id=1, act_ind=1, seq_no=1,
-                exclusion_name="ALREADY_AUDITED", rule_type="PRIOR_SELECTION", lookback_days=30,
+    insert_rule(raw.db, "EXCLUSION", 1, "ALREADY_AUDITED", seq_no=1, rule_type="PRIOR_SELECTION", lookback_days=30,
                 history_scope="CONFIG")
     # priority: highest case_id first, but last cycle's unselected cases before anything else
     set_config(raw.db, priority_rank_sql="case_id DESC")
@@ -163,9 +159,9 @@ def test_f_prior_selection_excluded_and_unselected_carried_over(raw, conn, setti
                                        "AND selected_flag = 1")}
     assert picked == {"case_id=c009", "case_id=c008", "case_id=c007"}
 
-    insert_rule(raw.db, "gre_sampling_priority", priority_id=1, config_id=1, act_ind=1, seq_no=1,
-                criterion_name="CARRY_OVER", rule_type="PRIOR_CANDIDATE", lookback_days=30, history_scope="CONFIG")
-    raw.db.execute("UPDATE gre_sampling_exclusion SET act_ind = 0")
+    insert_rule(raw.db, "PRIORITY", 2, "CARRY_OVER", seq_no=1, rule_type="PRIOR_CANDIDATE", lookback_days=30,
+                history_scope="CONFIG")
+    raw.db.execute("UPDATE gre_sampling_rule SET act_ind = 0 WHERE rule_class = 'EXCLUSION'")
     third = _run(conn, settings, run_key="W3", as_of=AS_OF + timedelta(days=14))
     # c003..c006 were considered (W1, W2) but never selected: they come first
     picked = {r[0] for r in _rows(raw, "SELECT case_key FROM gre_sample_selections WHERE run_key = 'W3' "
@@ -177,23 +173,22 @@ def test_f_sql_exclusions_first_match_and_stats(raw, conn, settings):
     _universe(raw.db, _cases("a", 5, "D", flag="Y") + _cases("b", 5, "D", code="Q") + _cases("c", 5, "D"))
     _config(raw.db, 3, keep_excluded=1)
     for i, (name, sql) in enumerate((("FLAGGED", "flag = 'Y'"), ("CODE_Q", "code = 'Q' OR flag = 'Y'")), 1):
-        insert_rule(raw.db, "gre_sampling_exclusion", exclusion_id=i, config_id=1, act_ind=1, seq_no=i,
-                    exclusion_name=name, rule_type="SQL", exclusion_sql=sql)
+        insert_rule(raw.db, "EXCLUSION", i, name, seq_no=i, rule_type="SQL", rule_sql=sql)
     out = _run(conn, settings)
     assert out["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and out["candidates"] == 5 and out["excluded"] == 10
-    stats = _rows(raw, "SELECT stat_type, stat_name, candidate_cnt FROM gre_sampling_run_stats WHERE "
-                       "stat_type = 'EXCLUSION' ORDER BY 2")
-    assert stats == [("EXCLUSION", "CODE_Q", 5), ("EXCLUSION", "FLAGGED", 5)]
+    report = json.loads(_rows(raw, "SELECT run_report FROM gre_sampling_run")[0][0])
+    assert report["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and report["buckets"]["ALL"]["selected"] == 3
+    reasons = _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM gre_sample_selections WHERE excluded_flag = 1 "
+                         "GROUP BY 1 ORDER BY 1")
+    assert reasons == [("CODE_Q", 5), ("FLAGGED", 5)]
 
 
 def test_priority_conditions_and_expressions_in_order(raw, conn, settings):
     _universe(raw.db, [("p1", "D", "A", "X", 0, "B1", "N"), ("p2", "D", "A", "Y", 1, "B1", "N"),
                        ("p3", "D", "A", "X", 1, "B1", "N"), ("p4", "D", "A", "Y", None, "B1", "N")])
     _config(raw.db, 4, priority_rank_sql=None)
-    insert_rule(raw.db, "gre_sampling_priority", priority_id=1, config_id=1, act_ind=1, seq_no=1,
-                criterion_name="REV", rule_type="CONDITION", criterion_sql="rev = 1")
-    insert_rule(raw.db, "gre_sampling_priority", priority_id=2, config_id=1, act_ind=1, seq_no=2,
-                criterion_name="CODE", rule_type="EXPRESSION", criterion_sql="code", sort_dir="DESC")
+    insert_rule(raw.db, "PRIORITY", 1, "REV", seq_no=1, rule_type="CONDITION", rule_sql="rev = 1")
+    insert_rule(raw.db, "PRIORITY", 2, "CODE", seq_no=2, rule_type="EXPRESSION", rule_sql="code", sort_dir="DESC")
     _run(conn, settings)
     order = _rows(raw, "SELECT case_key FROM gre_sample_selections ORDER BY selection_order")
     assert [r[0] for r in order] == ["case_id=p2", "case_id=p3", "case_id=p4", "case_id=p1"]
@@ -205,11 +200,10 @@ def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):
     _universe(raw.db, _cases("o", 10, "D", batch="B1") + _cases("n", 6, "D", batch="B2"))
     _config(raw.db, 4)
     set_config(raw.db, scope_sql="batch = '{batch_id}'")
-    insert_rule(raw.db, "gre_sampling_param", param_id=1, config_id=1, act_ind=1, seq_no=1, param_name="batch_id",
-                param_sql="SELECT MAX(batch) FROM u")
+    insert_rule(raw.db, "PARAM", 1, "batch_id", seq_no=1, rule_sql="SELECT MAX(batch) FROM u")
     out = _run(conn, settings, run_key="{batch_id}")
     assert out["status"] == "COMPLETED" and out["run_key"] == "B2" and out["in_scope"] == 6
-    assert json.loads(_rows(raw, "SELECT run_params_txt FROM gre_sampling_audit")[0][0])["batch_id"] == "B2"
+    assert json.loads(_rows(raw, "SELECT run_params_txt FROM gre_sampling_run")[0][0])["batch_id"] == "B2"
     given = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": "B1"})
     assert given["run_key"] == "B1" and given["in_scope"] == 10
 
@@ -217,11 +211,10 @@ def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):
 def test_g_param_without_a_value_is_a_technical_failure(raw, conn, settings):
     _universe(raw.db, _cases("o", 3, "D"))
     _config(raw.db, 2)
-    insert_rule(raw.db, "gre_sampling_param", param_id=1, config_id=1, act_ind=1, seq_no=1, param_name="batch_id",
-                param_sql="SELECT MAX(batch) FROM u WHERE 1 = 0")
+    insert_rule(raw.db, "PARAM", 1, "batch_id", seq_no=1, rule_sql="SELECT MAX(batch) FROM u WHERE 1 = 0")
     out = _run(conn, settings)
     assert out["error_kind"] == "technical" and out["error_type"] == "PARAM_FAILURE"
-    assert _rows(raw, "SELECT status FROM gre_sampling_audit") == [("ERROR",)]
+    assert _rows(raw, "SELECT status, error_type FROM gre_sampling_run") == [("ERROR", "PARAM_FAILURE")]
 
 
 # ── validation of the rule rows ───────────────────────────────────────────
@@ -229,13 +222,15 @@ def test_g_param_without_a_value_is_a_technical_failure(raw, conn, settings):
 def test_rule_rows_are_validated(raw, conn, settings):
     _universe(raw.db, _cases("o", 3, "D"))
     _config(raw.db, 2, diversity_cap=2, sampling_method="SYSTEMATIC", diversity_expr="code")
-    insert_rule(raw.db, "gre_sampling_exclusion", exclusion_id=1, config_id=1, act_ind=1, seq_no=1,
-                exclusion_name="H", rule_type="PRIOR_SELECTION", lookback_days=0)
-    insert_rule(raw.db, "gre_sampling_priority", priority_id=1, config_id=1, act_ind=1, seq_no=1,
-                criterion_name="P", rule_type="BOGUS")
+    insert_rule(raw.db, "EXCLUSION", 1, "H", seq_no=1, rule_type="PRIOR_SELECTION", lookback_days=0)
+    insert_rule(raw.db, "PRIORITY", 2, "P", seq_no=1, rule_type="BOGUS")
+    insert_rule(raw.db, "PARAM", 3, "p", rule_sql="SELECT 1", quota_mode="ALL")      # a column PARAM does not use
+    insert_rule(raw.db, "TYPO", 4, "x")
+    insert_bucket(raw.db, 5, 7, "orphan")                                               # no LEVEL 7
     insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"A/B": 0.7, "C": 0.6, "D": {"quota_mode": "ALL",
                                                                           "target_fraction": 0.1}})
     problems = " | ".join(validate(conn, settings, config_id=1)["configs"][0]["problems"])
     for text in ("SYSTEMATIC", "lookback_days must be >= 1", "rule_type must be one of", "must not contain '/'",
-                 "add up to 1.3000", "not used with quota_mode ALL"):
+                 "add up to 1.3000", "not used with quota_mode ALL", "PARAM rule p: quota_mode is not used",
+                 "rule_class 'TYPO'", "level_order 7, which has no LEVEL"):
         assert text in problems, (text, problems)

@@ -1,10 +1,11 @@
 """The sampling engine (sampling/engine.py) end to end on the DuckDB stand-in."""
+import json
 import random
 from datetime import date
 
 import pytest
 
-from conftest import build_universe, insert_bucket, insert_config, insert_rule, insert_strata, set_config, um_config
+from conftest import build_universe, insert_config, insert_strata, um_config
 from sampling.db import build_run_key, generate_run_id, substitute_params
 from sampling.engine import (Sample, Stratifier, build_queries, discover_configs, round_target, run_sampling,
                              run_scope, select, validate)
@@ -44,9 +45,9 @@ def test_select_methods():
 
 
 def test_stratify_any_number_of_levels_shares_equally():
-    rows = [{"smp_strata_1": a, "smp_strata_2": b, "smp_strata_3": c, "_order": 0}
+    rows = [{"smp_r_1": a, "smp_r_2": b, "smp_r_3": c, "_order": 0}
             for a in ("X", "Y") for b in ("P", "Q") for c in ("M", "N") for _ in range(10)]
-    levels = [{"strata_id": i, "level_order": i, "buckets": [], "value_level": True} for i in (1, 2, 3)]
+    levels = [{"rule_id": i, "level_order": i, "buckets": [], "value_level": True} for i in (1, 2, 3)]
     strat = Stratifier(Sample(config={"sampling_method": "RANKED"}, levels=levels), None, "FLOOR")
     chosen = strat.run(rows, 40)
     assert len(chosen) == 40 and len(strat.leaves) == 8 and all(v["selected"] == 5 for v in strat.leaves.values())
@@ -72,16 +73,18 @@ def test_um_regression_matches_frozen_output(raw, conn, settings):
     assert out["selected"] == 150 and out["shortfall"] == 0
 
 
-def test_run_writes_every_candidate_attrs_and_audit(raw, conn, settings):
+def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     build_universe(raw.db)
     um_config(raw.db)
     out = _run(conn, settings, triggered_by="tester")
     sel = _rows(raw, "SELECT COUNT(*), SUM(selected_flag), MIN(run_key), MIN(sample_cycle) FROM gre_sample_selections")
     assert sel[0] == (980, 150, "2026-08-01", AS_OF)
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selection_attrs")[0][0] == 980 * 2
-    audit = _rows(raw, "SELECT status, total_in_scope, total_excluded, total_candidates, total_selected, shortfall, "
-                       "triggered_by, run_id FROM gre_sampling_audit")
-    assert audit == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["sample_run_id"])]
+    run = _rows(raw, "SELECT status, total_in_scope, total_excluded, total_candidates, total_selected, shortfall, "
+                     "triggered_by, run_id, etl_is_curr_ind, error_type FROM gre_sampling_run")
+    assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["sample_run_id"], "Y", None)]
+    report = json.loads(_rows(raw, "SELECT run_report FROM gre_sampling_run")[0][0])
+    assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
+    assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
     assert out["sample_run_id"].startswith("UMCM.weekly_sample::2026-08-01::attempt-1::tester::")
     paths = _rows(raw, "SELECT DISTINCT stratum_path FROM gre_sample_selections WHERE selected_flag = 1")
     assert {p[0] for p in paths} <= set(FROZEN_BY_STRATUM)
@@ -95,8 +98,8 @@ def test_rerun_retires_the_earlier_run_of_the_same_run_key(raw, conn, settings):
     assert "::attempt-2::" in second["sample_run_id"] and second["retired_runs"] == 1
     curr = _rows(raw, "SELECT sample_run_id, etl_is_curr_ind, COUNT(*) FROM gre_sample_selections GROUP BY 1, 2")
     assert {(r[0], r[1]) for r in curr} == {(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")}
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selection_attrs WHERE etl_is_curr_ind = 'Y' AND "
-                      f"sample_run_id = '{first['sample_run_id']}'")[0][0] == 0
+    assert _rows(raw, "SELECT run_id, etl_is_curr_ind FROM gre_sampling_run ORDER BY started_at") == \
+        [(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")]
     other = _run(conn, settings, run_key="OTHER")
     assert other["retired_runs"] == 0
 
@@ -106,7 +109,7 @@ def test_random_reproducible_with_stored_seed(raw, conn, settings):
     um_config(raw.db, sampling_method="RANDOM", priority_rank_sql=None)
     first = _run(conn, settings)
     assert first["seed"] is not None
-    stored = _rows(raw, "SELECT random_seed FROM gre_sampling_audit")[0][0]
+    stored = _rows(raw, "SELECT random_seed FROM gre_sampling_run")[0][0]
     again = _run(conn, settings, seed=stored, run_key="replay")
 
     def picked(run_id):
@@ -120,8 +123,8 @@ def test_systematic_needs_priority_and_records_config_error(raw, conn, settings)
     um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_kind"] == "config" and "priority_rank_sql" in out["error"]
-    assert _rows(raw, "SELECT status FROM gre_sampling_audit")[0][0] == "ERROR"
-    assert _rows(raw, "SELECT error_type, active_ind FROM gre_sampling_errors") == [("CONFIG_ERROR", "Y")]
+    assert _rows(raw, "SELECT status, error_type, etl_is_curr_ind FROM gre_sampling_run") == \
+        [("ERROR", "CONFIG_ERROR", "N")]
 
 
 def test_null_exclusion_column_keeps_the_row(raw, conn, settings):
@@ -156,11 +159,12 @@ def test_pull_failure_rolls_nothing_in_and_logs(raw, conn, settings):
 def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
     build_universe(raw.db)
     um_config(raw.db)
-    raw.fail_on = "INSERT INTO main.gre_sample_selection_attrs"
+    raw.fail_on = "UPDATE main.gre_sample_selections"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PERSIST_FAILURE"
     assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0   # rolled back
-    assert _rows(raw, "SELECT status FROM gre_sampling_audit")[0][0] == "ERROR"
+    assert _rows(raw, "SELECT status, error_type FROM gre_sampling_run") == [("ERROR", "PERSIST_FAILURE")]
+    assert "Traceback" in _rows(raw, "SELECT error_detail FROM gre_sampling_run")[0][0]
 
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
@@ -168,7 +172,7 @@ def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
     um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
     _run(conn, settings)
     _run(conn, settings)
-    assert sorted(_rows(raw, "SELECT active_ind FROM gre_sampling_errors")) == [("N",), ("Y",)]
+    assert _rows(raw, "SELECT COUNT(*), MIN(status), MAX(status) FROM gre_sampling_run")[0] == (2, "ERROR", "ERROR")
 
 
 def test_unresolved_token_is_a_config_error(raw, conn, settings):
@@ -197,7 +201,7 @@ def test_dry_run_writes_nothing(raw, conn, settings):
     um_config(raw.db)
     out = _run(conn, settings, dry_run=True)
     assert out["selected"] == 150 and out["sample_run_id"] is None
-    for table in ("gre_sampling_audit", "gre_sample_selections", "gre_sampling_errors"):
+    for table in ("gre_sampling_run", "gre_sample_selections"):
         assert _rows(raw, f"SELECT COUNT(*) FROM {table}")[0][0] == 0
 
 

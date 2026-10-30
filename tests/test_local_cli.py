@@ -24,9 +24,9 @@ def test_sql_scripts_render_and_split():
     schema = cli.render_sql(ROOT / "sql" / "schema.sql", "HSABC_DEV")
     statements = cli.split_statements(schema)
     tables = [s for s in statements if s.startswith("CREATE MULTISET TABLE")]
-    assert len(tables) == 12 and all("HSABC_DEV." in s for s in statements) and "{{META_DB}}" not in schema
+    assert len(tables) == 4 and all("HSABC_DEV." in s for s in statements) and "{{META_DB}}" not in schema
     drops = cli.split_statements(cli.render_sql(ROOT / "sql" / "schema_drop.sql", "X"))
-    assert len(drops) == 12
+    assert len(drops) == 4
     seed = cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "umcm_sample_config.sql", "X"))
     assert len(seed) == 22 and all(s.startswith("INSERT INTO X.") for s in seed)
 
@@ -74,7 +74,7 @@ def test_run_command(local_db, capsys):
                      "--triggered-by", "jdoe"])
     report = json.loads(capsys.readouterr().out)
     assert code == 0 and report["runs"][0]["selected"] == 150
-    assert local_db.db.execute("SELECT triggered_by FROM gre_sampling_audit").fetchall() == [("jdoe",)]
+    assert local_db.db.execute("SELECT triggered_by FROM gre_sampling_run").fetchall() == [("jdoe",)]
 
 
 def test_run_command_exit_codes(local_db, capsys):
@@ -89,14 +89,29 @@ def test_validate_and_show_config(local_db, capsys):
     capsys.readouterr()
     assert cli.main(["show-config", "--config-id", "1"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert {b["bucket_name"]: b["target_fraction"] for b in shown["levels"][0]["buckets"]} == \
+    assert {b["rule_name"]: b["target_fraction"] for b in shown["levels"][0]["buckets"]} == \
         {"Denied": 0.8, "Withdrawn": 0.1, "Dismissed": 0.02, "Approved": 0.08}
     assert shown["problems"] == []
 
 
+def test_runs_and_errors_commands(local_db, capsys):
+    cli.main(["run", "--config-id", "1", "--run-key", "K1"])                       # fails: {batch_id} has no value
+    cli.main(["run", "--config-id", "1", "--run-key", "K2", "--run-param", "batch_id=2026-08-01"])
+    capsys.readouterr()
+    assert cli.main(["runs", "--config-id", "1"]) == 0
+    assert {r["run_key"]: r["status"] for r in json.loads(capsys.readouterr().out)["runs"]} == \
+        {"K1": "ERROR", "K2": "COMPLETED"}
+    assert cli.main(["errors"]) == 0
+    assert [e["run_key"] for e in json.loads(capsys.readouterr().out)["errors"]] == ["K1"]
+    cli.main(["run", "--config-id", "1", "--run-key", "K1", "--run-param", "batch_id=2026-08-01"])
+    capsys.readouterr()
+    cli.main(["errors"])
+    assert json.loads(capsys.readouterr().out)["errors"] == []                    # a later attempt succeeded
+
+
 def test_mark_failed(local_db, capsys):
-    local_db.db.execute("INSERT INTO gre_sampling_audit (run_id, status) VALUES ('stuck', 'RUNNING')")
+    local_db.db.execute("INSERT INTO gre_sampling_run (run_id, status) VALUES ('stuck', 'RUNNING')")
     assert cli.main(["mark-failed", "--run-id", "stuck"]) == 0
     assert cli.main(["mark-failed", "--run-id", "stuck"]) == 1   # already closed
     capsys.readouterr()
-    assert local_db.db.execute("SELECT status FROM gre_sampling_audit").fetchall() == [("ERROR",)]
+    assert local_db.db.execute("SELECT status, error_type FROM gre_sampling_run").fetchall() == [("ERROR", "ABANDONED")]

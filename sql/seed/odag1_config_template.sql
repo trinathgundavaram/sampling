@@ -4,7 +4,7 @@
 -- Universe: EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 (loaded by
 -- the framework). Only what is known is filled in. Every TODO(Qn) is an open
 -- question in airflow_resources/docs/OPEN_ITEMS.md - replace it, then set
--- act_ind = 1 on the config row and run
+-- act_ind = 1 on the rows and run
 --   python local/run_sampling.py validate --config-id 2 --check-sql
 --
 -- Not loaded by deploy-schema --seed. Load it by hand once the TODOs are gone.
@@ -24,37 +24,37 @@ INSERT INTO {{META_DB}}.gre_sampling_config (
 );
 
 -- TODO(Q6): a run parameter, e.g. the latest framework batch
-INSERT INTO {{META_DB}}.gre_sampling_param (param_id, config_id, act_ind, seq_no, param_name, param_sql, description)
-VALUES (21, 2, 0, 1, 'batch_id', 'TODO(Q6) SELECT ... FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1', 'TODO(Q6)');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (201, 2, 0, 'PARAM', 1, 'batch_id', 'TODO(Q6) SELECT ... FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1');
 
 -- TODO(Q4): exclusions (auto-approvals, SHRPA / no PA required, diabetic supplies)
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (21, 2, 0, 1, 'AUTO_APPROVED', 'SQL', 'TODO(Q4)');
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (22, 2, 0, 2, 'NO_PA_REQUIRED', 'SQL', 'TODO(Q4)');
-INSERT INTO {{META_DB}}.gre_sampling_exclusion (exclusion_id, config_id, act_ind, seq_no, exclusion_name, rule_type, exclusion_sql)
-VALUES (23, 2, 0, 3, 'DIABETIC_SUPPLIES', 'SQL', 'TODO(Q4)');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (211, 2, 0, 'EXCLUSION', 1, 'AUTO_APPROVED', 'SQL', 'TODO(Q4)');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (212, 2, 0, 'EXCLUSION', 2, 'NO_PA_REQUIRED', 'SQL', 'TODO(Q4)');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (213, 2, 0, 'EXCLUSION', 3, 'DIABETIC_SUPPLIES', 'SQL', 'TODO(Q4)');
 
 -- TODO(Q3): priorities (Revision has no ODAG1 column yet), then the others in order
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (21, 2, 0, 1, 'REVISION', 'CONDITION', 'TODO(Q3)');
-INSERT INTO {{META_DB}}.gre_sampling_priority (priority_id, config_id, act_ind, seq_no, criterion_name, rule_type, criterion_sql)
-VALUES (22, 2, 0, 2, 'EXPEDITED', 'CONDITION', 'TODO(Q1) a condition on AUTHZN_REQ_STD_OR_EXPDT_IND');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (221, 2, 0, 'PRIORITY', 1, 'REVISION', 'CONDITION', 'TODO(Q3)');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
+VALUES (222, 2, 0, 'PRIORITY', 2, 'EXPEDITED', 'CONDITION', 'TODO(Q1) a condition on AUTHZN_REQ_STD_OR_EXPDT_IND');
 
--- Level 0: by determination. TODO(Q1) the AUTHZN_REQ_DETRMTN_TY values and their quotas
-INSERT INTO {{META_DB}}.gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, applies_to, unlisted_policy, act_ind)
-VALUES (21, 2, 0, 'determination', 'AUTHZN_REQ_DETRMTN_TY', '*', 'SKIP', 0);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, quota_mode)
-VALUES (21, 21, 0, '*', 1, 'TODO(Q1) denial value', 'REMAINDER');
+-- LEVEL 0: by determination. TODO(Q1) the AUTHZN_REQ_DETRMTN_TY values and their quotas
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
+VALUES (231, 2, 0, 'LEVEL', 1, 'determination', 'AUTHZN_REQ_DETRMTN_TY', 0, '*', 'SKIP');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode)
+VALUES (232, 2, 0, 'BUCKET', 1, 'TODO(Q1) denial value', 0, '*', 'REMAINDER');
 
--- Level 1: functional area within denials. TODO(Q2) one bucket per area: bucket_sql on ISS_DESC / SVC_CTGRY_CD
-INSERT INTO {{META_DB}}.gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, applies_to, unlisted_policy, act_ind)
-VALUES (22, 2, 1, 'functional_area', NULL, 'TODO(Q8) denial bucket name', 'SHARE', 0);
-INSERT INTO {{META_DB}}.gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, bucket_sql, quota_mode, target_fraction)
-VALUES (22, 22, 0, '*', 1, 'TODO(Q2) area name', 'TODO(Q2) condition', 'FRACTION', NULL);
+-- LEVEL 1: functional area within denials. TODO(Q2) one BUCKET per area: rule_sql on ISS_DESC / SVC_CTGRY_CD
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
+VALUES (241, 2, 0, 'LEVEL', 1, 'functional_area', NULL, 1, 'TODO(Q8) denial bucket name', 'SHARE');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, quota_mode, target_fraction)
+VALUES (242, 2, 0, 'BUCKET', 1, 'TODO(Q2) area name', 'TODO(Q2) condition', 1, '*', 'FRACTION', NULL);
 
--- Output snapshot columns: TODO(Q10) which ODAG1 columns the auditors need
-INSERT INTO {{META_DB}}.gre_sampling_output_col (output_col_id, config_id, act_ind, seq_no, column_name, expr_sql)
-VALUES (21, 2, 0, 1, 'AUTHZN_ID', 'AUTHZN_ID');
-INSERT INTO {{META_DB}}.gre_sampling_output_col (output_col_id, config_id, act_ind, seq_no, column_name, expr_sql)
-VALUES (22, 2, 0, 2, 'MBR_ID', 'MBR_ID');
+-- OUTPUT: snapshot columns. TODO(Q10) which ODAG1 columns the auditors need
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (251, 2, 0, 'OUTPUT', 1, 'AUTHZN_ID', 'AUTHZN_ID');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)
+VALUES (252, 2, 0, 'OUTPUT', 2, 'MBR_ID', 'MBR_ID');

@@ -15,7 +15,7 @@ buckets (fractions, all there is, the remainder, per parent), run parameters loo
 ```
 airflow/                 DAG file + sampling/ package (engine.py, db.py, settings.py shared with local/)
 local/                   run_sampling.py, dev.env.example, sampling/ (same engine)
-sql/                     schema.sql (12 tables), schema_drop.sql, output_table_template.sql, seed/
+sql/                     schema.sql (4 tables), schema_drop.sql, output_table_template.sql, seed/
 airflow_resources/       docs, the example Variable, worker requirements
 tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests need apache-airflow 3
 ```

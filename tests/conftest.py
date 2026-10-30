@@ -28,6 +28,10 @@ class _Cursor:
         self.rowcount = -1
 
     def execute(self, sql, params=None):
+        import re
+        top = re.match(r"\s*SELECT TOP (\d+) (.*)", sql, re.S)   # Teradata's TOP n -> LIMIT n
+        if top:
+            sql = f"SELECT {top.group(2)} LIMIT {top.group(1)}"
         self._raw.execute(sql, params) if params else self._raw.execute(sql)
         self.description = self._raw.description
         if self.description and self.description[0][0] == "Count" and not sql.lstrip().upper().startswith("SELECT"):
@@ -148,30 +152,30 @@ def insert_config(db, config_id=1, sampling_method="RANKED", priority_rank_sql="
     set_config(db, config_id, **more)
 
 
+def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act_ind=1, **cols):
+    """One gre_sampling_rule row; cols = any of its other columns."""
+    row = {"rule_id": rule_id, "config_id": config_id, "act_ind": act_ind, "rule_class": rule_class,
+           "seq_no": seq_no, "rule_name": rule_name, **cols}
+    db.execute(f"INSERT INTO gre_sampling_rule ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+               list(row.values()))
+
+
 def insert_strata(db, strata_id, config_id, level_order, name, expr, mix: dict, applies_to="*",
                   unlisted_policy="SHARE"):
-    """One level; mix = {bucket_name: fraction} (FRACTION buckets) or {bucket_name: dict of bucket columns}."""
-    db.execute("INSERT INTO gre_sampling_strata (strata_id, config_id, level_order, level_name, stratify_expr, "
-               "applies_to, unlisted_policy, act_ind) VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
-               [strata_id, config_id, level_order, name, expr, applies_to, unlisted_policy])
+    """One LEVEL rule (rule_id 1000 * strata_id) and its BUCKET rules; mix = {bucket_name: fraction}
+    (FRACTION buckets) or {bucket_name: dict of bucket columns}."""
+    insert_rule(db, "LEVEL", 1000 * strata_id, name, config_id, seq_no=1, rule_sql=expr, level_order=level_order,
+                parent_path=applies_to, unlisted_policy=unlisted_policy)
     for i, (bucket, spec) in enumerate(mix.items()):
-        insert_bucket(db, strata_id * 100 + i, strata_id, bucket, seq_no=i + 1,
+        insert_bucket(db, 1000 * strata_id + i + 1, level_order, bucket, config_id=config_id, seq_no=i + 1,
                       **(spec if isinstance(spec, dict) else {"target_fraction": spec}))
 
 
-def insert_bucket(db, bucket_id, strata_id, bucket_name, parent_path="*", seq_no=100, bucket_sql=None,
+def insert_bucket(db, rule_id, level_order, bucket_name, config_id=1, parent_path="*", seq_no=100, rule_sql=None,
                   quota_mode="FRACTION", target_fraction=None, max_count=None, act_ind=1):
-    db.execute("INSERT INTO gre_sampling_bucket (bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, "
-               "bucket_sql, quota_mode, target_fraction, max_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-               [bucket_id, strata_id, act_ind, parent_path, seq_no, bucket_name, bucket_sql, quota_mode,
-                target_fraction, max_count])
-
-
-def insert_rule(db, table, **cols):
-    """One row of a gre_sampling_* rule table (param, exclusion, priority, output_col)."""
-    names = list(cols)
-    db.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join('?' * len(names))})",
-               [cols[n] for n in names])
+    insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_no, act_ind, rule_sql=rule_sql,
+                level_order=level_order, parent_path=parent_path, quota_mode=quota_mode,
+                target_fraction=target_fraction, max_count=max_count)
 
 
 def set_config(db, config_id=1, **cols):

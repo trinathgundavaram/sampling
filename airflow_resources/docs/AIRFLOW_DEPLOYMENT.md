@@ -27,7 +27,7 @@ airflow_resources/                          (not deployed with the DAGs)
   requirements.txt                          Python packages for the workers
 
 sql/                                        shared by both versions
-  schema.sql                                Teradata DDL ({{META_DB}} template), 12 tables
+  schema.sql                                Teradata DDL ({{META_DB}} template), 4 tables
   schema_drop.sql                           drops them (fresh redeploy only)
   output_table_template.sql                 DDL template of a config's output snapshot table
   seed/umcm_sample_config.sql               example configuration rows (every kind of rule once)
@@ -70,8 +70,8 @@ version).
 3. Create the tables once, in the metadata database, from `sql/schema.sql` (replace `{{META_DB}}`), e.g. from a
    machine with the local version: `python local/run_sampling.py deploy-schema`. The engine never creates or alters
    tables.
-4. Load the configuration rows (`gre_sampling_config`, `gre_sampling_strata`, `gre_sampling_mix`; example:
-   `sql/seed/umcm_sample_config.sql`, see the runbook section 5), then run
+4. Load the configuration rows (`gre_sampling_config`, `gre_sampling_rule`; example:
+   `sql/seed/umcm_sample_config.sql`, see the runbook section 4), then run
    `python local/run_sampling.py validate --project UMCM --check-sql`.
 5. Create the Connection and the Variable (below; ready-made for DEV in `airflow_resources/examples/umcm_dev`).
 6. Unpause the DAG; trigger it once with `{"dry_run": "true"}` to see the counts without writing anything.
@@ -124,10 +124,10 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `load_env` | DEV / QA / INT / UAT / PROD: replaces `$env` in every configured table name and SQL text (default DEV). `environment` is accepted too |
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
 | `config_id` / `project` / `process_name` | **The scope** (at least one): one config, or every active config of the project and / or process. Matched against `gre_sampling_config` |
-| `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a `gre_sampling_param` lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
-| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's `gre_sampling_param` lookup of the same name. `{run_key}` and `{as_of_date}` are always available |
+| `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
+| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name. `{run_key}` and `{as_of_date}` are always available |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `sample_cycle` |
-| `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the audit row) |
+| `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
 | `runs` | Optional list of scopes, one task each, e.g. `[{"name": "weekly", "process_name": "UMCM_WEEKLY_SAMPLE"}, {"config_id": 7, "run_params": {...}}]`. An entry that names a scope key replaces the Variable's scope; its other keys are layered over the Variable |
 | `schedule_interval` | Cron (Central time) or null for manual / triggered only |
 | `schedule_timezone` | Default `America/Chicago` |
@@ -181,7 +181,8 @@ password), the scope count and candidate pull SQL of each config, then the repor
       "sample_run_id": "UMCM.UMCM_WEEKLY_SAMPLE::2026-10-30::attempt-1::airflow-scheduled::20261030T080001.204512::a1b2c3",
       "run_key": "2026-10-30", "as_of_date": "2026-10-30", "method": "RANKED", "seed": null,
       "target_volume": 150, "in_scope": 1000, "excluded": 20, "candidates": 980, "selected": 150, "shortfall": 0,
-      "retired_runs": 0,
+      "retired_runs": 0, "exclusions": {"AUTO_APPROVED": 12, "...": 0},
+      "buckets": {"Denied": {"candidates": 777, "target": 120, "selected": 118}, "...": {}},
       "by_stratum": {"Denied/Part B": {"candidates": 96, "target": 15, "selected": 15}, "...": {}}
   }],
   "failed": 0
@@ -237,12 +238,16 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Teradata specifics
 
-- 7 MULTISET tables (`sql/schema.sql`); `gre_sampling_errors.error_id` is `GENERATED ALWAYS AS IDENTITY`; no foreign
-  keys (`validate` checks the configuration).
+- 4 MULTISET tables (`sql/schema.sql`); no identity columns, no foreign keys (`validate` checks the
+  configuration).
+- `etl_is_curr_ind` on `gre_sampling_run` and `gre_sample_selections` marks the current sample of each
+  `(config_id, run_key)`. Errors are on the run row (`error_type`, `error_message`, `error_detail`), and the counts per
+  exclusion rule and bucket are its `run_report` (JSON in a CLOB: read it with Teradata's JSON functions, e.g.
+  `NEW JSON(run_report).JSONExtractValue('$.buckets.Denied.selected')`).
 - Reads use `LOCKING ROW FOR ACCESS` (no read lock on the universe or the metadata tables; switch off with
   `access_lock: false`).
-- A run's writes (every candidate, the bucket rows, retiring the earlier run, closing the audit row) are **one
-  transaction**: a failure leaves nothing half written, only the ERROR audit row and the error row.
+- A run's writes (every candidate, the output snapshot, retiring the earlier run, closing the run row) are **one
+  transaction**: a failure leaves nothing half written, only the run row with status ERROR.
 - Bucket values compare like Teradata does: trailing blanks ignored, not case specific (`'DENIED  '` is in the
   `Denied` bucket).
 - Writes are batched `executemany` of `chunk_rows` rows. The candidate pull is fetched `chunk_rows` at a time, but
@@ -250,7 +255,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (57 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (58 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with
