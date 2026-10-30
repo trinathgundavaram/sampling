@@ -20,6 +20,7 @@ any answer: they become rows.
 | Q11 | Scheduled (which day and time, Central), or started by a framework step (which one: EXPORT_LOAD, BATCH_CLOSE …)? Which framework table and status say a batch is ready to sample? How late can it be (retries × delay)? | Variable `schedule_interval` / framework `trigger_dags`, `trigger_keys`, a GATE rule, `retries`, `retry_delay_minutes` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
 | Q13 | Who receives the "sample ready" email | Variable `notify_recipients` |
+| Q14 | How long must the candidate rows of a run be kept (records retention)? The selected cases and the run rows are kept in any case | Variable `retention_days` / `purge --older-than-days` |
 
 ## B. Data the requirements need that sampling cannot supply
 

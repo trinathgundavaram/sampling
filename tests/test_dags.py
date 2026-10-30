@@ -96,6 +96,23 @@ def test_sample_ready_email_and_its_summary(variable):
     assert rendered.startswith("<p>DAG CMS_COMPLIANCE_UMCM_SAMPLING run manual__1:</p><table") and "B42" in rendered
 
 
+def test_retention_task(monkeypatch, variable, raw):
+    from sampling.db import Connection
+    variable({**BASE, "retention_days": 400, "email_recipient": "support@example.com"})
+    dag = _load_dag_file()
+    purge = dag.task_dict["purge_selections"]
+    assert purge.upstream_task_ids == {"run_sampling"} and "purge_selections" in dag.task_dict["fail_email"].upstream_task_ids
+    build_universe(raw.db)
+    um_config(raw.db)
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(raw, "close", lambda: None)
+    out = dags.purge_task(VAR_KEY)
+    assert out["scopes"][0]["configs"][0]["rows"] == {"retired_runs": 0, "unselected_of_current_runs": 0}
+    variable({**BASE, "retention_days": "soon"})
+    with pytest.raises(dags.AirflowFailException):
+        dags.purge_task(VAR_KEY)
+
+
 def test_layering_and_blocked_trigger_keys(variable):
     variable({**BASE, "runs": [{"config_id": 5}]})
     config = dags.resolve_config(VAR_KEY, {"RUN_KEY": "rk", "meta_db": "PROD_DB", "td_conn_var": "PROD"}, 0)

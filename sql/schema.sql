@@ -13,8 +13,9 @@
 --   gre_sample_selections   engine one row per case considered by a run
 --
 -- act_ind = 1 means in use, 0 means ignored: never delete a configuration row.
--- Rows the engine writes are never deleted: a rerun of the same
--- (config_id, run_key) marks the earlier run's rows etl_is_curr_ind = 'N'.
+-- A rerun of the same (config_id, run_key) marks the earlier run's rows
+-- etl_is_curr_ind = 'N'. Run rows are never deleted. gre_sample_selections
+-- rows no longer needed are deleted only by purge (runbook section 12).
 -- No statement or comment in this file may contain a semicolon except at the
 -- end of a statement (deploy-schema splits on them).
 -- ============================================================================

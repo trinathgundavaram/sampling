@@ -17,6 +17,7 @@ How to deploy is in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md). What is stil
 9. [Local command line](#9-local-command-line)
 10. [Monitoring and support procedures](#10-monitoring-and-support-procedures)
 11. [First run on DEV (checklist)](#11-first-run-on-dev-checklist)
+12. [Retention](#12-retention)
 
 ---
 
@@ -103,6 +104,15 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
   `BTCH_ID = '{batch_id}'`. A token with no value is a configuration error.
 - **Order** is `seq_no` (then `rule_id`) within a class; `level_order` for levels.
 - **Only the columns of the class** (table in 4.2): `validate` reports any other one that is set.
+- **Only reading SQL**: every SQL column is checked before a run (and by `validate`, and by `load-config`). Refused:
+  a statement word (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `DROP`, `CREATE`, `ALTER`, `REPLACE`, `RENAME`, `GRANT`,
+  `REVOKE`, `CALL`, `EXEC`, `COLLECT`, `COMMIT` …), a `;`, a `--` comment (it would comment out the rest of the
+  query built around the fragment: use `/* */`), unbalanced parentheses or quotes; PARAM and GATE must be a
+  `SELECT` (`WITH …` and `LOCKING ROW FOR ACCESS SELECT …` are fine). Text inside quotes is not checked:
+  `disp = 'DELETE'` is a value. The rows run under the service account: this stops a pasted script or a slip,
+  it is not a permission (who may write `gre_sampling_rule` is).
+- **Easier than INSERTs**: `export-config` writes a config and its rules as a JSON file; edit it and
+  `load-config --file … ` shows what would change, `--apply` writes it in one transaction (4.3).
 - After any change: `python local/run_sampling.py validate --config-id N --check-sql` (section 9).
 
 ### 4.1 gre_sampling_config – one row per sample
@@ -191,6 +201,22 @@ A level's fractions under one `parent_path` add up to 1 at most.
 `stratum_path`, `etl_is_curr_ind`, `load_datetime`, `last_updated_datetime`), `rule_sql` its expression. Create the
 table once from `sql/output_table_template.sql` (the engine never creates or alters tables).
 
+### 4.3 A configuration as a file
+
+```bash
+python local/run_sampling.py export-config --config-id 1 --file umcm.json
+python local/run_sampling.py load-config --file umcm.json
+python local/run_sampling.py load-config --file umcm.json --apply
+```
+
+The file is `{"config": {gre_sampling_config columns}, "rules": [{gre_sampling_rule columns}, ...]}` (the audit
+columns are left out and set by the load). Without `--apply` the load only shows: the config columns that change
+(`from` / `to`), the rules added, changed (per column) and switched off, and the problems. It is refused when the
+rules it would make active have any problem `validate` finds, or a `rule_id` belongs to another config. A rule in
+the tables but not in the file is switched off (`act_ind = 0`), never deleted; a rule in the file with
+`act_ind 0` stays and is ignored. `created_by` / `last_updated_by` = `--by` (default your user name). Keep the
+file in version control: its history is the rules' history, next to each run's `config_hash`.
+
 ## 5. Tables the engine writes (read only)
 
 | Table | One row per | Columns to read |
@@ -214,6 +240,9 @@ SHA-256 of that `config` part, without who changed a row and when: equal hashes 
 
 **`stratum_path`** is the case's bucket at every level, `/` separated: the group per level of any candidate, and
 counts per bucket, are a `GROUP BY` on it.
+
+`gre_sample_selections` grows by one row per candidate per run; `purge` removes the rows no longer needed
+(section 12). `gre_sampling_run` rows are never deleted.
 
 ## 6. Reference lists (all codes and values)
 
@@ -250,6 +279,24 @@ counts per bucket, are a `GROUP BY` on it.
 | `{as_of_date}` | The run's business date `YYYY-MM-DD` |
 | `{run_key}` | The run key |
 | `{name}` / `$name` | A `run_params` value or a PARAM rule |
+
+### 6.4a Dates held as text
+
+Some universe columns are dates stored as `VARCHAR(10)` (ODAG1 `DETRMTN_NOTFTN_DT`: its format is Q6 of
+OPEN_ITEMS.md). Compare them as dates, with the format they are written in:
+
+| Stored as | Condition (rule_sql / scope_sql) |
+|---|---|
+| `2026-08-07` | `CAST(col AS DATE FORMAT 'YYYY-MM-DD') = DATE '{as_of_date}'` |
+| `08/07/2026` | `CAST(col AS DATE FORMAT 'MM/DD/YYYY') = DATE '{as_of_date}'` |
+| `20260807` | `CAST(col AS DATE FORMAT 'YYYYMMDD') = DATE '{as_of_date}'` |
+| some rows not dates | `CASE WHEN col LIKE '____-__-__' THEN CAST(col AS DATE FORMAT 'YYYY-MM-DD') END` (a bad value then compares as NULL instead of failing the pull) |
+
+A reporting lag: decisions 7 to 14 days before the run's date –
+`CAST(col AS DATE FORMAT 'YYYY-MM-DD') BETWEEN DATE '{as_of_date}' - 14 AND DATE '{as_of_date}' - 7`.
+A week by its Monday: `TD_WEEK_BEGIN(CAST(col AS DATE FORMAT 'YYYY-MM-DD'))`. A date column needs no `CAST`.
+Check each with `validate --check-sql`, then on the universe:
+`SELECT col, COUNT(*) FROM <universe> WHERE <the CAST> IS NULL GROUP BY 1` should return nothing.
 
 ### 6.5 Paths
 A bucket's path is its bucket names joined by `/` from level 0: `Denied/Part B`. A row that matches no condition
@@ -312,8 +359,12 @@ From `local/`, with `dev.env` (copy of `dev.env.example`: Teradata login and `SA
 | `runs [--config-id N] [--status S]` | Recent run rows (with `config_hash`, `finalized_by`, `override_reason`) | – |
 | `errors [--config-id N]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
+| `export-config --config-id N [--file F]` | One config and all its rule rows as JSON (4.3) | – |
+| `load-config --file F [--apply] [--by U]` | Checks a JSON config, shows the changes; `--apply` writes them (4.3) | config, rules |
+| `purge --config-id N \| --project P \| --process-name X --older-than-days D [--apply]` | Counts (`--apply`: deletes) the selection rows old runs no longer need (12) | selections |
 
-Exit codes: 0 done, 1 a sample failed, 2 a usage or configuration problem. One log file per command in
+Exit codes: 0 done, 1 a sample failed (or `load-config` found problems, or `purge` skipped a config), 2 a usage
+or configuration problem. One log file per command in
 `local/logs`.
 
 ## 10. Monitoring and support procedures
@@ -369,7 +420,8 @@ Run again with the same `run_key` (and `--seed` from the run row to reproduce a 
 turns `etl_is_curr_ind = 'N'` everywhere, the snapshot table included.
 
 ### 10.7 Change a mix, a rule, a priority
-New rule rows, or `act_ind = 0` on the old ones, then `validate --check-sql` and a `--dry-run`. The next run uses
+New rule rows, or `act_ind = 0` on the old ones (or `export-config`, edit, `load-config`), then
+`validate --check-sql` and a `--dry-run`. The next run uses
 them; earlier runs are not changed. The new run's `config_hash` differs from the previous one; the old rules stay
 readable in the old run's `run_report`.
 
@@ -400,3 +452,28 @@ replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycl
 6. `run --config-id N`; check 10.1 – 10.3 and the snapshot table.
 7. Deploy the DAG, set the Connection and the Variable, trigger with `dry_run`, then for real.
 8. Try `finalize`, a rerun (expect `FINALIZED`) and `replace` on a DEV cycle, so the team knows them before audit.
+
+## 12. Retention
+
+`gre_sample_selections` holds every candidate of every run. `purge --older-than-days D` deletes, per config of the
+scope, for runs whose as-of date is more than D days ago:
+
+| Run | Rows deleted |
+|---|---|
+| replaced by a rerun (`etl_is_curr_ind = 'N'`), not FINAL | all of them |
+| current, `COMPLETED` | the excluded rows and the candidates never selected |
+| `FINAL` (current or not) | none |
+| newer than D days | none |
+
+The selected, `REPLACED` and `REPLACEMENT` rows of current runs stay, so the sample of every cycle, the cases
+taken out and why stay readable, and no-repeat rules keep working. The run rows (with each run's rules, counts per
+bucket and hash) are never deleted. Not touched: the output snapshot tables.
+
+D must be at least the longest `lookback_days` of the active history rules that read the config's rows (its own
+and the `PROJECT`-scope rules of its project), or the config is skipped with the reason: a carry-over or a
+no-repeat rule would otherwise lose the cycles it looks back on. A replacement (10.9) needs the unselected
+candidates of its run: replace before the run is older than D.
+
+Without `--apply` only the counts are shown. In Airflow, the Variable's `retention_days` adds a
+`purge_selections` task after the runs (it applies). How long the candidate rows must be kept is a records
+retention decision (OPEN_ITEMS.md Q14): until it is made, leave `retention_days` out.

@@ -4,7 +4,7 @@ import sys
 
 from conftest import ROOT
 
-ENGINE = ("__init__.py", "db.py", "engine.py", "settings.py")
+ENGINE = ("__init__.py", "admin.py", "db.py", "engine.py", "settings.py")
 
 
 def test_one_copy_of_the_engine():

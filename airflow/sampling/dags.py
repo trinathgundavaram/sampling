@@ -27,6 +27,7 @@ except ImportError:  # Airflow 3.0
 
 from sampling import __version__
 from sampling.db import connect_teradata, error_text
+from sampling.admin import purge_selections
 from sampling.engine import run_scope
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
@@ -251,6 +252,35 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
     return json.loads(text)
 
 
+def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
+    """Delete the gre_sample_selections rows older than the Variable's retention_days that no history rule,
+    replacement or audit needs (sampling.admin.purge_selections), for every scope of the Variable."""
+    try:
+        config = resolve_config(variable_key)
+        settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
+        _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or config.get("connection_id")
+                                  or DEFAULT_CONNECTION_ID)
+        runs = _load_variable(variable_key).get("runs")
+        scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    try:
+        conn = connect_teradata(settings.meta_db, settings.access_lock)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
+    out = []
+    try:
+        for scope in scopes:
+            out.append(purge_selections(conn, settings, config.get("retention_days"), apply=True,
+                                        **{k: scope.get(k) for k in SCOPE_KEYS if scope.get(k) not in (None, "")}))
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    finally:
+        conn.close()
+    logger.info("retention:\n%s", json.dumps(out, indent=2, default=str))
+    return {"scopes": out}
+
+
 # ---------------------------------------------------------------------------
 # The DAG
 # ---------------------------------------------------------------------------
@@ -384,10 +414,17 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     for trigger in triggers:
         tasks >> trigger
 
+    purge = []
+    if dag_config.get("retention_days") not in (None, ""):
+        purge = [PythonOperator(task_id="purge_selections", dag=dag, trigger_rule="all_success",
+                                python_callable=lambda **_: purge_task(variable_key),
+                                execution_timeout=timeout, show_return_value_in_logs=False, **pool)]
+        tasks >> purge[0]
+
     email_recipient = dag_config.get("email_recipient")
     if email_recipient:
         load_env = dag_config.get("load_env") or dag_config.get("environment") or ""
-        upstream = [*tasks, *triggers]
+        upstream = [*tasks, *triggers, *purge]
         success = EmailOperator(task_id="success_email", dag=dag, to=email_recipient,
                                 trigger_rule="none_failed_min_one_success",
                                 subject=f"Airflow EDEG-Compliance {load_env} Success: {dag_id} DAG",

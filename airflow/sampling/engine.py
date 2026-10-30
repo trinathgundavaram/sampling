@@ -94,6 +94,18 @@ _USED = {"PARAM": {"rule_sql"},
          "BUCKET": {"rule_sql", "level_order", "parent_path", "quota_mode", "target_fraction", "max_count"},
          "OUTPUT": {"rule_sql"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
+# Configured SQL only reads: a statement word anywhere (outside quotes) is refused. Rows run under the service
+# account, so this guards against a pasted script or a slip, not against someone who may write the rows anyway.
+# (Words that are also functions or common names - DATABASE, BEGIN, END - are left out: with ';' refused a second
+# statement cannot follow, so they can only be an expression.)
+_STATEMENT_WORDS = ("INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "DROP", "CREATE", "ALTER",
+                    "RENAME", "MODIFY", "GRANT", "REVOKE", "CALL", "EXEC", "EXECUTE", "COLLECT", "COMMENT",
+                    "COMMIT", "ROLLBACK", "ABORT", "BEGIN TRANSACTION", "END TRANSACTION", "SET SESSION",
+                    "SET QUERY_BAND")
+_STATEMENT_RE = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in _STATEMENT_WORDS) + r")\b", re.I)
+_QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|/\*.*?\*/", re.S)
+_SELECT_START = re.compile(r"^\s*(LOCKING\s+.*?\s+FOR\s+ACCESS\s+)?\(*\s*(SELECT|SEL|WITH)\b", re.I | re.S)
+_CONFIG_SQL = ("scope_sql", "exclusion_sql", "priority_rank_sql", "diversity_expr")
 _NEEDS_ORDER = ("RANKED", "SYSTEMATIC")
 
 BASE_RANK = "smp_base_rank"
@@ -301,7 +313,45 @@ def config_problems(sample: Sample) -> list:
             problems.append("OUTPUT rule names repeat")
     elif sample.output_cols:
         problems.append("OUTPUT rules need gre_sampling_config.output_table")
-    return problems
+    return problems + _sql_problems(sample)
+
+
+def sql_problems(text, what: str, select: bool = False) -> list:
+    """Why a configured piece of SQL is not a plain read: a statement word, ';', a -- comment (it would comment out
+    the rest of the query the engine builds around it), unbalanced parentheses or quotes. select: it must be a
+    SELECT (PARAM, GATE). Text in quotes and /* */ comments is not checked."""
+    text = str(text or "")
+    if not text.strip():
+        return []
+    bare = _QUOTED.sub(" ", text)
+    out = []
+    if bare.count("'") or bare.count('"') or "/*" in bare:
+        out.append(f"{what}: a quote or /* comment is not closed")
+    words = sorted({re.sub(r"\s+", " ", m.group(1)).upper() for m in _STATEMENT_RE.finditer(bare)})
+    if words:
+        out.append(f"{what}: only reading SQL is allowed, found {', '.join(words)}")
+    if ";" in bare:
+        out.append(f"{what}: ';' is not allowed (one expression or SELECT, never a script)")
+    if "--" in bare:
+        out.append(f"{what}: '--' comments are not allowed (use /* */)")
+    depth = 0
+    for ch in bare:
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        if depth < 0:
+            break
+    if depth:
+        out.append(f"{what}: parentheses do not balance")
+    if select and not _SELECT_START.match(bare):
+        out.append(f"{what}: must be a SELECT")
+    return out
+
+
+def _sql_problems(sample: Sample) -> list:
+    out = [p for col in _CONFIG_SQL for p in sql_problems(sample.config.get(col), col)]
+    for cls in RULE_CLASSES:
+        for r in _rules_of(sample, cls):
+            out += sql_problems(r.get("rule_sql"), f"{cls} rule {r.get('rule_name')}", select=cls in ("PARAM", "GATE"))
+    return out
 
 
 def _rules_of(sample: Sample, cls: str) -> list:

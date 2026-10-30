@@ -14,6 +14,8 @@ buckets (fractions, all there is, the remainder, per parent), run parameters loo
 
 Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.
+Configured SQL is checked to only read; a configuration can be kept as a JSON file (`export-config` /
+`load-config`); old candidate rows are purged on a retention period that keeps every sample.
 
 ```
 airflow/                 DAG file + sampling/ package: the engine (engine.py, db.py, settings.py) and dags.py

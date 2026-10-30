@@ -141,6 +141,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
 | `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
+| `retention_days` | Adds `purge_selections` after the runs: deletes the `gre_sample_selections` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `lookback_days`, else that config is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
 | `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, output table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `process_name`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
@@ -182,7 +183,8 @@ DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no cod
 ## DAG
 
 - One task, `run_sampling` (or `run_sampling_<name>` per `runs` entry), then a `trigger_<dag id>` task per
-  `trigger_dags` entry, then `success_email` / `fail_email`, and `sample_ready_email` with `notify_recipients`.
+  `trigger_dags` entry, `purge_selections` with `retention_days`, then `success_email` / `fail_email`, and
+  `sample_ready_email` with `notify_recipients`.
   `max_active_runs` is 1.
 - A missing or invalid Variable never breaks parsing: the DAG is still there, unscheduled, and its task fails with
   the reason when run.
@@ -281,7 +283,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (73 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (94 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with
