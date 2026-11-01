@@ -46,7 +46,7 @@ def test_a_21_percent_bucket_from_a_join(raw, conn, settings):
     out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
     assert out["status"] == "COMPLETED", out.get("error")
     assert out["selected"] == 100 and _bh_count(raw) == 21
-    assert out["query_rules"] == {"Behavioral Health": 40}
+    assert out["rule_queries"] == {"Behavioral Health": 40}
     # the BH cases picked are BH ones
     picked = {r[0] for r in raw.db.execute("SELECT case_key FROM gre_sample_selections WHERE selected_flag = 1 "
                                            "AND stratum_path = 'Behavioral Health'").fetchall()}
@@ -81,11 +81,33 @@ def test_a_query_without_the_key_columns_is_a_config_error(raw, conn, settings):
 
 
 def test_a_query_must_be_a_select_that_only_reads(raw, conn, settings):
-    _bh_level(raw.db, bh_sql="proc_cd = 'H0031'")
+    _bh_level(raw.db)
+    insert_rule(raw.db, "BUCKET", 13, "Cond", seq_no=0, level_order=0, parent_path="*", target_fraction=0.1,
+                rule_sql="proc_cd = 'H0031'", raw_sql=True)                    # a condition, not a SELECT
     insert_rule(raw.db, "EXCLUSION", 20, "BAD", rule_type="QUERY", rule_sql="SELECT case_id FROM cases; DELETE FROM x")
+    insert_rule(raw.db, "PRIORITY", 30, "OLD_STYLE", rule_type="CONDITION", rule_sql="disp = 'Denied'", raw_sql=True)
     problems = config_problems(load_config(conn, settings, 1))
-    assert any("Behavioral Health" in p and "must be a SELECT" in p for p in problems)
+    assert any("BUCKET rule Cond: must be a SELECT" in p for p in problems)
     assert any("BAD" in p and "only reading SQL" in p for p in problems)
+    assert any("OLD_STYLE: rule_type CONDITION: a condition is not a rule" in p for p in problems)
+
+
+def test_the_rest_bucket_must_be_last(raw, conn, settings):
+    _bh_level(raw.db)
+    raw.db.execute("UPDATE gre_sampling_rule SET seq_no = 0 WHERE rule_id = 12")    # 'Other' (no rule_sql) first
+    problems = config_problems(load_config(conn, settings, 1))
+    assert any("a bucket without rule_sql takes every case left" in p for p in problems)
+
+
+def test_a_value_select_needs_one_value_per_case(raw, conn, settings):
+    insert_rule(raw.db, "LEVEL", 10, "disp", seq_no=1, level_order=0, parent_path="*",
+                rule_sql="SELECT case_id, disp, proc_cd FROM cases")
+    out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
+    assert out["error_type"] == "CONFIG_ERROR" and "needs one: the value" in out["error"]
+    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = 'SELECT c.case_id, c.disp FROM cases c "
+                   "JOIN (SELECT 1 AS n UNION ALL SELECT 2) t ON 1=1' WHERE rule_id = 10")
+    out = run_sampling(conn, settings, 1, run_key="K2", as_of=AS_OF)
+    assert out["error_type"] == "CONFIG_ERROR" and "more than once" in out["error"]
 
 
 def test_query_only_on_condition_levels(raw, conn, settings):
@@ -94,7 +116,7 @@ def test_query_only_on_condition_levels(raw, conn, settings):
     raw.db.execute("UPDATE gre_sampling_rule SET rule_type = 'QUERY' WHERE rule_id = 11")
     insert_rule(raw.db, "PRIORITY", 30, "P", rule_type="NOPE", rule_sql="x")
     problems = config_problems(load_config(conn, settings, 1))
-    assert any("only used on a level without an expression" in p for p in problems)
+    assert any("only used on a level without its own SELECT" in p for p in problems)
     assert any("PRIORITY rule P: rule_type must be one of" in p and "QUERY" in p for p in problems)
 
 

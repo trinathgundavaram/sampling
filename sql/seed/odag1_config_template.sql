@@ -45,13 +45,14 @@ VALUES (205, 2, 0, 'GATE', 1, 'BATCH_CLOSED', 'SELECT 1 FROM HSABC_$ENV.Complian
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
 VALUES (210, 2, 0, 'EXCLUSION', 0, 'SELECTED_IN_LAST_90_DAYS', 'PRIOR_SELECTION', 90, 'CONFIG');
 
--- TODO(Q4): exclusions (auto-approvals, SHRPA / no PA required, diabetic supplies)
+-- TODO(Q4): exclusions (auto-approvals, SHRPA / no PA required, diabetic supplies). Each is a SELECT of the
+-- cases' AUTHZN_ID, SRC_DATA_KEY (any join), as a GRE rule
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
-VALUES (211, 2, 0, 'EXCLUSION', 1, 'AUTO_APPROVED', 'SQL', 'TODO(Q4)');
+VALUES (211, 2, 0, 'EXCLUSION', 1, 'AUTO_APPROVED', 'QUERY', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q4)');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
-VALUES (212, 2, 0, 'EXCLUSION', 2, 'NO_PA_REQUIRED', 'SQL', 'TODO(Q4)');
+VALUES (212, 2, 0, 'EXCLUSION', 2, 'NO_PA_REQUIRED', 'QUERY', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q4)');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
-VALUES (213, 2, 0, 'EXCLUSION', 3, 'DIABETIC_SUPPLIES', 'SQL', 'TODO(Q4)');
+VALUES (213, 2, 0, 'EXCLUSION', 3, 'DIABETIC_SUPPLIES', 'QUERY', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q4)');
 
 -- Q12: the unselected candidates of the last 14 days first
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, lookback_days, history_scope)
@@ -59,21 +60,21 @@ VALUES (220, 2, 0, 'PRIORITY', 0, 'CARRY_OVER_14_DAYS', 'PRIOR_CANDIDATE', 14, '
 
 -- TODO(Q3): priorities (Revision has no ODAG1 column yet), then the others in order
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
-VALUES (221, 2, 0, 'PRIORITY', 1, 'REVISION', 'CONDITION', 'TODO(Q3)');
+VALUES (221, 2, 0, 'PRIORITY', 1, 'REVISION', 'QUERY', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q3)');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_type, rule_sql)
-VALUES (222, 2, 0, 'PRIORITY', 2, 'EXPEDITED', 'CONDITION', 'TODO(Q1) a condition on AUTHZN_REQ_STD_OR_EXPDT_IND');
+VALUES (222, 2, 0, 'PRIORITY', 2, 'EXPEDITED', 'QUERY', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q1) a condition on AUTHZN_REQ_STD_OR_EXPDT_IND');
 
--- LEVEL 0: by determination. TODO(Q1) the AUTHZN_REQ_DETRMTN_TY values and their quotas
+-- LEVEL 0: by determination (a SELECT of each case's value). TODO(Q1) the AUTHZN_REQ_DETRMTN_TY values and their quotas
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
-VALUES (231, 2, 0, 'LEVEL', 1, 'determination', 'AUTHZN_REQ_DETRMTN_TY', 0, '*', 'SKIP');
+VALUES (231, 2, 0, 'LEVEL', 1, 'determination', 'SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REQ_DETRMTN_TY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N''', 0, '*', 'SKIP');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode)
 VALUES (232, 2, 0, 'BUCKET', 1, 'TODO(Q1) denial value', 0, '*', 'REMAINDER');
 
--- LEVEL 1: functional area within denials. TODO(Q2) one BUCKET per area: rule_sql on ISS_DESC / SVC_CTGRY_CD
+-- LEVEL 1: functional area within denials. TODO(Q2) one BUCKET per area: rule_sql a SELECT of its cases
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, unlisted_policy)
 VALUES (241, 2, 0, 'LEVEL', 1, 'functional_area', NULL, 1, 'TODO(Q8) denial bucket name', 'SHARE');
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql, level_order, parent_path, quota_mode, target_fraction)
-VALUES (242, 2, 0, 'BUCKET', 1, 'TODO(Q2) area name', 'TODO(Q2) condition', 1, '*', 'FRACTION', NULL);
+VALUES (242, 2, 0, 'BUCKET', 1, 'TODO(Q2) area name', 'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N'' AND TODO(Q2) condition', 1, '*', 'FRACTION', NULL);
 
 -- OUTPUT: snapshot columns. TODO(Q10) which ODAG1 columns the auditors need
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, rule_sql)

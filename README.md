@@ -11,9 +11,9 @@ versions sharing the same engine code:
 Like the GRE rules engine, what a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
 buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
 (no repeats, carry-over), code variety, and an output snapshot. No field name or value is in the code.
-For tables holding several loads, batches or SCD2 versions, a run can be given `extra_filters` (`column: value`,
-ANDed to the scope) as with the GRE.
-A rule whose test needs joins can be a whole `SELECT` returning the cases' keys (`rule_type` `QUERY`), as a GRE rule.
+Every exclusion, priority and bucket rule is a whole `SELECT` (any joins) returning the keys of the cases it
+matches, as a GRE rule. For tables holding several loads, batches or SCD2 versions, a run can be given
+`extra_filters`: a SQL condition ANDed to the scope, as with the GRE.
 
 Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.

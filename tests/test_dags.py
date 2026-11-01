@@ -188,10 +188,12 @@ def test_as_of_and_run_params_from_a_trigger(monkeypatch, variable, raw):
 
 
 def test_extra_filters_add_up_across_the_layers(variable):
-    variable({**BASE, "extra_filters": {"ETL_IS_CURR_IND": "Y", "BTCH_ID": "old"},
-              "runs": [{"config_id": 5, "extra_filters": {"SRC": "A"}}]})
-    config = dags.resolve_config(VAR_KEY, {"extra_filters": {"BTCH_ID": "B42"}}, 0)
-    assert config["extra_filters"] == {"ETL_IS_CURR_IND": "Y", "BTCH_ID": "B42", "SRC": "A"}
-    with pytest.raises(ConfigError, match="extra_filters must be a JSON object"):
-        variable({**BASE, "extra_filters": "not json"})
+    variable({**BASE, "extra_filters": "ETL_IS_CURR_IND = 'Y'",
+              "runs": [{"config_id": 5, "extra_filters": ["SRC = 'A'", "X = 1 OR Y = 2"]}]})
+    config = dags.resolve_config(VAR_KEY, {"extra_filters": "BTCH_ID = 'B42'"}, 0)
+    assert config["extra_filters"] == "(ETL_IS_CURR_IND = 'Y') AND (SRC = 'A') AND (X = 1 OR Y = 2) AND (BTCH_ID = 'B42')"
+    variable({**BASE, "extra_filters": "A = 1"})
+    assert dags.resolve_config(VAR_KEY, {})["extra_filters"] == "A = 1"
+    with pytest.raises(ConfigError, match="extra_filters must be SQL text"):
+        variable({**BASE, "extra_filters": {"BTCH_ID": "B42"}})
         dags.resolve_config(VAR_KEY, {})

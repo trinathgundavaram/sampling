@@ -113,7 +113,8 @@ def test_load_shows_the_changes_then_applies_them(raw, conn, settings):
     data["config"]["target_volume"] = 6
     data["rules"] = [r for r in data["rules"] if r["rule_name"] != "Withdrawn"]     # leaves the file: switched off
     data["rules"][1]["target_fraction"] = 1.0
-    data["rules"].append({"rule_id": 11, "rule_class": "EXCLUSION", "rule_name": "no_y", "rule_sql": "code = 'Y'"})
+    data["rules"].append({"rule_id": 11, "rule_class": "EXCLUSION", "rule_name": "no_y",
+                          "rule_sql": "SELECT case_id FROM u WHERE code = 'Y'"})
     text = json.dumps(data, default=str)
 
     shown = load_config_file(conn, settings, text, "me")

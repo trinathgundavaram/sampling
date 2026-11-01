@@ -69,21 +69,24 @@ CREATE INDEX gre_sampling_config_scope_ix (project_name, process_name) ON {{META
 --              least one row (e.g. "the batch is closed"). Run after the
 --              PARAM rules: no row = GATE_NOT_MET, retried like a technical
 --              error. rule_name and description go into the message.
---   EXCLUSION  rule_type SQL: rule_sql is a condition, true = excluded |
+--   Every EXCLUSION / PRIORITY / LEVEL / BUCKET rule_sql is a whole SELECT
+--   (any joins, as a GRE rule) returning the key_columns of the cases it
+--   matches (+ one value column for a PRIORITY EXPRESSION or a LEVEL).
+--   EXCLUSION  rule_type QUERY (default): the cases it returns are excluded |
 --              PRIOR_SELECTION: selected by an earlier run (lookback_days,
 --              history_scope). The first match (seq_no) is the reason stored.
---   PRIORITY   rule_type CONDITION: rows where rule_sql is true first |
---              EXPRESSION: by the value of rule_sql (sort_dir) |
+--   PRIORITY   rule_type QUERY (default): the cases it returns first |
+--              EXPRESSION: by the value it returns (sort_dir) |
 --              PRIOR_CANDIDATE: considered earlier, never selected, first |
 --              PRIOR_SELECTION: selected earlier, last. Applied in seq_no order.
 --   LEVEL      a stratification level: level_order, rule_name = its name,
---              rule_sql = the expression whose values are the buckets, or NULL
---              for a level whose buckets are conditions (BUCKET rule_sql).
+--              rule_sql = a SELECT of each case's value (the values are the
+--              buckets), or NULL for a level of bucket SELECTs (BUCKET rule_sql).
 --              parent_path = which parent buckets it splits (* = all).
 --              unlisted_policy = values / rows no BUCKET row covers.
 --   BUCKET     a bucket of the level with the same level_order: rule_name =
 --              the value or the bucket's name (no '/'), rule_sql = its
---              condition (condition levels only, first true in seq_no order),
+--              SELECT (bucket levels only, first in seq_no order; NULL = the rest),
 --              parent_path = under which parents this row applies, quota_mode,
 --              target_fraction, max_count.
 --   OUTPUT     a column of the output snapshot: rule_name = the column,
@@ -95,13 +98,11 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_rule (
     rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT
     seq_no             INTEGER DEFAULT 100,            -- order within the class
     rule_name          VARCHAR(200) NOT NULL,
-    rule_type          VARCHAR(30),                    -- EXCLUSION: SQL (default) | QUERY | PRIOR_SELECTION
-                                                       -- PRIORITY: CONDITION (default) | EXPRESSION | QUERY |
+    rule_type          VARCHAR(30),                    -- EXCLUSION: QUERY (default) | PRIOR_SELECTION
+                                                       -- PRIORITY: QUERY (default) | EXPRESSION |
                                                        --   PRIOR_CANDIDATE | PRIOR_SELECTION
-                                                       -- BUCKET (condition level): CONDITION (default) | QUERY
-                                                       -- QUERY: rule_sql is a whole SELECT (any joins)
-                                                       --   returning the key_columns of the matching cases
-    rule_sql           CLOB,                           -- condition, expression, or SELECT (see above)
+                                                       -- BUCKET: QUERY (default)
+    rule_sql           CLOB,                           -- a SELECT (see above); OUTPUT: a column expression
     level_order        INTEGER,                        -- LEVEL / BUCKET: 0 = first split, 1 = within it, ...
     parent_path        VARCHAR(1000) DEFAULT '*',      -- LEVEL / BUCKET: path pattern of parent buckets,
                                                        -- e.g. 'Denied' or 'Denied/*' (* and ? wildcards)

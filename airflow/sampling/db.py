@@ -232,30 +232,6 @@ def substitute_params(sql: Optional[str], params: dict, escape: bool = True) -> 
     return resolved
 
 
-# ---------------------------------------------------------------------------
-# extra_filters: {column: value} given at run time, ANDed to the scope (as the GRE's extra_filters)
-# ---------------------------------------------------------------------------
-_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def extra_filters_clause(filters: Optional[dict]) -> str:
-    """"COL1 = 'v1' AND COL2 = 'v2'" (sorted by column) for the columns of a table the configured SQL did not
-    anticipate: an incremental load's batch, an SCD2 current flag, a load date. A None value is IS NULL.
-    Column names are spliced as written, so each must be a plain identifier (ValueError otherwise); values are
-    quoted with quotes doubled. Empty when there are no filters."""
-    if not filters:
-        return ""
-    if not isinstance(filters, dict):
-        raise ValueError(f"extra_filters must be a JSON object of column: value, got {filters!r}")
-    bad = sorted(str(k) for k in filters if not _COLUMN_RE.match(str(k)))
-    if bad:
-        raise ValueError(f"extra_filters column(s) {bad} are not plain column names")
-    nested = sorted(str(k) for k, v in filters.items() if isinstance(v, (dict, list, tuple, set)))
-    if nested:
-        raise ValueError(f"extra_filters column(s) {nested} need one value each")
-    return " AND ".join(f"{k} IS NULL" if v is None else f"{k} = '{_escape_literal(v)}'"
-                        for k, v in sorted(filters.items(), key=lambda kv: str(kv[0]).lower()))
-
 
 # ---------------------------------------------------------------------------
 # run_key / run ids

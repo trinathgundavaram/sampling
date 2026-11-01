@@ -2,7 +2,7 @@
 
     python run_sampling.py run --process-name UMCM_WEEKLY_SAMPLE --run-key 2026-10-30
     python run_sampling.py run --config-id 1 --run-param pull_date=2026-10-30 --dry-run
-    python run_sampling.py run --config-id 1 --filter BTCH_ID=B42 --filter ETL_IS_CURR_IND=Y
+    python run_sampling.py run --config-id 1 --filter "BTCH_ID = 'B42'" --filter "ETL_IS_CURR_IND = 'Y'"
     python run_sampling.py validate --project UMCM --check-sql
     python run_sampling.py show-config --config-id 1
     python run_sampling.py runs --config-id 1
@@ -127,15 +127,10 @@ def _run_params(args) -> dict:
     return params
 
 
-def _filters(args) -> dict:
-    """--filter COL=VALUE (repeat), as the GRE's run_rules.py --filter: ANDed to the scope for this run."""
-    filters = {}
-    for item in args.filter or []:
-        if "=" not in item:
-            raise ConfigError(f"--filter must be COLUMN=VALUE, got {item!r}")
-        key, value = item.split("=", 1)
-        filters[key.strip()] = value
-    return filters
+def _filters(args) -> str:
+    """--filter "SQL condition" (repeat): ANDed to the scope for this run, as the GRE's extra_filters."""
+    items = [f.strip() for f in args.filter or [] if f.strip()]
+    return " AND ".join(f"({f})" for f in items) if len(items) > 1 else (items[0] if items else None)
 
 
 def _scope(args) -> dict:
@@ -314,8 +309,9 @@ def build_parser() -> argparse.ArgumentParser:
     def params(sp):
         sp.add_argument("--run-param", action="append", metavar="KEY=VALUE", help="a {key} / $key value (repeat)")
         sp.add_argument("--run-params", metavar="JSON", help='all values at once, e.g. {"pull_date": "2026-10-30"}')
-        sp.add_argument("--filter", action="append", metavar="COLUMN=VALUE",
-                        help="only rows of the universe table with this value, ANDed to scope_sql (repeat)")
+        sp.add_argument("--filter", action="append", metavar="SQL",
+                        help="a condition on the universe table, ANDed to scope_sql (repeat), "
+                             "e.g. \"BTCH_ID = 'B42'\"")
 
     r = sub.add_parser("run", help="run the sampling configs of a scope")
     scope(r)

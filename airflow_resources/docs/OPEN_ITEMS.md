@@ -7,9 +7,9 @@ any answer: they become rows.
 
 | # | Question | Fills |
 |---|---|---|
-| Q1 | The values of `AUTHZN_REQ_DETRMTN_TY` (approved / denied / withdrawn / dismissed …) and each one's share or mode (fraction, all there is, the remainder). How expedited is coded in `AUTHZN_REQ_STD_OR_EXPDT_IND` | level 0 buckets, a priority condition |
-| Q2 | How a case maps to a functional area: which of `ISS_DESC`, `SVC_CTGRY_CD`, `REQ_PROV_TY`, `SVC_PROV_TY` … and the values / conditions per area, with each area's share | level 1 BUCKET rules (`rule_sql`) |
-| Q3 | Where "Revision" comes from: ODAG1 has no such column | a priority condition |
+| Q1 | The values of `AUTHZN_REQ_DETRMTN_TY` (approved / denied / withdrawn / dismissed …) and each one's share or mode (fraction, all there is, the remainder). How expedited is coded in `AUTHZN_REQ_STD_OR_EXPDT_IND` | level 0 buckets, a priority SELECT |
+| Q2 | How a case maps to a functional area: which of `ISS_DESC`, `SVC_CTGRY_CD`, `REQ_PROV_TY`, `SVC_PROV_TY` … and the values / conditions (or tables to join) per area, with each area's share | level 1 BUCKET rules (`rule_sql`, a SELECT each) |
+| Q3 | Where "Revision" comes from: ODAG1 has no such column (a SELECT may join the table that has it) | a priority SELECT |
 | Q4 | How to identify auto-approvals, SHRPA / no prior authorisation required, diabetic supplies (columns, values, or another table to join) | exclusion rules |
 | Q5 | The columns that identify one case uniquely in the scope (`AUTHZN_ID`? with `SRC_DATA_KEY`?) **Decided 2026-10-30:** `AUTHZN_ID, SRC_DATA_KEY`. | `key_columns` |
 | Q6 | Which rows a cycle samples: the latest framework batch (`BTCH_ID`), or a decision-date window (`DETRMTN_NOTFTN_DT`, stored as VARCHAR(10): its format?). How the 7–14 day reporting lag of the requirements applies **Decided 2026-10-30:** one framework `WKLY` batch per sample: PARAM `batch_id` = the latest ODAG1 WKLY batch with every source closed, `scope_sql` `BTCH_ID = '{batch_id}'`, `run_key` `{batch_id}`. Needs `WKLY` added to ODAG1's sources in the framework (they list `DLY,MNT` only), and Q15. | `scope_sql`, a PARAM rule, `run_key` |

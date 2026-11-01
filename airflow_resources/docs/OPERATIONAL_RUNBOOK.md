@@ -58,8 +58,8 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 | 2. Run row | `gre_sampling_run` row, status `RUNNING`, with the `config_hash` of the rules loaded. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
 | 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
 | 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
-| 4. Pull | One `SELECT` of the universe rows in `scope_sql`. Teradata evaluates every bucket condition, exclusion rule and priority criterion as a column of that pull | `gre_sampling_config` | `PULL_FAILURE` |
-| 4a. QUERY rules | Each `QUERY` rule's `SELECT` runs on its own; the pulled cases it returns (by `key_columns`) match it. Cases it returns outside the scope are ignored. The count per rule is in `run_report` (`query_rules`) | EXCLUSION / PRIORITY / BUCKET rules of `rule_type` `QUERY` | `QUERY_RULE_FAILURE` (technical, retried); no key columns in the result: `CONFIG_ERROR` |
+| 4. Pull | One `SELECT` of the universe's key columns in `scope_sql` AND the run's `extra_filters` | `gre_sampling_config`, `extra_filters` | `PULL_FAILURE` |
+| 4a. Rule queries | Each EXCLUSION / PRIORITY / LEVEL / BUCKET rule's `SELECT` runs on its own; the pulled cases it returns (by `key_columns`) match it, or get its value. Cases it returns outside the scope are ignored. The count per rule is in `run_report` (`rule_queries`) | the rules | `QUERY_RULE_FAILURE` (technical, retried); no key columns in the result: `CONFIG_ERROR` |
 | 5. Exclude | A row matching any EXCLUSION rule is not a candidate; the first matching rule (`seq_no`) is its reason. History rules read earlier runs | EXCLUSION rules | |
 | 6. Order | PRIORITY rule 1, then 2, … then `priority_rank_sql`, then `key_columns` | PRIORITY rules, `priority_rank_sql` | |
 | 7. Stratify | Level by level, each parent's target is split between its buckets (FRACTION, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
@@ -98,8 +98,9 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
 
 - **Never delete a row**: set `act_ind = 0` (1 = in use). `rule_id` is yours to choose: unique in the whole
   table (e.g. 1–99 for config 1, 101–199 for config 2).
-- **SQL text** (`rule_sql`, `scope_sql` …) is a fragment run against the universe row: a condition (`flag = 'Y'`),
-  an expression (`LOWER(code)`), or for PARAM a whole `SELECT`. Quotes are doubled inside an `INSERT` literal.
+- **SQL text**: every rule's `rule_sql` (PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET) is a whole `SELECT`, as a
+  GRE rule (4.2); OUTPUT `rule_sql` is a column expression, and the config's `scope_sql` / `exclusion_sql` a
+  condition on the universe row. Quotes are doubled inside an `INSERT` literal.
 - **`$env`** anywhere is replaced by the environment (`DEV` → `dev` ...; UAT / PROD → empty): `EXPORT_FEED_$ENV_T`.
 - **`{name}` / `$name`** is replaced by a run parameter, quotes doubled; you write the quotes:
   `BTCH_ID = '{batch_id}'`. A token with no value is a configuration error.
@@ -146,8 +147,8 @@ by class:
 | Column | PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT |
 |---|---|---|---|---|---|---|---|
 | `rule_name` | the `{token}` | name (in the message) | the reason stored | name | name | the value / bucket name (no `/`) | the output column |
-| `rule_type` | | | `SQL` (default) / `QUERY` / `PRIOR_SELECTION` | `CONDITION` (default) / `EXPRESSION` / `QUERY` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | condition-level: `CONDITION` (default) / `QUERY` | |
-| `rule_sql` | a `SELECT` | a `SELECT`: a row = ready | SQL: the condition; QUERY: a `SELECT` of the key columns | CONDITION / EXPRESSION; QUERY: a `SELECT` of the key columns | the expression whose values are the buckets, or NULL (buckets by condition) | condition-level: the condition, or (QUERY) a `SELECT` of the key columns | the expression |
+| `rule_type` | | | `QUERY` (default) / `PRIOR_SELECTION` | `QUERY` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | `QUERY` (default) | |
+| `rule_sql` | a `SELECT` | a `SELECT`: a row = ready | QUERY: a `SELECT` of the key columns | QUERY: a `SELECT` of the key columns; EXPRESSION: of the key columns and a value | a `SELECT` of the key columns and the value, or NULL (buckets by their `SELECT`s) | bucket level: a `SELECT` of the key columns, or NULL (the rest) | the expression |
 | `level_order` | | | | | 0, 1, … | its level | |
 | `parent_path` | | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) | |
 | `unlisted_policy` | | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | | |
@@ -162,56 +163,64 @@ may use an earlier one. No value (no row, or NULL) fails the run as `PARAM_FAILU
 load has not finished. A value passed with the run (`run_params`) is used instead of the lookup.
 
 **Run-time filters (`extra_filters`)** – for a universe table holding several loads, batches or SCD2 versions of a
-case, the run can be given `column: value` filters (the Variable, a `runs` entry, a trigger, or `--filter
-COLUMN=VALUE` locally), as the GRE's `extra_filters`. They are ANDed to `scope_sql`, so the count, the pull and the
-output snapshot read the same rows, and kept in `run_params_txt`, so a later case replacement reads them too.
-Equality only (`null` is `IS NULL`); a range – an SCD2 version valid on the as-of date, say – belongs in `scope_sql`
-with `{as_of_date}`. When the filters leave two rows with the same `key_columns`, the run stops with
-"key_columns do not identify a case uniquely": add the filter that picks one version.
+case, the run can be given a SQL condition (the Variable, a `runs` entry, a trigger, or `--filter "SQL"` locally),
+as the GRE's `extra_filters`, e.g. `BTCH_ID = 'B42' AND ETL_IS_CURR_IND = 'Y'`, or an SCD2 version valid on the
+run date: `DATE '{as_of_date}' BETWEEN EFF_DT AND END_DT`. Each layer's (and each `--filter`'s) condition is ANDed
+to `scope_sql`, so the count, the pull and the output snapshot read the same rows; it is kept in `run_params_txt`,
+so a later case replacement reads it too. It is checked like any configured SQL (only reading, no `;`, no `--`).
+When the filters leave two rows with the same `key_columns`, the run stops with "key_columns do not identify a case
+uniquely": add the filter that picks one version. (A rule's own `SELECT` reads its tables itself: give a value
+`SELECT` the same version filter, or it returns a case twice.)
 
 **GATE** – a readiness check, run after the PARAM rules (so it may use `{batch_id}`). Its `SELECT` returning no
 row means "not ready": the run ends as `GATE_NOT_MET` and Airflow retries it (`retries`, `retry_delay_minutes`).
 Nothing is pulled or written but the run row. Example – sample only a closed batch:
 `SELECT 1 FROM <control table> WHERE <batch column> = '{batch_id}' AND <status column> = '<closed>'`.
 
-**EXCLUSION** – `SQL`: `rule_sql` true = excluded (a NULL result, unknown, does **not** exclude).
-`PRIOR_SELECTION`: selected by a current run of another `run_key` within `lookback_days` (by `sample_cycle`), of
-this config (`history_scope` `CONFIG`, default) or of any config of the project (`PROJECT`). The first matching rule
-by `seq_no` is the reason; each rule's count is in the run's `run_report`.
+**Every selection rule is a SQL statement**, as a GRE rule: a whole `SELECT` returning the `key_columns` of the
+cases it matches (same column names; joins, subqueries, `WITH`, any table – anything that reads). Each runs on its
+own after the pull; only the cases in the run's scope (`scope_sql` and `extra_filters`) count, so a rule need not
+repeat them (a filter on the batch keeps it fast). It may use `$env`, `{batch_id}` and the other run parameters. It
+must be a `SELECT` that only reads (checked like a PARAM rule); `validate --check-sql` EXPLAINs every one. Where a
+value is needed (a PRIORITY `EXPRESSION`, a LEVEL by value) the `SELECT` returns one more column, the value, and each
+case at most once. A rule whose `SELECT` fails to run fails the run as `QUERY_RULE_FAILURE` (retried); one returning
+no key columns is a `CONFIG_ERROR`. The cases each rule returned are counted in `run_report` (`rule_queries`).
+The former condition form (`rule_type` `SQL` / `CONDITION`) is reported by `validate` with how to rewrite it.
 
-**PRIORITY** – `CONDITION`: rows where `rule_sql` is true first. `EXPRESSION`: by the value of `rule_sql`
-(`sort_dir`, NULLs last). `PRIOR_CANDIDATE`: considered by an earlier run but never selected, first (carry-over).
-`PRIOR_SELECTION`: selected earlier, last. RANKED takes the first ones, SYSTEMATIC steps through the order, RANDOM
-ignores it.
+**EXCLUSION** – `QUERY` (default): the cases the `SELECT` returns are excluded. `PRIOR_SELECTION`: selected by a
+current run of another `run_key` within `lookback_days` (by `sample_cycle`), of this config (`history_scope`
+`CONFIG`, default) or of any config of the project (`PROJECT`). The first matching rule by `seq_no` is the reason;
+each rule's count is in the run's `run_report`.
 
-**`rule_type` `QUERY`** (EXCLUSION, PRIORITY, a BUCKET of a condition level) – when the test needs other tables or
-many columns, write it as a whole `SELECT`, as a GRE rule: joins, subqueries, `WITH`, anything that reads. It must
-return the `key_columns` (same names, any other columns are ignored); the cases it returns match. It runs on its own
-after the pull, so Teradata's limits on a condition inside the pull (no subquery in a `CASE`) do not apply. It may use
-`$env`, `{batch_id}` and the other run parameters; only cases in the run's scope (and `extra_filters`) count, so it
-need not repeat them. It must be a `SELECT` that only reads (checked like a PARAM rule), and `validate --check-sql`
-EXPLAINs it. Example – 21% of the sample Behavioral Health, BH meaning a code on a list and a BH provider:
+**PRIORITY** – `QUERY` (default): the cases the `SELECT` returns first. `EXPRESSION`: a `SELECT` of the key columns
+and a value, the cases ordered by it (`sort_dir`; cases it does not return, or NULL, last). `PRIOR_CANDIDATE`:
+considered by an earlier run but never selected, first (carry-over). `PRIOR_SELECTION`: selected earlier, last.
+RANKED takes the first ones, SYSTEMATIC steps through the order, RANDOM ignores it.
+
+Example – 21% of the sample Behavioral Health, BH meaning a code on a list and a BH provider:
 
 ```sql
 INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, unlisted_policy)
 VALUES (241, 2, 1, 'LEVEL', 1, 'program', 1, '*', 'SKIP');
-INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction, rule_type, rule_sql)
-VALUES (242, 2, 1, 'BUCKET', 1, 'Behavioral Health', 1, '*', 'FRACTION', 0.21, 'QUERY',
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction, rule_sql)
+VALUES (242, 2, 1, 'BUCKET', 1, 'Behavioral Health', 1, '*', 'FRACTION', 0.21,
         'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY
          FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 a
          JOIN REF_$ENV.BH_PROC_CODES c ON c.PROC_CD = a.PROC_CD AND c.ACT_IND = 1
          JOIN REF_$ENV.PROVIDER p ON p.PROV_ID = a.SVC_PROV_ID
          WHERE a.BTCH_ID = ''{batch_id}'' AND p.PROV_TY IN (''PSY'', ''LCSW'')');
-INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, rule_sql)
-VALUES (243, 2, 1, 'BUCKET', 2, 'Other', 1, '*', 'REMAINDER', '1=1');
+-- no rule_sql: every case no earlier bucket took
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode)
+VALUES (243, 2, 1, 'BUCKET', 2, 'Other', 1, '*', 'REMAINDER');
 ```
 
-(The tables and columns are illustrations.) A condition that only needs columns of the universe table stays a plain
-condition (`rule_sql` `SVC_CTGRY_CD IN ('BH', 'MH') AND ...`), evaluated inside the pull.
+(The tables and columns are illustrations.)
 
-**LEVEL** – a split. `rule_sql` set (**value level**): each value of the expression is a bucket. `rule_sql` NULL
-(**condition level**): the buckets are its BUCKET rows' conditions, tried in `seq_no` order, the first true one
-wins; rows matching none are bucket `OTHER`. `parent_path`: the parents this level splits – `*` = all, `Denied` =
+**LEVEL** – a split. `rule_sql` set (**value level**): a `SELECT` of the key columns and a value; each value is a
+bucket (a case it does not return is in `NULL`). `rule_sql` NULL (**bucket level**): the buckets are its BUCKET rows'
+`SELECT`s, tried in `seq_no` order, the first that returned the case wins; a BUCKET without `rule_sql` takes every
+case left (only one, and last); cases matching none are bucket `OTHER`. `parent_path`: the parents this level
+splits – `*` = all, `Denied` =
 only within Denied, `Denied/*` … (`*` and `?` wildcards, not case specific); under other parents the level is
 skipped. `unlisted_policy`: what happens to a value with no BUCKET row, or to `OTHER` – `SHARE` = share
 `1 − Σ fractions` equally, `REMAINDER` = as quota_mode REMAINDER, `SKIP` = never selected. No LEVEL rules = no
@@ -291,9 +300,9 @@ counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `gre_sampling_rule.rule_class` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `OUTPUT` |
-| `rule_type` (EXCLUSION) | `SQL`, `QUERY`, `PRIOR_SELECTION` |
-| `rule_type` (PRIORITY) | `CONDITION`, `EXPRESSION`, `QUERY`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
-| `rule_type` (BUCKET, condition level) | `CONDITION`, `QUERY` |
+| `rule_type` (EXCLUSION) | `QUERY` (default), `PRIOR_SELECTION` |
+| `rule_type` (PRIORITY) | `QUERY` (default), `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
+| `rule_type` (BUCKET) | `QUERY` (default) |
 | `quota_mode` (BUCKET) | `FRACTION`, `ALL`, `REMAINDER` |
 | `unlisted_policy` (LEVEL) | `SHARE`, `REMAINDER`, `SKIP` |
 | `history_scope` | `CONFIG`, `PROJECT` |
@@ -320,7 +329,7 @@ counts per bucket, are a `GROUP BY` on it.
 Some universe columns are dates stored as `VARCHAR(10)` (ODAG1 `DETRMTN_NOTFTN_DT`: its format is Q6 of
 OPEN_ITEMS.md). Compare them as dates, with the format they are written in:
 
-| Stored as | Condition (rule_sql / scope_sql) |
+| Stored as | Condition (in a rule's `WHERE`, `scope_sql`, `extra_filters`) |
 |---|---|
 | `2026-08-07` | `CAST(col AS DATE FORMAT 'YYYY-MM-DD') = DATE '{as_of_date}'` |
 | `08/07/2026` | `CAST(col AS DATE FORMAT 'MM/DD/YYYY') = DATE '{as_of_date}'` |
@@ -334,8 +343,8 @@ Check each with `validate --check-sql`, then on the universe:
 `SELECT col, COUNT(*) FROM <universe> WHERE <the CAST> IS NULL GROUP BY 1` should return nothing.
 
 ### 6.5 Paths
-A bucket's path is its bucket names joined by `/` from level 0: `Denied/Part B`. A row that matches no condition
-bucket is in `OTHER`; a NULL value is in `NULL`. No levels: `ALL`.
+A bucket's path is its bucket names joined by `/` from level 0: `Denied/Part B`. A case no bucket `SELECT`
+returned is in `OTHER`; a NULL value (or a case a value `SELECT` does not return) is in `NULL`. No levels: `ALL`.
 
 ## 7. Recipes: from a requirement to rows
 
@@ -345,14 +354,14 @@ The worked example is `sql/seed/umcm_sample_config.sql` (every kind of rule once
 |---|---|
 | Sample only after the batch is closed | GATE: `SELECT 1 FROM <control table> WHERE … = '{batch_id}' AND <closed>` |
 | Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `scope_sql` `BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
-| Never audit auto-approvals | EXCLUSION, `SQL` |
+| Never audit auto-approvals | EXCLUSION: `SELECT <keys> FROM <universe> WHERE <auto-approved>` |
 | Never audit a case twice in 90 days | EXCLUSION, `PRIOR_SELECTION`, `lookback_days` 90 |
 | Last week's unselected cases first | PRIORITY, `PRIOR_CANDIDATE`, `seq_no` 1 |
-| Revisions first, then inpatient | PRIORITY `CONDITION` rules in that order |
-| 80 % denials, 10 % withdrawals | LEVEL 0 with `rule_sql` the column, FRACTION BUCKETs |
+| Revisions first, then inpatient | PRIORITY rules in that order, each a `SELECT` of its cases |
+| 80 % denials, 10 % withdrawals | LEVEL 0 with `rule_sql` `SELECT <keys>, <disposition column> FROM <universe>`, FRACTION BUCKETs named by the values |
 | Every withdrawal there is, denials the rest | BUCKET Withdrawn `ALL`, BUCKET Denied `REMAINDER` |
 | Functional areas only within denials | LEVEL 1 `parent_path` `Denied`, its BUCKETs `parent_path` `Denied` |
-| Areas defined by several columns | LEVEL 1 with `rule_sql` NULL, one BUCKET per area with its condition in `rule_sql` |
+| Areas defined by several columns or other tables | LEVEL 1 with `rule_sql` NULL, one BUCKET per area with its `SELECT` (any joins) in `rule_sql`, a last BUCKET without `rule_sql` for the rest |
 | Equal portions | BUCKETs `REMAINDER` (or no BUCKET rows: unlisted `SHARE`) |
 | No more than 3 of one code | `diversity_expr` the code, `diversity_cap` 3 |
 | Exactly 150 or flag it | `shortfall_policy` `NONE`, Variable `fail_on_shortfall` true |

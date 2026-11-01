@@ -5,6 +5,7 @@ and maps the `autocommit` switch to BEGIN / COMMIT. Teradata-only syntax is avoi
 """
 import os
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -152,8 +153,31 @@ def insert_config(db, config_id=1, sampling_method="RANKED", priority_rank_sql="
     set_config(db, config_id, **more)
 
 
-def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act_ind=1, **cols):
-    """One gre_sampling_rule row; cols = any of its other columns."""
+_SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)
+
+
+def as_select(db, config_id, text, value=False):
+    """A condition (or, value=True, an expression) on the config's universe table as the SELECT a rule holds:
+    the key columns of the rows where it is true (or each row's key columns and value)."""
+    table, keys = db.execute("SELECT universe_table, key_columns FROM gre_sampling_config WHERE config_id = ?",
+                             [config_id]).fetchone()
+    if value:
+        return f"SELECT {keys}, {text} AS v FROM {table}"
+    return f"SELECT {keys} FROM {table} WHERE {text}"
+
+
+def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act_ind=1, raw_sql=False, **cols):
+    """One gre_sampling_rule row; cols = any of its other columns. A selection rule given a condition or an
+    expression (the short form the tests write) is stored as the SELECT the engine needs (as_select), unless
+    raw_sql."""
+    kind = str(cols.get("rule_type") or "").upper()
+    sql = cols.get("rule_sql")
+    if not raw_sql and rule_class in ("EXCLUSION", "PRIORITY", "LEVEL", "BUCKET") and sql \
+            and not _SELECT.match(sql) and "TODO" not in sql:
+        cols["rule_sql"] = as_select(db, config_id, sql,
+                                     value=rule_class == "LEVEL" or (rule_class == "PRIORITY" and kind == "EXPRESSION"))
+        if kind in ("SQL", "CONDITION"):
+            cols["rule_type"] = "QUERY"
     row = {"rule_id": rule_id, "config_id": config_id, "act_ind": act_ind, "rule_class": rule_class,
            "seq_no": seq_no, "rule_name": rule_name, **cols}
     db.execute(f"INSERT INTO gre_sampling_rule ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
@@ -173,6 +197,8 @@ def insert_strata(db, strata_id, config_id, level_order, name, expr, mix: dict, 
 
 def insert_bucket(db, rule_id, level_order, bucket_name, config_id=1, parent_path="*", seq_no=100, rule_sql=None,
                   quota_mode="FRACTION", target_fraction=None, max_count=None, act_ind=1):
+    if rule_sql and rule_sql.strip() == "1=1":
+        rule_sql = None   # every case: the bucket without rule_sql takes the rest
     insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_no, act_ind, rule_sql=rule_sql,
                 level_order=level_order, parent_path=parent_path, quota_mode=quota_mode,
                 target_fraction=target_fraction, max_count=max_count)

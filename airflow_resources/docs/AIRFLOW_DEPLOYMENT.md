@@ -127,7 +127,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `config_id` / `project` / `process_name` | **The scope** (at least one): one config, or every active config of the project and / or process. Matched against `gre_sampling_config` |
 | `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
 | `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name. `{run_key}` and `{as_of_date}` are always available |
-| `extra_filters` | Optional JSON object of `column: value` filters on the universe table, ANDed to `scope_sql` for the run (as the GRE's `extra_filters`): which load, batch or SCD2 version of an incremental table to read, e.g. `{"ETL_IS_CURR_IND": "Y"}`. Equality only; `null` is `IS NULL`; column names must be plain names. The Variable's, a `runs` entry's and a trigger's filters add up (a later one wins for the same column) |
+| `extra_filters` | Optional SQL condition on the universe table (or a list of them), ANDed to `scope_sql` for the run (as the GRE's `extra_filters`): which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `sample_cycle` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
 | `runs` | Optional list of scopes, one task each, e.g. `[{"name": "weekly", "process_name": "UMCM_WEEKLY_SAMPLE"}, {"config_id": 7, "run_params": {...}}]`. An entry that names a scope key replaces the Variable's scope; its other keys are layered over the Variable |
@@ -158,7 +158,7 @@ environment) is ignored with a warning - set it in the Variable. Examples:
 
 ```json
 {"config_id": "1", "run_key": "2026-10-30", "run_params": {"pull_date": "2026-10-30"}}
-{"config_id": "2", "run_key": "B42", "extra_filters": {"BTCH_ID": "B42"}}
+{"config_id": "2", "run_key": "B42", "extra_filters": "BTCH_ID = 'B42'"}
 {"process_name": "UMCM_WEEKLY_SAMPLE", "as_of": "2026-10-23", "run_key": "BACKFILL_2026_10_23"}
 {"config_id": "1", "dry_run": "true"}
 {"config_id": "1", "run_key": "2026-10-30", "seed": "1234567890123"}
@@ -245,7 +245,7 @@ python run_sampling.py mark-failed --run-id <run_id>
 | `load_env` / `env_value` | `SAMPLING_ENVIRONMENT` / `SAMPLING_ENV_VALUE` |
 | `timezone`, `chunk_rows`, `access_lock` | `SAMPLING_TIMEZONE`, `SAMPLING_CHUNK_ROWS`, `SAMPLING_ACCESS_LOCK` |
 | `log_level` | `SAMPLING_LOG_LEVEL` (console plus one file per run in `local/logs`, or `SAMPLING_LOG_DIR`) |
-| scope, `run_key`, `run_params`, `extra_filters`, `as_of`, `seed`, `dry_run` | command options (`--filter COLUMN=VALUE`, repeat, for `extra_filters`) |
+| scope, `run_key`, `run_params`, `extra_filters`, `as_of`, `seed`, `dry_run` | command options (`--filter "SQL"`, repeat, for `extra_filters`) |
 
 Exit codes: 0 = done, 1 = done with problems (a sample failed or fell short, validation found problems),
 2 = could not run. A variable set in the shell wins over `dev.env`.
@@ -285,7 +285,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (110 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (114 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

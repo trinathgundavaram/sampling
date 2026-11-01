@@ -164,14 +164,24 @@ def resolve_config(variable_key: str, overrides: Optional[dict] = None, scope_in
     if picked:
         config["run_params"] = {**_run_params(config.get("run_params")), **picked}
         logger.info("run parameters from the trigger: %s", ", ".join(sorted(picked)))
-    # extra_filters add up: the Variable's (an SCD2 current flag, say), a runs entry's, the trigger's (a batch)
-    filters = {}
-    for layer in (variable, scope, given):
-        filters.update(_run_params(layer.get("extra_filters"), "extra_filters"))
-    config["extra_filters"] = filters
+    # extra_filters (SQL conditions) add up: the Variable's (an SCD2 current flag, say), a runs entry's, the
+    # trigger's (a batch), ANDed
+    filters = [f for layer in (variable, scope, given) for f in _filters(layer.get("extra_filters"))]
+    config["extra_filters"] = " AND ".join(f"({f})" for f in filters) if len(filters) > 1 else \
+        (filters[0] if filters else None)
     if not config.get("meta_db"):
         raise ConfigError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
     return config
+
+
+def _filters(value) -> list:
+    """extra_filters of one layer: a SQL condition, or a list of them."""
+    if value in (None, "", []):
+        return []
+    items = value if isinstance(value, list) else [value]
+    if not all(isinstance(v, str) for v in items):
+        raise ConfigError(f"extra_filters must be SQL text (a condition, or a list of them), got {value!r}")
+    return [v.strip() for v in items if v.strip()]
 
 
 def _run_params(value, name: str = "run_params") -> dict:
