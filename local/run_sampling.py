@@ -10,8 +10,6 @@
     python run_sampling.py finalize --config-id 1 --run-key B42
     python run_sampling.py replace --config-id 1 --run-key B42 --case-key "AUTHZN_ID=123" --reason "no record"
     python run_sampling.py run --config-id 1 --run-key B42 --force-reason "rules corrected, approved by ..."
-    python run_sampling.py export-config --config-id 1 --file umcm.json
-    python run_sampling.py load-config --file umcm.json [--apply]
     python run_sampling.py purge --project UMCM --older-than-days 400 [--apply]
     python run_sampling.py mark-failed --run-id <run_id>
     python run_sampling.py test-connection
@@ -42,7 +40,7 @@ if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
 
 from sampling import __version__  # noqa: E402
-from sampling.admin import export_config, load_config_file, purge_selections  # noqa: E402
+from sampling.admin import purge_selections  # noqa: E402
 from sampling.db import connect_teradata, error_text  # noqa: E402
 from sampling.engine import (config_problems, finalize_run, load_config, replace_case, run_scope,  # noqa: E402
                              validate)
@@ -211,23 +209,6 @@ def cmd_mark_failed(conn, s, args) -> tuple:
     return {"run_id": args.run_id, "updated": n}, 0 if n else 1
 
 
-def cmd_export_config(conn, s, args) -> tuple:
-    data = export_config(conn, s, args.config_id)
-    if not args.file:
-        return data, 0
-    Path(args.file).write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
-    return {"config_id": args.config_id, "file": args.file, "rules": len(data["rules"])}, 0
-
-
-def cmd_load_config(conn, s, args) -> tuple:
-    try:
-        text = Path(args.file).read_text(encoding="utf-8")
-    except OSError as e:
-        raise ConfigError(f"cannot read {args.file}: {e}") from e
-    out = load_config_file(conn, s, text, _user(args), apply=args.apply)
-    return out, 1 if out["problems"] else 0
-
-
 def cmd_purge(conn, s, args) -> tuple:
     out = purge_selections(conn, s, args.older_than_days, **_scope(args), apply=args.apply)
     return out, 1 if any("skipped" in c for c in out["configs"]) else 0
@@ -293,7 +274,7 @@ def cmd_deploy_schema(conn, s, args) -> tuple:
 COMMANDS = {"run": cmd_run, "validate": cmd_validate, "show-config": cmd_show_config, "runs": cmd_runs,
             "errors": cmd_errors, "mark-failed": cmd_mark_failed, "test-connection": cmd_test_connection,
             "deploy-schema": cmd_deploy_schema, "finalize": cmd_finalize, "replace": cmd_replace,
-            "export-config": cmd_export_config, "load-config": cmd_load_config, "purge": cmd_purge}
+            "purge": cmd_purge}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -352,15 +333,6 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--limit", type=int, default=20)
         if name == "runs":
             sp.add_argument("--status", choices=("RUNNING", "COMPLETED", "FINAL", "ERROR"))
-
-    ex = sub.add_parser("export-config", help="one config and all its rule rows as a JSON file")
-    ex.add_argument("--config-id", type=int, required=True)
-    ex.add_argument("--file", help="write here (default: print)")
-
-    lc = sub.add_parser("load-config", help="check a JSON config file, show the changes; --apply writes them")
-    lc.add_argument("--file", required=True)
-    lc.add_argument("--apply", action="store_true", help="write the changes (one transaction)")
-    lc.add_argument("--by", help="recorded as created_by / last_updated_by (default: your user name)")
 
     pg = sub.add_parser("purge", help="delete candidate rows old runs no longer need (counts only without --apply)")
     scope(pg)

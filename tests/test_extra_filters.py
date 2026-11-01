@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from conftest import insert_config, insert_rule, insert_strata, load_cli
+from conftest import insert_config, insert_rule, load_cli
 from sampling.engine import run_sampling, validate
 
 AS_OF = date(2026, 8, 7)

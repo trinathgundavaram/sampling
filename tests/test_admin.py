@@ -1,14 +1,11 @@
-"""Safety and operations: the read-only check on configured SQL, the configuration file, retention."""
-import json
-import re
+"""Safety and operations: the read-only check on configured SQL, retention."""
 from datetime import date, timedelta
 
 import pytest
 
 from conftest import ROOT, insert_config, insert_rule, insert_strata, load_cli
-from sampling.admin import (CONFIG_COLUMNS, RULE_COLUMNS, export_config, history_days, load_config_file,
-                            purge_selections)
-from sampling.engine import finalize_run, load_config, run_sampling, sql_problems
+from sampling.admin import history_days, purge_selections
+from sampling.engine import finalize_run, run_sampling, sql_problems
 from sampling.settings import ConfigError, Settings
 
 AS_OF = date(2026, 8, 7)
@@ -84,78 +81,6 @@ def test_the_odag1_batch_lookup_follows_the_environment(raw, conn):
             assert f" {db}.ComplianceRequestControl " in text and "$" not in text
 
 
-# ── configuration from a file ──────────────────────────────────────────────
-
-def test_columns_match_the_schema():
-    schema = (ROOT / "sql" / "schema.sql").read_text()
-
-    def columns(table):
-        body = schema.split(f"{{{{META_DB}}}}.{table} (")[1].split("\n)")[0]
-        return [m.group(1) for m in re.finditer(r"^\s{4}(\w+)\s", body, re.M)]
-    audit = {"created_by", "last_updated_by", "load_datetime", "last_updated_datetime"}
-    assert [c for c in columns("gre_sampling_config") if c not in audit] == list(CONFIG_COLUMNS)
-    assert [c for c in columns("gre_sampling_rule") if c not in audit] == list(RULE_COLUMNS)
-
-
-def test_export_then_load_changes_nothing(raw, conn, settings):
-    _sample(raw.db)
-    data = export_config(conn, settings, 1)
-    assert data["config"]["universe_table"] == "u" and len(data["rules"]) == 3
-    out = load_config_file(conn, settings, json.dumps(data, default=str), "me", apply=True)
-    assert out["config"] == "unchanged" and not out["rules_added"] and not out["rules_changed"]
-    assert not out["rules_switched_off"] and out["applied"]
-
-
-def test_load_shows_the_changes_then_applies_them(raw, conn, settings):
-    _sample(raw.db)
-    before = load_config(conn, settings, 1).config_hash
-    data = export_config(conn, settings, 1)
-    data["config"]["target_volume"] = 6
-    data["rules"] = [r for r in data["rules"] if r["rule_name"] != "Withdrawn"]     # leaves the file: switched off
-    data["rules"][1]["target_fraction"] = 1.0
-    data["rules"].append({"rule_id": 11, "rule_class": "EXCLUSION", "rule_name": "no_y",
-                          "rule_sql": "SELECT case_id FROM u WHERE code = 'Y'"})
-    text = json.dumps(data, default=str)
-
-    shown = load_config_file(conn, settings, text, "me")
-    assert not shown["applied"] and shown["config"] == {"target_volume": {"from": 4, "to": 6}}
-    assert shown["rules_added"] == ["11 EXCLUSION no_y"] and shown["rules_switched_off"] == [1002]
-    assert shown["rules_changed"] == {1001: {"target_fraction": {"from": 0.5, "to": 1.0}}}
-    assert load_config(conn, settings, 1).config_hash == before                      # nothing written yet
-
-    assert load_config_file(conn, settings, text, "me", apply=True)["applied"]
-    assert _rows(raw, "SELECT act_ind FROM gre_sampling_rule WHERE rule_id = 1002") == [(0,)]   # never deleted
-    assert _rows(raw, "SELECT created_by FROM gre_sampling_rule WHERE rule_id = 11") == [("me",)]
-    assert _rows(raw, "SELECT target_volume, last_updated_by FROM gre_sampling_config") == [(6, "me")]
-    out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
-    assert out["status"] == "COMPLETED" and out["selected"] == 6 and out["exclusions"] == {"no_y": 5}
-
-
-def test_load_refuses_a_bad_file(raw, conn, settings):
-    _sample(raw.db)
-    insert_rule(raw.db, "PARAM", 900, "other", config_id=2, rule_sql="SELECT 1")
-    data = export_config(conn, settings, 1)
-    data["rules"].append({"rule_id": 900, "rule_class": "EXCLUSION", "rule_name": "x", "rule_sql": "disp = 'A'; x"})
-    out = load_config_file(conn, settings, json.dumps(data, default=str), "me", apply=True)
-    assert not out["applied"] and any("belongs to config_id 2" in p for p in out["problems"])
-    assert any("';'" in p for p in out["problems"])
-    with pytest.raises(ConfigError, match="unknown column"):
-        load_config_file(conn, settings, json.dumps({"config": {"config_id": 1, "nope": 1}, "rules": []}), "me")
-    with pytest.raises(ConfigError, match="rule_id repeated"):
-        load_config_file(conn, settings, json.dumps({"config": {"config_id": 1}, "rules": [
-            {"rule_id": 5, "rule_class": "PARAM"}, {"rule_id": 5, "rule_class": "PARAM"}]}), "me")
-
-
-def test_load_a_new_config(raw, conn, settings):
-    _sample(raw.db)
-    data = export_config(conn, settings, 1)
-    data["config"].update(config_id=3, sample_name="copy")
-    data["rules"] = [{**r, "rule_id": r["rule_id"] + 3000, "config_id": 3} for r in data["rules"]]
-    out = load_config_file(conn, settings, json.dumps(data, default=str), "me", apply=True)
-    assert out["config"] == "new" and len(out["rules_added"]) == 3
-    assert run_sampling(conn, settings, 3, run_key="K1", as_of=AS_OF)["selected"] == 4
-
-
 # ── retention ──────────────────────────────────────────────────────────────
 
 def _counts(raw):
@@ -194,7 +119,7 @@ def test_purge_respects_the_history_rules(raw, conn, settings):
         purge_selections(conn, settings, 0, config_id=1)
 
 
-def test_cli_config_file_and_purge(raw, monkeypatch, tmp_path, capsys):
+def test_cli_purge(raw, monkeypatch, tmp_path, capsys):
     from sampling.db import Connection
     cli = load_cli()
     monkeypatch.setenv("SAMPLING_META_DB", "main")
@@ -204,15 +129,4 @@ def test_cli_config_file_and_purge(raw, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     _sample(raw.db)
-    path = tmp_path / "c.json"
-    assert cli.main(["export-config", "--config-id", "1", "--file", str(path)]) == 0
-    data = json.loads(path.read_text())
-    data["config"]["target_volume"] = 2
-    path.write_text(json.dumps(data))
-    capsys.readouterr()
-    assert cli.main(["load-config", "--file", str(path)]) == 0
-    assert not json.loads(capsys.readouterr().out)["applied"]
-    assert cli.main(["load-config", "--file", str(path), "--apply", "--by", "jdoe"]) == 0
-    assert json.loads(capsys.readouterr().out)["applied"]
-    assert cli.main(["load-config", "--file", str(tmp_path / "missing.json")]) == 2
     assert cli.main(["purge", "--config-id", "1", "--older-than-days", "30"]) == 0

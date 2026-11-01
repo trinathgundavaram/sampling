@@ -106,15 +106,15 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
   `BTCH_ID = '{batch_id}'`. A token with no value is a configuration error.
 - **Order** is `seq_no` (then `rule_id`) within a class; `level_order` for levels.
 - **Only the columns of the class** (table in 4.2): `validate` reports any other one that is set.
-- **Only reading SQL**: every SQL column is checked before a run (and by `validate`, and by `load-config`). Refused:
+- **Only reading SQL**: every SQL column is checked before a run (and by `validate`). Refused:
   a statement word (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `DROP`, `CREATE`, `ALTER`, `REPLACE`, `RENAME`, `GRANT`,
   `REVOKE`, `CALL`, `EXEC`, `COLLECT`, `COMMIT` …), a `;`, a `--` comment (it would comment out the rest of the
   query built around the fragment: use `/* */`), unbalanced parentheses or quotes; PARAM and GATE must be a
   `SELECT` (`WITH …` and `LOCKING ROW FOR ACCESS SELECT …` are fine). Text inside quotes is not checked:
   `disp = 'DELETE'` is a value. The rows run under the service account: this stops a pasted script or a slip,
   it is not a permission (who may write `gre_sampling_rule` is).
-- **Easier than INSERTs**: `export-config` writes a config and its rules as a JSON file; edit it and
-  `load-config --file … ` shows what would change, `--apply` writes it in one transaction (4.3).
+- **Everything is a row** in `gre_sampling_config` / `gre_sampling_rule`: no configuration files. The rows (and each
+  run's copy of them in `run_report`, with `config_hash`) are the rules' history.
 - After any change: `python local/run_sampling.py validate --config-id N --check-sql` (section 9).
 
 ### 4.1 gre_sampling_config – one row per sample
@@ -242,22 +242,6 @@ A level's fractions under one `parent_path` add up to 1 at most.
 `sample_run_id`, `config_id`, `run_key`, `sample_cycle`, `case_key`, `selection_order`, `priority_rank`,
 `stratum_path`, `etl_is_curr_ind`, `load_datetime`, `last_updated_datetime`), `rule_sql` its expression. Create the
 table once from `sql/output_table_template.sql` (the engine never creates or alters tables).
-
-### 4.3 A configuration as a file
-
-```bash
-python local/run_sampling.py export-config --config-id 1 --file umcm.json
-python local/run_sampling.py load-config --file umcm.json
-python local/run_sampling.py load-config --file umcm.json --apply
-```
-
-The file is `{"config": {gre_sampling_config columns}, "rules": [{gre_sampling_rule columns}, ...]}` (the audit
-columns are left out and set by the load). Without `--apply` the load only shows: the config columns that change
-(`from` / `to`), the rules added, changed (per column) and switched off, and the problems. It is refused when the
-rules it would make active have any problem `validate` finds, or a `rule_id` belongs to another config. A rule in
-the tables but not in the file is switched off (`act_ind = 0`), never deleted; a rule in the file with
-`act_ind 0` stays and is ignored. `created_by` / `last_updated_by` = `--by` (default your user name). Keep the
-file in version control: its history is the rules' history, next to each run's `config_hash`.
 
 ## 5. Tables the engine writes (read only)
 
@@ -402,11 +386,9 @@ From `local/`, with `dev.env` (copy of `dev.env.example`: Teradata login and `SA
 | `runs [--config-id N] [--status S]` | Recent run rows (with `config_hash`, `finalized_by`, `override_reason`) | – |
 | `errors [--config-id N]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
-| `export-config --config-id N [--file F]` | One config and all its rule rows as JSON (4.3) | – |
-| `load-config --file F [--apply] [--by U]` | Checks a JSON config, shows the changes; `--apply` writes them (4.3) | config, rules |
 | `purge --config-id N \| --project P \| --process-name X --older-than-days D [--apply]` | Counts (`--apply`: deletes) the selection rows old runs no longer need (12) | selections |
 
-Exit codes: 0 done, 1 a sample failed (or `load-config` found problems, or `purge` skipped a config), 2 a usage
+Exit codes: 0 done, 1 a sample failed (or `purge` skipped a config), 2 a usage
 or configuration problem. One log file per command in
 `local/logs`.
 
@@ -463,7 +445,7 @@ Run again with the same `run_key` (and `--seed` from the run row to reproduce a 
 turns `etl_is_curr_ind = 'N'` everywhere, the snapshot table included.
 
 ### 10.7 Change a mix, a rule, a priority
-New rule rows, or `act_ind = 0` on the old ones (or `export-config`, edit, `load-config`), then
+New rule rows, or `act_ind = 0` on the old ones, then
 `validate --check-sql` and a `--dry-run`. The next run uses
 them; earlier runs are not changed. The new run's `config_hash` differs from the previous one; the old rules stay
 readable in the old run's `run_report`.
