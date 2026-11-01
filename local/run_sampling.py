@@ -2,6 +2,7 @@
 
     python run_sampling.py run --process-name UMCM_WEEKLY_SAMPLE --run-key 2026-10-30
     python run_sampling.py run --config-id 1 --run-param pull_date=2026-10-30 --dry-run
+    python run_sampling.py run --config-id 1 --filter BTCH_ID=B42 --filter ETL_IS_CURR_IND=Y
     python run_sampling.py validate --project UMCM --check-sql
     python run_sampling.py show-config --config-id 1
     python run_sampling.py runs --config-id 1
@@ -126,6 +127,17 @@ def _run_params(args) -> dict:
     return params
 
 
+def _filters(args) -> dict:
+    """--filter COL=VALUE (repeat), as the GRE's run_rules.py --filter: ANDed to the scope for this run."""
+    filters = {}
+    for item in args.filter or []:
+        if "=" not in item:
+            raise ConfigError(f"--filter must be COLUMN=VALUE, got {item!r}")
+        key, value = item.split("=", 1)
+        filters[key.strip()] = value
+    return filters
+
+
 def _scope(args) -> dict:
     return {k: v for k, v in (("config_id", args.config_id), ("project", args.project),
                               ("process_name", args.process_name)) if v not in (None, "")}
@@ -133,7 +145,8 @@ def _scope(args) -> dict:
 
 def cmd_run(conn, s, args) -> tuple:
     as_of = date.fromisoformat(args.as_of) if args.as_of else None
-    out = run_scope(conn, s, **_scope(args), run_key=args.run_key, run_params=_run_params(args), seed=args.seed,
+    out = run_scope(conn, s, **_scope(args), run_key=args.run_key, run_params=_run_params(args),
+                    extra_filters=_filters(args), seed=args.seed,
                     as_of=as_of, triggered_by=args.triggered_by or f"local-{getpass.getuser()}",
                     dry_run=args.dry_run, force_reason=args.force_reason)
     problems = out["failed"] or any(r.get("shortfall") for r in out["runs"])
@@ -154,7 +167,8 @@ def cmd_replace(conn, s, args) -> tuple:
 
 
 def cmd_validate(conn, s, args) -> tuple:
-    out = validate(conn, s, **_scope(args), run_params=_run_params(args), check_sql=args.check_sql)
+    out = validate(conn, s, **_scope(args), run_params=_run_params(args), check_sql=args.check_sql,
+                   extra_filters=_filters(args))
     return out, 0 if out["result"] == "VALID" else 1
 
 
@@ -300,6 +314,8 @@ def build_parser() -> argparse.ArgumentParser:
     def params(sp):
         sp.add_argument("--run-param", action="append", metavar="KEY=VALUE", help="a {key} / $key value (repeat)")
         sp.add_argument("--run-params", metavar="JSON", help='all values at once, e.g. {"pull_date": "2026-10-30"}')
+        sp.add_argument("--filter", action="append", metavar="COLUMN=VALUE",
+                        help="only rows of the universe table with this value, ANDed to scope_sql (repeat)")
 
     r = sub.add_parser("run", help="run the sampling configs of a scope")
     scope(r)

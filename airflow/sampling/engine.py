@@ -62,7 +62,7 @@ from datetime import date, timedelta
 from fnmatch import fnmatchcase
 from typing import Optional
 
-from sampling.db import Connection, error_text, generate_run_id, substitute_params
+from sampling.db import Connection, error_text, extra_filters_clause, generate_run_id, substitute_params
 from sampling.settings import ConfigError, Settings
 
 log = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ _NEEDS_ORDER = ("RANKED", "SYSTEMATIC")
 
 BASE_RANK = "smp_base_rank"
 DIVERSITY = "smp_div"
+EXTRA_FILTERS = "extra_filters"   # the run parameter holding the run's {column: value} filters
 
 
 def _up(value, default: str = "") -> str:
@@ -426,7 +427,8 @@ def _flag(sql: str) -> str:
 
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     """{universe, scope, count (or None), pull, output (or None)}: the SQL of a run, $env and parameters
-    resolved. Every bucket condition, exclusion rule and priority criterion is a column Teradata computes."""
+    resolved; the run's extra_filters (params[EXTRA_FILTERS]) are ANDed to the scope, so the count, the pull and
+    the output snapshot all read the same rows. Every bucket condition, exclusion rule and priority criterion is a column Teradata computes."""
     def sql(text, identifier=False):
         return substitute_params(s.resolve_env(str(text or "").strip(), identifier=identifier), params)
 
@@ -434,6 +436,9 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     universe = sql(c["universe_table"], identifier=True)
     keys = sample.keys
     scope = sql(c.get("scope_sql")) or "1=1"
+    filters = extra_filters_clause(params.get(EXTRA_FILTERS))
+    if filters:
+        scope = f"({scope}) AND {filters}"
     quick_exclusion = sql(c.get("exclusion_sql"))
     columns = list(keys)
     for lvl in sample.levels:
@@ -930,7 +935,8 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
 
 def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str] = None,
                  run_params: Optional[dict] = None, seed: Optional[int] = None, triggered_by: str = "SYSTEM",
-                 as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None) -> dict:
+                 as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None,
+                 extra_filters: Optional[dict] = None) -> dict:
     """Run one sampling config. Returns its report (status COMPLETED / ERROR; error_kind 'config' when retrying
     cannot help, 'technical' otherwise). Raises ConfigError only when the config row itself cannot be loaded.
 
@@ -943,6 +949,9 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     dry_run    : do everything but write (no run row).
     force_reason: replace a FINAL sample of this run_key (recorded on the new run row); without it a rerun of a
                  finalised run_key fails as FINALIZED.
+    extra_filters: {column: value} equality filters on the universe table, ANDed to scope_sql for this run (the
+                 GRE's extra_filters): which load, batch or SCD2 version of an incremental table to read. Kept
+                 with the run's parameters, so a later case replacement reads the same rows.
     """
     as_of = as_of or s.today()
     started = s.now()
@@ -969,6 +978,8 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     if early:
         run_key = template if "{" not in template and "$" not in template else as_of.isoformat()
     params["run_key"] = run_key
+    if extra_filters:
+        params[EXTRA_FILTERS] = dict(extra_filters)
 
     label = ".".join(str(p) for p in (config.get("project_name"), config.get("sample_name")) if p)
     attempt = 0 if dry_run else count_prior_attempts(conn, s, config_id, run_key)
@@ -1234,7 +1245,7 @@ def run_scope(conn: Connection, s: Settings, config_id=None, project: Optional[s
 
 def validate(conn: Connection, s: Settings, config_id=None, project: Optional[str] = None,
              process_name: Optional[str] = None, run_params: Optional[dict] = None,
-             check_sql: bool = False, as_of: Optional[date] = None) -> dict:
+             check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[dict] = None) -> dict:
     """Check the configs of a scope. With check_sql, also run the parameter lookups and EXPLAIN the pull, count
     and output SQL (proves tables, columns and expressions exist; reads no universe rows)."""
     out = []
@@ -1250,6 +1261,8 @@ def validate(conn: Connection, s: Settings, config_id=None, project: Optional[st
             try:
                 params = resolve_params(conn, s, sample, run_params, day)
                 params.setdefault("run_key", day.isoformat())
+                if extra_filters:
+                    params[EXTRA_FILTERS] = dict(extra_filters)
                 queries = build_queries(sample, s, params)
                 for key in ("pull", "count", "output"):
                     if queries.get(key):

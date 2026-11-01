@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONNECTION_ID = "compliance_teradata"
 TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("config_id", "project", "process_name")
-RUN_KEYS = ("run_key", "run_params", "seed", "as_of", "dry_run")
+RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "dry_run")
 TRIGGER_KEYS = (*SCOPE_KEYS, *RUN_KEYS, "log_level")   # what a trigger may change for one run
 PASSED_ON = ("project", "process_name", "run_key", "as_of")
 SETTINGS_KEYS = ("meta_db", "load_env", "environment", "env_value", "timezone", "chunk_rows", "access_lock")
@@ -164,21 +164,26 @@ def resolve_config(variable_key: str, overrides: Optional[dict] = None, scope_in
     if picked:
         config["run_params"] = {**_run_params(config.get("run_params")), **picked}
         logger.info("run parameters from the trigger: %s", ", ".join(sorted(picked)))
+    # extra_filters add up: the Variable's (an SCD2 current flag, say), a runs entry's, the trigger's (a batch)
+    filters = {}
+    for layer in (variable, scope, given):
+        filters.update(_run_params(layer.get("extra_filters"), "extra_filters"))
+    config["extra_filters"] = filters
     if not config.get("meta_db"):
         raise ConfigError(f"'meta_db' is required in Airflow Variable '{variable_key}'")
     return config
 
 
-def _run_params(value) -> dict:
+def _run_params(value, name: str = "run_params") -> dict:
     if value in (None, ""):
         return {}
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError as e:
-            raise ConfigError(f"run_params must be a JSON object, got {value!r}") from e
+            raise ConfigError(f"{name} must be a JSON object, got {value!r}") from e
     if not isinstance(value, dict):
-        raise ConfigError("run_params must be a JSON object")
+        raise ConfigError(f"{name} must be a JSON object")
     return value
 
 
@@ -215,13 +220,15 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
                                   or DEFAULT_CONNECTION_ID)
         scope = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
         kwargs = {"run_key": config.get("run_key") or None, "run_params": _run_params(config.get("run_params")),
+                  "extra_filters": config.get("extra_filters") or None,
                   "seed": config.get("seed"), "as_of": _as_of(config, dag_run, settings.timezone),
                   "triggered_by": _triggered_by(dag_run), "dry_run": _flag(config.get("dry_run"), False)}
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
 
-    logger.info("sampling %s | settings %s | scope %s | run_key=%s as_of=%s%s", __version__, settings.describe(),
-                scope or "none", kwargs["run_key"] or "(as_of date)", kwargs["as_of"],
+    logger.info("sampling %s | settings %s | scope %s | run_key=%s as_of=%s extra_filters=%s%s", __version__,
+                settings.describe(), scope or "none", kwargs["run_key"] or "(as_of date)", kwargs["as_of"],
+                kwargs["extra_filters"] or "none",
                 " | DRY RUN" if kwargs["dry_run"] else "")
     try:
         conn = connect_teradata(settings.meta_db, settings.access_lock)

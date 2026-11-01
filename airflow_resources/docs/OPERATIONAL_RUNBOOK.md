@@ -54,7 +54,7 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 
 | Step | What happens | Configured in | Fails as |
 |---|---|---|---|
-| 1. Parameters | Each PARAM rule runs in `seq_no` order; the first column of the first row becomes `{rule_name}`. Values passed with the run win. `{as_of_date}` is always there. The `run_key` template is filled (`{batch_id}` → `B42`) | PARAM rules, the run's `run_params`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
+| 1. Parameters | Each PARAM rule runs in `seq_no` order; the first column of the first row becomes `{rule_name}`. Values passed with the run win. `{as_of_date}` is always there. The `run_key` template is filled (`{batch_id}` → `B42`). The run's `extra_filters` are kept with the parameters | PARAM rules, the run's `run_params`, `extra_filters`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
 | 2. Run row | `gre_sampling_run` row, status `RUNNING`, with the `config_hash` of the rules loaded. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
 | 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
 | 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
@@ -159,6 +159,14 @@ by class:
 **PARAM** – a run parameter. The first column of the first row of `rule_sql` becomes `{rule_name}`; a later PARAM
 may use an earlier one. No value (no row, or NULL) fails the run as `PARAM_FAILURE`, which is retried: typically the
 load has not finished. A value passed with the run (`run_params`) is used instead of the lookup.
+
+**Run-time filters (`extra_filters`)** – for a universe table holding several loads, batches or SCD2 versions of a
+case, the run can be given `column: value` filters (the Variable, a `runs` entry, a trigger, or `--filter
+COLUMN=VALUE` locally), as the GRE's `extra_filters`. They are ANDed to `scope_sql`, so the count, the pull and the
+output snapshot read the same rows, and kept in `run_params_txt`, so a later case replacement reads them too.
+Equality only (`null` is `IS NULL`); a range – an SCD2 version valid on the as-of date, say – belongs in `scope_sql`
+with `{as_of_date}`. When the filters leave two rows with the same `key_columns`, the run stops with
+"key_columns do not identify a case uniquely": add the filter that picks one version.
 
 **GATE** – a readiness check, run after the PARAM rules (so it may use `{batch_id}`). Its `SELECT` returning no
 row means "not ready": the run ends as `GATE_NOT_MET` and Airflow retries it (`retries`, `retry_delay_minutes`).
@@ -336,7 +344,7 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
   "Started by the compliance framework").
 - **Auditors** get `sample_ready_email` (counts, run key, output table, rules hash) with `notify_recipients`.
 - **Triggering** (UI "Trigger DAG w/ config", CLI, REST, or an upstream DAG): `config_id`, `project`,
-  `process_name`, `run_key`, `run_params`, `seed`, `as_of`, `dry_run`, `log_level` – limited by the Variable's
+  `process_name`, `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level` – limited by the Variable's
   `trigger_keys` when set. The database, the Connection and the environment are never taken from a trigger.
 
 ```bash
