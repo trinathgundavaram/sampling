@@ -27,32 +27,16 @@ def test_sql_scripts_render_and_split():
     assert len(tables) == 4 and all("HSABC_DEV." in s for s in statements) and "{{META_DB}}" not in schema
     drops = cli.split_statements(cli.render_sql(ROOT / "sql" / "schema_drop.sql", "X"))
     assert len(drops) == 4
-    seed = cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "umcm_sample_config.sql", "X"))
-    assert len(seed) == 22 and all(s.startswith("INSERT INTO X.") for s in seed)
-
-
-def test_odag1_template_is_inactive_and_complete():
-    rows = cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "odag1_config_template.sql", "X"))
-    assert rows and all(s.startswith("INSERT INTO X.") for s in rows)
-    assert "act_ind" in rows[0] and "    2, 0, 'UMCM'" in rows[0]
-
-
-def test_seed_rows_load_and_validate(raw, conn, settings):
-    seed = cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "umcm_sample_config.sql", "main"))
-    for stmt in seed:
-        raw.db.execute(stmt)
-    from sampling.engine import validate
-    out = validate(conn, settings, project="UMCM")
-    assert out["result"] == "VALID", out
+    assert not (ROOT / "sql" / "seed").exists()     # no configuration in files: the rows are entered in the tables
 
 
 def test_deploy_schema_dry_run_needs_no_connection(monkeypatch, capsys):
     monkeypatch.setenv("SAMPLING_META_DB", "HSABC_QA")
     monkeypatch.setenv("SAMPLING_ENV_FILE", "does-not-exist.env")
     monkeypatch.setenv("SAMPLING_LOG_DIR", str(ROOT / "local" / "logs"))
-    assert cli.main(["deploy-schema", "--dry-run", "--seed"]) == 0
+    assert cli.main(["deploy-schema", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "CREATE MULTISET TABLE HSABC_QA.gre_sampling_config" in out and "INSERT INTO HSABC_QA.gre_sampling_config" in out
+    assert "CREATE MULTISET TABLE HSABC_QA.gre_sampling_config" in out and "INSERT INTO" not in out
 
 
 @pytest.fixture

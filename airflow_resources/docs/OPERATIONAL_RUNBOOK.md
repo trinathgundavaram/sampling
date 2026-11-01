@@ -331,7 +331,8 @@ returned is in `OTHER`; a NULL value (or a case a value `SELECT` does not return
 
 ## 7. Recipes: from a requirement to rows
 
-The worked example is `sql/seed/umcm_sample_config.sql` (every kind of rule once).
+There are no seed files: the rows are entered in the tables. The ODAG1 rows known so far are in OPEN_ITEMS.md,
+section D.
 
 | Requirement | Rows |
 |---|---|
@@ -354,8 +355,8 @@ The worked example is `sql/seed/umcm_sample_config.sql` (every kind of rule once
 
 Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
 
-- **Connection**: the Variable's `td_conn_var` (default `compliance_teradata`), type Teradata, login and password
-  of the service account, `{"logmech": "LDAP"}` in extra.
+- **Connection**: the Variable's `connection_id` (as in GRE; else `td_conn_var`, else `gre_teradata`), type
+  Teradata, login and password of the service account, `{"logmech": "LDAP"}` in extra.
 - **Variable** `cms_compliance_umcm_sampling_config_var`: `meta_db`, `load_env`, the scope (`project` /
   `process_name` / `config_id`), `schedule_interval`, emails, retries.
 - **Started by the framework**: add this DAG to a framework step Variable's `trigger_dags`; here
@@ -377,7 +378,7 @@ From `local/`, with `dev.env` (copy of `dev.env.example`: Teradata login and `SA
 | Command | What it does | Writes |
 |---|---|---|
 | `test-connection` | Logs in, shows the session and which sampling tables exist | – |
-| `deploy-schema [--dry-run] [--drop-first] [--seed]` | Creates the 4 tables (and the example rows) | DDL |
+| `deploy-schema [--dry-run] [--drop-first]` | Creates the 4 tables | DDL |
 | `validate --config-id N [--check-sql] [--run-param k=v]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
 | `show-config --config-id N` | Every rule of a config, by class, and its problems (JSON) | – |
 | `run --config-id N \| --project P \| --process-name X [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
@@ -471,7 +472,7 @@ replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycl
 
 1. `deploy-schema --dry-run`, then `deploy-schema` (DBA rights on `meta_db`).
 2. Create each `output_table` from `sql/output_table_template.sql`.
-3. Load the configuration rows (fill the TODOs of `sql/seed/odag1_config_template.sql` first, `act_ind = 1`).
+3. Enter the configuration rows (OPEN_ITEMS.md section D, once its TODOs are answered; `act_ind = 1`).
 4. `validate --config-id N --check-sql`.
 5. `run --config-id N --dry-run`: check the report's `exclusions`, `buckets` and `by_stratum`.
 6. `run --config-id N`; check 10.1 – 10.3 and the snapshot table.

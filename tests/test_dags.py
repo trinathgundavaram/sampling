@@ -197,3 +197,14 @@ def test_extra_filters_add_up_across_the_layers(variable):
     with pytest.raises(ConfigError, match="extra_filters must be SQL text"):
         variable({**BASE, "extra_filters": {"BTCH_ID": "B42"}})
         dags.resolve_config(VAR_KEY, {})
+
+
+def test_the_connection_is_named_as_in_gre():
+    """The task's argument, then the Variable's connection_id (GRE), then td_conn_var (the framework), then
+    gre_teradata; connection_type, when given, must be teradata."""
+    assert dags._connection_id({}) == "gre_teradata"
+    assert dags._connection_id({"td_conn_var": "DEV"}) == "DEV"
+    assert dags._connection_id({"td_conn_var": "DEV", "connection_id": "gre_teradata_dev"}) == "gre_teradata_dev"
+    assert dags._connection_id({"connection_id": "a", "connection_type": "Teradata"}, "b") == "b"
+    with pytest.raises(ConfigError, match="connection_type must be 'teradata'"):
+        dags._connection_id({"connection_type": "postgres"})

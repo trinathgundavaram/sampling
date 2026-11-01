@@ -1,5 +1,6 @@
 {
-  "td_conn_var": "DEV",
+  "connection_type": "teradata",
+  "connection_id": "DEV",
   "meta_db": "HSABC_DEV",
   "load_env": "DEV",
   "email_recipient": "TRINATH_gundavaram@example.com",

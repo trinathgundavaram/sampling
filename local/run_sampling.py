@@ -13,7 +13,7 @@
     python run_sampling.py purge --project UMCM --older-than-days 400 [--apply]
     python run_sampling.py mark-failed --run-id <run_id>
     python run_sampling.py test-connection
-    python run_sampling.py deploy-schema --dry-run [--drop-first] [--seed]
+    python run_sampling.py deploy-schema --dry-run [--drop-first]
 
 Settings come from the environment, filled from dev.env (next to this file; SAMPLING_ENV_FILE names another).
 A variable already set in the shell wins over the file. See dev.env.example.
@@ -249,8 +249,7 @@ def split_statements(sql: str) -> list:
 
 def cmd_deploy_schema(conn, s, args) -> tuple:
     sql_dir = Path(args.sql_dir) if args.sql_dir else SQL_DIR
-    files = [*(["schema_drop.sql"] if args.drop_first else []), "schema.sql",
-             *(["seed/umcm_sample_config.sql"] if args.seed else [])]
+    files = [*(["schema_drop.sql"] if args.drop_first else []), "schema.sql"]
     scripts = [(f, render_sql(sql_dir / f, s.meta_db)) for f in files]
     if args.dry_run:
         for f, text in scripts:
@@ -348,7 +347,6 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("deploy-schema", help="create the tables in SAMPLING_META_DB from ../sql")
     d.add_argument("--dry-run", action="store_true", help="print the rendered SQL, run nothing")
     d.add_argument("--drop-first", action="store_true", help="drop the tables first (DESTROYS their rows)")
-    d.add_argument("--seed", action="store_true", help="also insert sql/seed/umcm_sample_config.sql")
     d.add_argument("--sql-dir", help=f"folder holding schema.sql (default {SQL_DIR})")
     return p
 

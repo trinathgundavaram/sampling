@@ -1,9 +1,10 @@
 """Airflow: the sampling DAG, its task, and the bridge from the Variable + Teradata Connection to the engine.
 
 Everything about a DAG comes from its own Airflow Variable (JSON); the DAG file only names the dag_id and the
-Variable. The Teradata login comes from the Airflow Connection the Variable names in `td_conn_var` and is
-exported as TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH for sampling.db. No .env file is
-read on Airflow. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md.
+Variable. The Teradata login comes from an Airflow Connection, as in the GRE framework's gre_rules_task: the
+Variable's `connection_id` (or the framework's `td_conn_var`; default gre_teradata) is read with
+BaseHook.get_connection and exported as TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH for
+sampling.db. No .env file is read on Airflow. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import pendulum
 from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.sdk import DAG, Connection, Param, Variable
+from airflow.sdk import DAG, BaseHook, Param, Variable
 try:
     from airflow.sdk.exceptions import AirflowFailException
 except ImportError:  # Airflow 3.0
@@ -33,7 +34,9 @@ from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONNECTION_ID = "compliance_teradata"
+# Airflow Connection id used when neither the task, the Variable's connection_id nor td_conn_var names one (GRE's)
+DEFAULT_CONNECTION_ID = "gre_teradata"
+CONNECTION_TYPE = "teradata"   # the only connection_type: the engine reads and writes Teradata
 TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("config_id", "project", "process_name")
 RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "dry_run")
@@ -57,8 +60,19 @@ def _set_env(key: str, value) -> None:
     os.environ[str(key)] = str(value)
 
 
+def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
+    """The Teradata Connection id: the task's argument, then the Variable's connection_id (GRE's key), then
+    td_conn_var (the framework's), then gre_teradata. connection_type, when given, must be teradata."""
+    kind = str(config.get("connection_type") or CONNECTION_TYPE).strip().lower()
+    if kind != CONNECTION_TYPE:
+        raise ConfigError(f"connection_type must be '{CONNECTION_TYPE}', got {config.get('connection_type')!r}")
+    return str(connection_id or config.get("connection_id") or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
+
+
 def _load_teradata_connection(conn_id: str) -> None:
-    conn = Connection.get(conn_id)
+    """The Airflow Connection's host, login, password and extra `logmech` as the TERADATA_* variables
+    sampling.db.connect_teradata reads, as GRE's _load_teradata_connection does."""
+    conn = BaseHook.get_connection(conn_id)
     if not conn.host or not conn.login or not conn.password:
         raise ConfigError(f"Airflow Connection '{conn_id}' needs host, login and password")
     _set_env("TERADATA_HOST", conn.host)
@@ -226,8 +240,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
         level = str(config.get("log_level") or "INFO").upper()
         logging.getLogger("sampling").setLevel(level)
-        _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or config.get("connection_id")
-                                  or DEFAULT_CONNECTION_ID)
+        _load_teradata_connection(_connection_id(config, connection_id))
         scope = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
         kwargs = {"run_key": config.get("run_key") or None, "run_params": _run_params(config.get("run_params")),
                   "extra_filters": config.get("extra_filters") or None,
@@ -275,8 +288,7 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
     try:
         config = resolve_config(variable_key)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
-        _load_teradata_connection(connection_id or config.get(TD_CONN_KEY) or config.get("connection_id")
-                                  or DEFAULT_CONNECTION_ID)
+        _load_teradata_connection(_connection_id(config, connection_id))
         runs = _load_variable(variable_key).get("runs")
         scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
     except ConfigError as e:

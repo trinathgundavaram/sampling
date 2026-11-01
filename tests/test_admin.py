@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from conftest import ROOT, insert_config, insert_rule, insert_strata, load_cli
+from conftest import insert_config, insert_rule, insert_strata, load_cli
 from sampling.admin import history_days, purge_selections
 from sampling.engine import finalize_run, run_sampling, sql_problems
 from sampling.settings import ConfigError, Settings
@@ -58,27 +58,22 @@ def test_a_run_refuses_writing_sql(raw, conn, settings):
     assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections") == [(0,)]
 
 
-def test_the_seeds_pass_the_sql_check(raw, conn, settings):
-    """umcm_sample_config.sql is validated in test_local_cli; the ODAG1 template's SQL (but its TODOs) as well."""
-    cli = load_cli()
-    for stmt in cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "odag1_config_template.sql", "main")):
-        raw.db.execute(stmt)
-    for r in conn.query("SELECT rule_name, rule_class, rule_sql FROM gre_sampling_rule WHERE config_id = 2"):
-        if "TODO" not in str(r["rule_sql"] or ""):
-            assert sql_problems(r["rule_sql"], r["rule_name"], select=r["rule_class"] in ("PARAM", "GATE")) == []
+# the ODAG1 PARAM and GATE rules (OPEN_ITEMS.md, section D)
+ODAG1_BATCH_SQL = (
+    "SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM HSABC_$ENV.ComplianceRequestControl WHERE Project_Cd = 'CMSUNIV' "
+    "AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches",
+    "SELECT 1 FROM HSABC_$ENV.ComplianceRequestControl WHERE Btch_ID = '{batch_id}' "
+    "HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1",
+)
 
 
-def test_the_odag1_batch_lookup_follows_the_environment(raw, conn):
+def test_the_odag1_batch_lookup_reads_and_follows_the_environment():
     """The framework's ComplianceRequestControl is in HSABC_$ENV: HSABC_DEV in DEV, HSABC in UAT / PROD."""
-    cli = load_cli()
-    for stmt in cli.split_statements(cli.render_sql(ROOT / "sql" / "seed" / "odag1_config_template.sql", "main")):
-        raw.db.execute(stmt)
-    rules = conn.query("SELECT rule_sql FROM gre_sampling_rule WHERE rule_class IN ('PARAM', 'GATE') AND config_id = 2")
-    assert len(rules) == 2
-    for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
-        for r in rules:
-            text = Settings(meta_db="M", environment=env).resolve_env(r["rule_sql"], identifier=False)
-            assert f" {db}.ComplianceRequestControl " in text and "$" not in text
+    for text in ODAG1_BATCH_SQL:
+        assert sql_problems(text, "batch", select=True) == []
+        for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
+            resolved = Settings(meta_db="M", environment=env).resolve_env(text, identifier=False)
+            assert f" {db}.ComplianceRequestControl " in resolved and "$" not in resolved
 
 
 # ── retention ──────────────────────────────────────────────────────────────

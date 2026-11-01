@@ -3,7 +3,6 @@
 The stand-in keeps one DuckDB connection for every cursor (so transactions span statements, as on Teradata)
 and maps the `autocommit` switch to BEGIN / COMMIT. Teradata-only syntax is avoided: Settings(access_lock=False).
 """
-import os
 import random
 import re
 import sys

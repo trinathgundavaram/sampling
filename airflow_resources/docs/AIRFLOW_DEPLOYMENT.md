@@ -3,7 +3,8 @@
 A config-driven stratified sampling engine that runs from an Airflow DAG with its metadata tables and its
 universe tables in **Teradata**. It follows the layout and connection style of the CMS Compliance Framework's
 Airflow package (`framework/airflow`, branch `feature/framework-package`): one DAG file, one DAG id, one
-`<name>_config_var` Variable, the Teradata login from the Airflow Connection named in `td_conn_var`.
+`<name>_config_var` Variable, the Teradata login from the Airflow Connection named in its `connection_id`, read as the
+GRE framework's `gre_rules_task` reads it.
 
 The engine itself (`sampling/engine.py`, `db.py`, `settings.py`) exists once, in `airflow/sampling`: the local
 version (`local/`, see [Local version](#local-version-command-line)) imports it from there. Only `dags.py` imports
@@ -31,8 +32,6 @@ sql/                                        shared by both versions
   schema.sql                                Teradata DDL ({{META_DB}} template), 4 tables
   schema_drop.sql                           drops them (fresh redeploy only)
   output_table_template.sql                 DDL template of a config's output snapshot table
-  seed/umcm_sample_config.sql               example configuration rows (every kind of rule once)
-  seed/odag1_config_template.sql            the ODAG1 (COMO) configuration, inactive, TODOs open
 
 local/                                      the local version (command line, dev.env); uses airflow/sampling
 ```
@@ -46,8 +45,9 @@ local/                                      the local version (command line, dev
    |---|---|---|
    | `CMS_COMPLIANCE_UMCM_SAMPLING` | `cms_compliance_umcm_sampling_config_var` | `cms_compliance_umcm_sampling.py` |
 
-2. **One Airflow Connection**: Teradata, named by the Variable's `td_conn_var`. The bridge exports it as
-   `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH`; the engine opens one Teradata
+2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. As in the GRE framework, the
+   bridge reads it with `BaseHook.get_connection` and exports it as `TERADATA_HOST` / `TERADATA_USER` /
+   `TERADATA_PASSWORD` / `TERADATA_LOGMECH`; the engine opens one Teradata
    session and uses it for the metadata tables and for the universe tables (which are fully qualified in the
    configuration rows, so they may sit in any database that login can read).
 3. **A task runs one sampling scope** in-process: one `config_id`, or every active config of a `project` and / or
@@ -71,8 +71,8 @@ version).
 3. Create the tables once, in the metadata database, from `sql/schema.sql` (replace `{{META_DB}}`), e.g. from a
    machine with the local version: `python local/run_sampling.py deploy-schema`. The engine never creates or alters
    tables.
-4. Load the configuration rows (`gre_sampling_config`, `gre_sampling_rule`; example:
-   `sql/seed/umcm_sample_config.sql`, see the runbook section 4), then run
+4. Enter the configuration rows (`gre_sampling_config`, `gre_sampling_rule`; there are no seed files: the rows are
+   entered in the tables, see the runbook sections 4 and 7, and for ODAG1 OPEN_ITEMS.md section D), then run
    `python local/run_sampling.py validate --project UMCM --check-sql`.
 5. Create the Connection and the Variable (below; ready-made for DEV in `airflow_resources/examples/umcm_dev`).
 6. Unpause the DAG; trigger it once with `{"dry_run": "true"}` to see the counts without writing anything.
@@ -83,8 +83,11 @@ one DAG through `process_name` or `runs` (below).
 
 ### Airflow Connection
 
-**Teradata** - the Connection named by the Variable's `td_conn_var` (falls back to `connection_id`, then
-`compliance_teradata`). The same Connection the compliance framework uses works here.
+**Teradata** - read as the GRE framework's DAG reads it: the Connection named by the Variable's `connection_id`
+(falls back to the framework's `td_conn_var`, then `gre_teradata`, GRE's default), so the Connection GRE uses works
+here. `connection_type`, when given, must be `teradata` (the only one: the engine reads and writes Teradata).
+Host, login and password become `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD`; extra `logmech` becomes
+`TERADATA_LOGMECH` (else that variable, else LDAP). The password is never logged.
 
 | Field | Value |
 |---|---|
@@ -101,7 +104,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 
 ```json
 {
-  "td_conn_var": "DEV",
+  "connection_type": "teradata",
+  "connection_id": "DEV",
   "meta_db": "HSABC_DEV",
   "load_env": "DEV",
   "email_recipient": "TRINATH_gundavaram@example.com",
@@ -120,7 +124,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 
 | Key | Meaning |
 |---|---|
-| `td_conn_var` | Airflow Connection of Teradata. Falls back to `connection_id`, then `compliance_teradata` |
+| `connection_id` | Airflow Connection of Teradata (GRE's key). Falls back to `td_conn_var`, then `gre_teradata` |
+| `connection_type` | Optional; `teradata` (GRE's key; any other value is refused) |
 | `meta_db` | **Required.** Teradata database holding the `gre_sampling_*` tables. May carry `$env` (`HSABC_$ENV`: `HSABC_DEV` in DEV, `HSABC` in UAT / PROD) |
 | `load_env` | DEV / QA / INT / UAT / PROD: replaces `$env` in every configured table name and SQL text (default DEV). `environment` is accepted too |
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
@@ -229,7 +234,7 @@ cd local
 cp dev.env.example dev.env          # fill in TERADATA_* and SAMPLING_META_DB
 pip install -r requirements.txt
 python run_sampling.py test-connection
-python run_sampling.py deploy-schema --dry-run --seed
+python run_sampling.py deploy-schema --dry-run
 python run_sampling.py validate --project UMCM --check-sql
 python run_sampling.py run --process-name UMCM_WEEKLY_SAMPLE --as-of 2026-10-30 --dry-run
 python run_sampling.py run --config-id 1 --run-key 2026-10-30 --run-param pull_date=2026-10-30
@@ -240,7 +245,7 @@ python run_sampling.py mark-failed --run-id <run_id>
 
 | Airflow Variable | dev.env / shell |
 |---|---|
-| Connection in `td_conn_var` | `TERADATA_HOST`, `TERADATA_USER`, `TERADATA_PASSWORD`, `TERADATA_LOGMECH` |
+| Connection in `connection_id` | `TERADATA_HOST`, `TERADATA_USER`, `TERADATA_PASSWORD`, `TERADATA_LOGMECH` |
 | `meta_db` | `SAMPLING_META_DB` |
 | `load_env` / `env_value` | `SAMPLING_ENVIRONMENT` / `SAMPLING_ENV_VALUE` |
 | `timezone`, `chunk_rows`, `access_lock` | `SAMPLING_TIMEZONE`, `SAMPLING_CHUNK_ROWS`, `SAMPLING_ACCESS_LOCK` |
@@ -285,7 +290,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (109 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (107 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with
