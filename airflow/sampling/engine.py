@@ -116,7 +116,7 @@ _STATEMENT_WORDS = ("INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", 
 _STATEMENT_RE = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in _STATEMENT_WORDS) + r")\b", re.I)
 _QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|/\*.*?\*/", re.S)
 _SELECT_START = re.compile(r"^\s*(LOCKING\s+.*?\s+FOR\s+ACCESS\s+)?\(*\s*(SELECT|SEL|WITH)\b", re.I | re.S)
-_CONFIG_SQL = ("scope_sql", "exclusion_sql", "priority_rank_sql", "diversity_expr")
+_CONFIG_SQL = ("scope_sql", "priority_rank_sql", "diversity_expr")
 _NEEDS_ORDER = ("RANKED", "SYSTEMATIC")
 
 BASE_RANK = "smp_base_rank"
@@ -461,12 +461,8 @@ def _col(rule: dict) -> str:
     return f"smp_r_{rule['rule_id']}"
 
 
-def _flag(sql: str) -> str:
-    return f"CASE WHEN ({sql}) THEN 1 ELSE 0 END"
-
-
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
-    """{universe, scope, count (or None), pull, output (or None)}: the SQL of a run, $env and parameters
+    """{universe, scope, pull, key_queries, output (or None)}: the SQL of a run, $env and parameters
     resolved; the run's extra_filters (params[EXTRA_FILTERS], SQL) are ANDed to the scope, so the count, the pull
     and the output snapshot all read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull."""
     def sql(text, identifier=False):
@@ -482,7 +478,6 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
         if problems:
             raise ValueError("; ".join(problems))
         scope = f"({scope}) AND ({sql(filters)})"
-    quick_exclusion = sql(c.get("exclusion_sql"))
     columns = list(keys)
     if str(c.get("diversity_expr") or "").strip():
         columns.append(f"({sql(c['diversity_expr'])}) AS {DIVERSITY}")
@@ -490,14 +485,9 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     if priority:
         columns.append(f"ROW_NUMBER() OVER (ORDER BY {priority}, {', '.join(keys)}) AS {BASE_RANK}")
 
-    where = f"({scope})"
-    if quick_exclusion:
-        # CASE, not NOT(...): a row whose test is unknown (a NULL column) is not excluded
-        where += f" AND {_flag(quick_exclusion)} = 0"
     key_queries = [(r, sql(r["rule_sql"])) for r in query_rules(sample)]
     out = {"universe": universe, "scope": scope, "key_queries": key_queries,
-           "count": f"SELECT COUNT(*) AS cnt FROM {universe} WHERE ({scope})" if quick_exclusion else None,
-           "pull": f"SELECT {', '.join(columns)} FROM {universe} WHERE {where}", "output": None}
+           "pull": f"SELECT {', '.join(columns)} FROM {universe} WHERE ({scope})", "output": None}
     if str(c.get("output_table") or "").strip():
         exprs = [f"{sql(o['rule_sql'])} AS {o['rule_name']}" for o in sample.output_cols]
         out["output_table"] = sql(c["output_table"], identifier=True)
@@ -1116,11 +1106,9 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
         return fail("technical", "GATE_NOT_MET", "not ready yet: " + "; ".join(waiting))
 
     try:
-        if queries["count"]:
-            log.info("scope count (config_id=%s): %s", config_id, queries["count"])
         log.info("pull (config_id=%s): %s", config_id, queries["pull"])
         rows = conn.stream(queries["pull"], s.chunk_rows)
-        in_scope = int(conn.query(queries["count"])[0]["cnt"]) if queries["count"] else len(rows)
+        in_scope = len(rows)
         history, cache = {}, {}
         for x in sample.exclusions:
             if _up(x.get("rule_type"), QUERY) in HISTORY_TYPES:

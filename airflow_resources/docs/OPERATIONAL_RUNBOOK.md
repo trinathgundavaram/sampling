@@ -99,7 +99,7 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
 - **Never delete a row**: set `act_ind = 0` (1 = in use). `rule_id` is yours to choose: unique in the whole
   table (e.g. 1–99 for config 1, 101–199 for config 2).
 - **SQL text**: every rule's `rule_sql` (PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET) is a whole `SELECT`, as a
-  GRE rule (4.2); OUTPUT `rule_sql` is a column expression, and the config's `scope_sql` / `exclusion_sql` a
+  GRE rule (4.2); OUTPUT `rule_sql` is a column expression, and the config's `scope_sql` a
   condition on the universe row. Quotes are doubled inside an `INSERT` literal.
 - **`$env`** anywhere is replaced by the environment (`DEV` → `dev` ...; UAT / PROD → empty): `EXPORT_FEED_$ENV_T`.
 - **`{name}` / `$name`** is replaced by a run parameter, quotes doubled; you write the quotes:
@@ -127,7 +127,6 @@ gre_sampling_run.run_id = sample_run_id of gre_sample_selections and of the outp
 | `universe_table` | `database.table` or view to sample from (`$env` allowed) |
 | `key_columns` | Comma separated columns that identify one case. Must be unique within the scope (checked every run) |
 | `scope_sql` | WHERE condition: this run's rows (default `1=1`) |
-| `exclusion_sql` | Optional quick exclusion, not itemised. Prefer EXCLUSION rules |
 | `target_volume` | Sample size |
 | `sampling_method` | `RANKED` / `RANDOM` / `SYSTEMATIC` ([6.1](#61-sampling-methods)) |
 | `priority_rank_sql` | Optional ORDER BY list after the PRIORITY rules, e.g. `AUTHZN_REQ_DT_TM DESC` |

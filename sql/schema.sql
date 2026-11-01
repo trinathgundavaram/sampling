@@ -32,8 +32,6 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_config (
     key_columns        VARCHAR(500) NOT NULL,          -- comma separated columns identifying one case
     scope_sql          CLOB,                           -- WHERE condition: this run's rows (default 1=1),
                                                        -- {name} / $name parameters and $env allowed
-    exclusion_sql      CLOB,                           -- optional quick exclusion (not itemised per rule:
-                                                       -- prefer EXCLUSION rules)
     target_volume      INTEGER NOT NULL DEFAULT 150,   -- sample size
     sampling_method    VARCHAR(20) DEFAULT 'RANKED',   -- RANKED | RANDOM | SYSTEMATIC
     priority_rank_sql  CLOB,                           -- optional ORDER BY list applied after the

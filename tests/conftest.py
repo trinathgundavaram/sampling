@@ -143,14 +143,17 @@ def insert_config(db, config_id=1, sampling_method="RANKED", priority_rank_sql="
                   rounding_mode="FLOOR", universe_table="case_universe", key_columns="case_id",
                   exclusion_sql="auto_closed = 1", scope_sql="pull_date = '{batch_id}'", project_name="UMCM",
                   process_name="WEEKLY", sample_name="weekly_sample", act_ind=1, **more):
+    """One gre_sampling_config row; exclusion_sql (a condition, the fixtures' shorthand) becomes an EXCLUSION rule
+    named EXCLUDED (rule_id 9000 + config_id)."""
     db.execute("""
         INSERT INTO gre_sampling_config (config_id, act_ind, project_name, process_name, sample_name,
-            universe_table, key_columns, scope_sql, exclusion_sql, target_volume, sampling_method,
-            priority_rank_sql, rounding_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            universe_table, key_columns, scope_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                [config_id, act_ind, project_name, process_name, sample_name, universe_table, key_columns,
-                scope_sql, exclusion_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode])
+                scope_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode])
     set_config(db, config_id, **more)
+    if exclusion_sql:
+        insert_rule(db, "EXCLUSION", 9000 + config_id, "EXCLUDED", config_id, seq_no=0, rule_sql=exclusion_sql)
 
 
 _SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)

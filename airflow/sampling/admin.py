@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 # the columns of sql/schema.sql a file may set (the audit columns are set here); a test keeps them in step
 CONFIG_COLUMNS = ("config_id", "act_ind", "project_name", "process_name", "sample_name", "universe_table",
-                  "key_columns", "scope_sql", "exclusion_sql", "target_volume", "sampling_method",
+                  "key_columns", "scope_sql", "target_volume", "sampling_method",
                   "priority_rank_sql", "rounding_mode", "diversity_expr", "diversity_cap", "shortfall_policy",
                   "keep_excluded", "output_table", "schedule_cron")
 RULE_COLUMNS = ("rule_id", "config_id", "act_ind", "rule_class", "seq_no", "rule_name", "rule_type", "rule_sql",

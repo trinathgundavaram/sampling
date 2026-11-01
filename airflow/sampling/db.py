@@ -200,7 +200,7 @@ class Connection:
 
 
 # ---------------------------------------------------------------------------
-# {key} / $key run parameters in scope_sql / exclusion_sql
+# {key} / $key run parameters in scope_sql and the rules' SQL
 # ---------------------------------------------------------------------------
 # Both spellings, freely mixed. "$key" ends at a word boundary, so "$year" in "$year_end" is not consumed.
 _TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)\b")

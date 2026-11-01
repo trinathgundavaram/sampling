@@ -258,7 +258,7 @@ schedule is Central time too. Column defaults (`CURRENT_TIMESTAMP`) are the Tera
 
 ## Environment in names (`$env`)
 
-`universe_table`, `scope_sql` and `exclusion_sql` can carry `$env` so one set of configuration rows works in every
+`universe_table`, `scope_sql` and every rule's SQL can carry `$env` so one set of configuration rows works in every
 environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM_DEV_T.um_universe` in DEV,
 `UMCM_QA_T...` in QA and `UMCM_T.um_universe` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 `$ENV` -> `DEV`); `env_value` overrides the replacement for one environment.

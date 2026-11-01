@@ -78,7 +78,9 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     um_config(raw.db)
     out = _run(conn, settings, triggered_by="tester")
     sel = _rows(raw, "SELECT COUNT(*), SUM(selected_flag), MIN(run_key), MIN(sample_cycle) FROM gre_sample_selections")
-    assert sel[0] == (980, 150, "2026-08-01", AS_OF)
+    assert sel[0] == (1000, 150, "2026-08-01", AS_OF)        # the 20 excluded kept too (keep_excluded)
+    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM gre_sample_selections WHERE excluded_flag = 1 "
+                      "GROUP BY 1") == [("EXCLUDED", 20)]
     run = _rows(raw, "SELECT status, total_in_scope, total_excluded, total_candidates, total_selected, shortfall, "
                      "triggered_by, run_id, etl_is_curr_ind, error_type FROM gre_sampling_run")
     assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["sample_run_id"], "Y", None)]
@@ -150,7 +152,7 @@ def test_bucket_values_match_without_case_or_trailing_blanks(raw, conn, settings
 def test_pull_failure_rolls_nothing_in_and_logs(raw, conn, settings):
     build_universe(raw.db)
     um_config(raw.db)
-    raw.fail_on = "FROM case_universe WHERE (pull_date = '2026-08-01') AND"
+    raw.fail_on = "FROM case_universe WHERE (pull_date = '2026-08-01')"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PULL_FAILURE" and out["error_kind"] == "technical"
     assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0
@@ -231,11 +233,11 @@ def test_validate_with_sql_check(raw, conn, settings):
 def test_queries_resolve_env_and_tie_break_on_keys():
     s = Settings(meta_db="M", environment="PROD")
     sample = Sample(config={"universe_table": "UMCM_$ENV_T.u", "key_columns": "a, b", "scope_sql": "db = '$env'",
-                            "exclusion_sql": "x = 1", "sampling_method": "RANKED", "priority_rank_sql": "x DESC"})
+                            "sampling_method": "RANKED", "priority_rank_sql": "x DESC"})
     q = build_queries(sample, s, {})
-    assert "FROM UMCM_T.u" in q["pull"] and "db = ''" in q["count"]
-    assert "ROW_NUMBER() OVER (ORDER BY x DESC, a, b) AS smp_base_rank" in q["pull"]
-    assert "CASE WHEN (x = 1) THEN 1 ELSE 0 END = 0" in q["pull"]
+    assert q["pull"] == "SELECT a, b, ROW_NUMBER() OVER (ORDER BY x DESC, a, b) AS smp_base_rank " \
+                        "FROM UMCM_T.u WHERE (db = '')"
+    assert "count" not in q
     assert Settings(meta_db="M", environment="DEV").resolve_env("CMS_$ENV_STG") == "CMS_DEV_STG"
 
 
