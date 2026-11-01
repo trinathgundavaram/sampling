@@ -59,6 +59,7 @@ One run = one `gre_sampling_config` row (a task may run several, see [8](#8-airf
 | 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
 | 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
 | 4. Pull | One `SELECT` of the universe rows in `scope_sql`. Teradata evaluates every bucket condition, exclusion rule and priority criterion as a column of that pull | `gre_sampling_config` | `PULL_FAILURE` |
+| 4a. QUERY rules | Each `QUERY` rule's `SELECT` runs on its own; the pulled cases it returns (by `key_columns`) match it. Cases it returns outside the scope are ignored. The count per rule is in `run_report` (`query_rules`) | EXCLUSION / PRIORITY / BUCKET rules of `rule_type` `QUERY` | `QUERY_RULE_FAILURE` (technical, retried); no key columns in the result: `CONFIG_ERROR` |
 | 5. Exclude | A row matching any EXCLUSION rule is not a candidate; the first matching rule (`seq_no`) is its reason. History rules read earlier runs | EXCLUSION rules | |
 | 6. Order | PRIORITY rule 1, then 2, … then `priority_rank_sql`, then `key_columns` | PRIORITY rules, `priority_rank_sql` | |
 | 7. Stratify | Level by level, each parent's target is split between its buckets (FRACTION, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
@@ -145,8 +146,8 @@ by class:
 | Column | PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT |
 |---|---|---|---|---|---|---|---|
 | `rule_name` | the `{token}` | name (in the message) | the reason stored | name | name | the value / bucket name (no `/`) | the output column |
-| `rule_type` | | | `SQL` (default) / `PRIOR_SELECTION` | `CONDITION` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | | |
-| `rule_sql` | a `SELECT` | a `SELECT`: a row = ready | SQL: the condition | CONDITION / EXPRESSION | the expression whose values are the buckets, or NULL (buckets by condition) | condition-level: the condition | the expression |
+| `rule_type` | | | `SQL` (default) / `QUERY` / `PRIOR_SELECTION` | `CONDITION` (default) / `EXPRESSION` / `QUERY` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | condition-level: `CONDITION` (default) / `QUERY` | |
+| `rule_sql` | a `SELECT` | a `SELECT`: a row = ready | SQL: the condition; QUERY: a `SELECT` of the key columns | CONDITION / EXPRESSION; QUERY: a `SELECT` of the key columns | the expression whose values are the buckets, or NULL (buckets by condition) | condition-level: the condition, or (QUERY) a `SELECT` of the key columns | the expression |
 | `level_order` | | | | | 0, 1, … | its level | |
 | `parent_path` | | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) | |
 | `unlisted_policy` | | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | | |
@@ -182,6 +183,31 @@ by `seq_no` is the reason; each rule's count is in the run's `run_report`.
 (`sort_dir`, NULLs last). `PRIOR_CANDIDATE`: considered by an earlier run but never selected, first (carry-over).
 `PRIOR_SELECTION`: selected earlier, last. RANKED takes the first ones, SYSTEMATIC steps through the order, RANDOM
 ignores it.
+
+**`rule_type` `QUERY`** (EXCLUSION, PRIORITY, a BUCKET of a condition level) – when the test needs other tables or
+many columns, write it as a whole `SELECT`, as a GRE rule: joins, subqueries, `WITH`, anything that reads. It must
+return the `key_columns` (same names, any other columns are ignored); the cases it returns match. It runs on its own
+after the pull, so Teradata's limits on a condition inside the pull (no subquery in a `CASE`) do not apply. It may use
+`$env`, `{batch_id}` and the other run parameters; only cases in the run's scope (and `extra_filters`) count, so it
+need not repeat them. It must be a `SELECT` that only reads (checked like a PARAM rule), and `validate --check-sql`
+EXPLAINs it. Example – 21% of the sample Behavioral Health, BH meaning a code on a list and a BH provider:
+
+```sql
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, unlisted_policy)
+VALUES (241, 2, 1, 'LEVEL', 1, 'program', 1, '*', 'SKIP');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, target_fraction, rule_type, rule_sql)
+VALUES (242, 2, 1, 'BUCKET', 1, 'Behavioral Health', 1, '*', 'FRACTION', 0.21, 'QUERY',
+        'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY
+         FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 a
+         JOIN REF_$ENV.BH_PROC_CODES c ON c.PROC_CD = a.PROC_CD AND c.ACT_IND = 1
+         JOIN REF_$ENV.PROVIDER p ON p.PROV_ID = a.SVC_PROV_ID
+         WHERE a.BTCH_ID = ''{batch_id}'' AND p.PROV_TY IN (''PSY'', ''LCSW'')');
+INSERT INTO {{META_DB}}.gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, level_order, parent_path, quota_mode, rule_sql)
+VALUES (243, 2, 1, 'BUCKET', 2, 'Other', 1, '*', 'REMAINDER', '1=1');
+```
+
+(The tables and columns are illustrations.) A condition that only needs columns of the universe table stays a plain
+condition (`rule_sql` `SVC_CTGRY_CD IN ('BH', 'MH') AND ...`), evaluated inside the pull.
 
 **LEVEL** – a split. `rule_sql` set (**value level**): each value of the expression is a bucket. `rule_sql` NULL
 (**condition level**): the buckets are its BUCKET rows' conditions, tried in `seq_no` order, the first true one
@@ -265,8 +291,9 @@ counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `gre_sampling_rule.rule_class` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `OUTPUT` |
-| `rule_type` (EXCLUSION) | `SQL`, `PRIOR_SELECTION` |
-| `rule_type` (PRIORITY) | `CONDITION`, `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
+| `rule_type` (EXCLUSION) | `SQL`, `QUERY`, `PRIOR_SELECTION` |
+| `rule_type` (PRIORITY) | `CONDITION`, `EXPRESSION`, `QUERY`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
+| `rule_type` (BUCKET, condition level) | `CONDITION`, `QUERY` |
 | `quota_mode` (BUCKET) | `FRACTION`, `ALL`, `REMAINDER` |
 | `unlisted_policy` (LEVEL) | `SHARE`, `REMAINDER`, `SKIP` |
 | `history_scope` | `CONFIG`, `PROJECT` |
@@ -277,7 +304,7 @@ counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `gre_sampling_run.status` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
-| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `gre_sampling_run.error_type` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
 | `gre_sample_selections.selection_status` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text

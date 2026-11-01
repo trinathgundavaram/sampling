@@ -13,6 +13,7 @@ buckets (fractions, all there is, the remainder, per parent), run parameters loo
 (no repeats, carry-over), code variety, and an output snapshot. No field name or value is in the code.
 For tables holding several loads, batches or SCD2 versions, a run can be given `extra_filters` (`column: value`,
 ANDed to the scope) as with the GRE.
+A rule whose test needs joins can be a whole `SELECT` returning the cases' keys (`rule_type` `QUERY`), as a GRE rule.
 
 Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.

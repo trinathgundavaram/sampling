@@ -95,9 +95,12 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_rule (
     rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT
     seq_no             INTEGER DEFAULT 100,            -- order within the class
     rule_name          VARCHAR(200) NOT NULL,
-    rule_type          VARCHAR(30),                    -- EXCLUSION: SQL (default) | PRIOR_SELECTION
-                                                       -- PRIORITY: CONDITION (default) | EXPRESSION |
+    rule_type          VARCHAR(30),                    -- EXCLUSION: SQL (default) | QUERY | PRIOR_SELECTION
+                                                       -- PRIORITY: CONDITION (default) | EXPRESSION | QUERY |
                                                        --   PRIOR_CANDIDATE | PRIOR_SELECTION
+                                                       -- BUCKET (condition level): CONDITION (default) | QUERY
+                                                       -- QUERY: rule_sql is a whole SELECT (any joins)
+                                                       --   returning the key_columns of the matching cases
     rule_sql           CLOB,                           -- condition, expression, or SELECT (see above)
     level_order        INTEGER,                        -- LEVEL / BUCKET: 0 = first split, 1 = within it, ...
     parent_path        VARCHAR(1000) DEFAULT '*',      -- LEVEL / BUCKET: path pattern of parent buckets,
@@ -141,6 +144,7 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_run (
     status             VARCHAR(20),                    -- RUNNING | COMPLETED | ERROR | FINAL (finalised:
                                                        -- a rerun of its run_key needs a force reason)
     error_type         VARCHAR(50),                    -- CONFIG_ERROR | PARAM_FAILURE | PULL_FAILURE |
+                                                       -- QUERY_RULE_FAILURE |
                                                        -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
                                                        -- ABANDONED (closed by mark-failed) |
                                                        -- FINALIZED (its run_key's sample is final) |

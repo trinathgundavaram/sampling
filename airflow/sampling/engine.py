@@ -7,12 +7,16 @@ value is known to this code (sql/schema.sql describes every table):
     gre_sampling_rule     one row per rule, rule_class saying what it is:
         PARAM             a run parameter looked up by SQL ({batch_id} = the latest batch, ...)
         GATE              a readiness check: a SELECT that must return a row, or the run waits (is retried)
-        EXCLUSION         an exclusion rule (SQL condition, or "selected by an earlier run")
-        PRIORITY          a priority criterion (SQL condition / expression, or history based)
+        EXCLUSION         an exclusion rule (SQL condition, a QUERY, or "selected by an earlier run")
+        PRIORITY          a priority criterion (SQL condition / expression, a QUERY, or history based)
         LEVEL             a stratification level (by an expression's value, or by its buckets' conditions),
                           optionally only under some parent buckets (parent_path)
         BUCKET            a bucket of a level: FRACTION of the parent's target, ALL there is, or the REMAINDER
                           the others leave; a different mix per parent bucket (parent_path)
+
+    rule_type QUERY (EXCLUSION, PRIORITY, BUCKET): rule_sql is a whole SELECT, joins and all, as a GRE rule:
+    the cases it returns (by their key_columns) match. It runs on its own, after the pull, so it may read any
+    table; only the pulled cases count.
         OUTPUT            a column of the output snapshot of the selected cases
 
 One run = one gre_sampling_config row:
@@ -21,7 +25,8 @@ One run = one gre_sampling_config row:
     run row (RUNNING)         gre_sampling_run
     gates                     every GATE rule must return a row (e.g. "the batch is closed"), else GATE_NOT_MET
     pull                      one SELECT of the scope: key columns + one flag / value column per bucket condition,
-                              level, exclusion rule and priority criterion (all evaluated by Teradata)
+                              level, exclusion rule and priority criterion (all evaluated by Teradata);
+                              then each QUERY rule's SELECT, its cases marked on the pulled rows
     exclude                   first matching exclusion rule is the reason; history rules read earlier runs
     order                     priority criteria in order, then priority_rank_sql, then the key columns
     stratify                  per level and parent: FRACTION buckets, then ALL buckets, then REMAINDER buckets
@@ -71,8 +76,10 @@ VALID_METHODS = ("RANKED", "RANDOM", "SYSTEMATIC")
 VALID_ROUNDING = ("FLOOR", "ROUND", "CEIL")
 QUOTA_MODES = ("FRACTION", "ALL", "REMAINDER")
 UNLISTED_POLICIES = ("SHARE", "REMAINDER", "SKIP")
-EXCLUSION_TYPES = ("SQL", "PRIOR_SELECTION")
-PRIORITY_TYPES = ("CONDITION", "EXPRESSION", "PRIOR_CANDIDATE", "PRIOR_SELECTION")
+EXCLUSION_TYPES = ("SQL", "QUERY", "PRIOR_SELECTION")
+PRIORITY_TYPES = ("CONDITION", "EXPRESSION", "QUERY", "PRIOR_CANDIDATE", "PRIOR_SELECTION")
+BUCKET_TYPES = ("CONDITION", "QUERY")
+QUERY = "QUERY"   # rule_type: rule_sql is a SELECT returning the key_columns of the matching cases
 HISTORY_TYPES = ("PRIOR_CANDIDATE", "PRIOR_SELECTION")
 HISTORY_SCOPES = ("CONFIG", "PROJECT")
 SHORTFALL_POLICIES = ("TOPUP", "NONE")
@@ -91,7 +98,8 @@ _USED = {"PARAM": {"rule_sql"},
          "EXCLUSION": {"rule_type", "rule_sql", "lookback_days", "history_scope"},
          "PRIORITY": {"rule_type", "rule_sql", "sort_dir", "lookback_days", "history_scope"},
          "LEVEL": {"rule_sql", "level_order", "parent_path", "unlisted_policy"},
-         "BUCKET": {"rule_sql", "level_order", "parent_path", "quota_mode", "target_fraction", "max_count"},
+         "BUCKET": {"rule_type", "rule_sql", "level_order", "parent_path", "quota_mode", "target_fraction",
+                    "max_count"},
          "OUTPUT": {"rule_sql"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 # Configured SQL only reads: a statement word anywhere (outside quotes) is refused. Rows run under the service
@@ -272,7 +280,7 @@ def config_problems(sample: Sample) -> list:
         name, kind = x.get("rule_name"), _up(x.get("rule_type"), "SQL")
         if kind not in EXCLUSION_TYPES:
             problems.append(f"EXCLUSION rule {name}: rule_type must be one of {', '.join(EXCLUSION_TYPES)}")
-        elif kind == "SQL" and not _text(x):
+        elif kind in ("SQL", QUERY) and not _text(x):
             problems.append(f"EXCLUSION rule {name}: rule_sql is empty")
         elif kind in HISTORY_TYPES:
             problems += _history_problems(f"EXCLUSION rule {name}", x)
@@ -281,7 +289,7 @@ def config_problems(sample: Sample) -> list:
         name, kind = p.get("rule_name"), _up(p.get("rule_type"), "CONDITION")
         if kind not in PRIORITY_TYPES:
             problems.append(f"PRIORITY rule {name}: rule_type must be one of {', '.join(PRIORITY_TYPES)}")
-        elif kind in ("CONDITION", "EXPRESSION") and not _text(p):
+        elif kind in ("CONDITION", "EXPRESSION", QUERY) and not _text(p):
             problems.append(f"PRIORITY rule {name}: rule_sql is empty")
         elif kind in HISTORY_TYPES:
             problems += _history_problems(f"PRIORITY rule {name}", p)
@@ -351,8 +359,13 @@ def _sql_problems(sample: Sample) -> list:
     out = [p for col in _CONFIG_SQL for p in sql_problems(sample.config.get(col), col)]
     for cls in RULE_CLASSES:
         for r in _rules_of(sample, cls):
-            out += sql_problems(r.get("rule_sql"), f"{cls} rule {r.get('rule_name')}", select=cls in ("PARAM", "GATE"))
+            out += sql_problems(r.get("rule_sql"), f"{cls} rule {r.get('rule_name')}",
+                                select=cls in ("PARAM", "GATE") or _is_query(r))
     return out
+
+
+def _is_query(rule: dict) -> bool:
+    return _up(rule.get("rule_type")) == QUERY and _up(rule.get("rule_class")) in ("EXCLUSION", "PRIORITY", "BUCKET")
 
 
 def _rules_of(sample: Sample, cls: str) -> list:
@@ -386,8 +399,11 @@ def _level_problems(lvl: dict) -> list:
         what = f"level {name} bucket {bname!r}"
         if "/" in bname:
             out.append(f"{what}: rule_name must not contain '/'")
-        if lvl["value_level"] and _text(b):
-            out.append(f"{what}: rule_sql is only used on a level without an expression")
+        kind = _up(b.get("rule_type"), "CONDITION")
+        if kind not in BUCKET_TYPES:
+            out.append(f"{what}: rule_type must be one of {', '.join(BUCKET_TYPES)}")
+        if lvl["value_level"] and (_text(b) or b.get("rule_type") not in (None, "")):
+            out.append(f"{what}: rule_sql and rule_type are only used on a level without an expression")
         if not lvl["value_level"] and not _text(b):
             out.append(f"{what}: rule_sql (the bucket's condition) is empty")
         if mode not in QUOTA_MODES:
@@ -445,7 +461,7 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
         if lvl["value_level"]:
             columns.append(f"({sql(lvl['rule_sql'])}) AS {_col(lvl)}")
         else:
-            columns += [f"{_flag(sql(b['rule_sql']))} AS {_col(b)}" for b in lvl["buckets"]]
+            columns += [f"{_flag(sql(b['rule_sql']))} AS {_col(b)}" for b in lvl["buckets"] if not _is_query(b)]
     for x in sample.exclusions:
         if _up(x.get("rule_type"), "SQL") == "SQL":
             columns.append(f"{_flag(sql(x['rule_sql']))} AS {_col(x)}")
@@ -465,7 +481,8 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     if quick_exclusion:
         # CASE, not NOT(...): a row whose test is unknown (a NULL column) is not excluded
         where += f" AND {_flag(quick_exclusion)} = 0"
-    out = {"universe": universe, "scope": scope,
+    key_queries = [(r, sql(r["rule_sql"])) for r in query_rules(sample)]
+    out = {"universe": universe, "scope": scope, "key_queries": key_queries,
            "count": f"SELECT COUNT(*) AS cnt FROM {universe} WHERE ({scope})" if quick_exclusion else None,
            "pull": f"SELECT {', '.join(columns)} FROM {universe} WHERE {where}", "output": None}
     if str(c.get("output_table") or "").strip():
@@ -474,6 +491,33 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
         aliases = [f"{k} AS smp_key_{i}" for i, k in enumerate(keys)]
         out["output"] = f"SELECT {', '.join([*aliases, *exprs])} FROM {universe} WHERE ({scope})"
     return out
+
+
+def query_rules(sample: Sample) -> list:
+    """The QUERY rules: exclusions, priorities, then buckets of condition levels."""
+    return [r for r in (*sample.exclusions, *sample.priorities,
+                        *(b for lvl in sample.levels if not lvl["value_level"] for b in lvl["buckets"]))
+            if _is_query(r)]
+
+
+def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, key_queries: list) -> dict:
+    """Run each QUERY rule's SELECT and set its flag column on the pulled rows (1 = the case is in its result),
+    as the pull does for a condition. Returns {rule_name: cases returned}. A result without the key_columns is
+    a ConfigError."""
+    counts = {}
+    for rule, text in key_queries:
+        log.info("QUERY rule %s (config_id=%s): %s", rule["rule_name"], sample.config_id, text)
+        result = conn.stream(text, s.chunk_rows)
+        try:
+            keys = {case_key(r, sample.keys) for r in result}
+        except ConfigError as e:
+            raise ConfigError(f"{rule['rule_class']} rule {rule['rule_name']} (QUERY) must return the key_columns "
+                              f"{', '.join(sample.keys)}: {e}") from None
+        col = _col(rule)
+        for row in rows:
+            row[col] = 1 if row["_key"] in keys else 0
+        counts[str(rule["rule_name"])] = len(keys)
+    return counts
 
 
 def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
@@ -557,7 +601,7 @@ def apply_exclusions(rows: list, sample: Sample, history: dict) -> tuple:
     for row in rows:
         reason = None
         for x in sample.exclusions:
-            if _up(x.get("rule_type"), "SQL") == "SQL":
+            if _up(x.get("rule_type"), "SQL") in ("SQL", QUERY):
                 hit = row.get(_col(x)) == 1
             else:
                 hit = row["_key"] in history[x["rule_id"]]["selected"]
@@ -586,7 +630,7 @@ def order_candidates(rows: list, sample: Sample, history: dict) -> list:
         rows.sort(key=lambda r: r[BASE_RANK])
     for p in reversed(sample.priorities):
         kind, col = _up(p.get("rule_type"), "CONDITION"), _col(p)
-        if kind == "CONDITION":
+        if kind in ("CONDITION", QUERY):
             rows.sort(key=lambda r: 0 if r.get(col) == 1 else 1)
         elif kind == "EXPRESSION":
             if _up(p.get("sort_dir"), "ASC") == "DESC":
@@ -1060,6 +1104,16 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
             r["_key"] = case_key(r, sample.keys)
         if len({r["_key"] for r in rows}) != len(rows):
             raise ConfigError("key_columns do not identify a case uniquely (the pull returned duplicate keys)")
+    except ConfigError as e:
+        return fail("config", "CONFIG_ERROR", e)
+    try:
+        summary["query_rules"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"])
+    except ConfigError as e:
+        return fail("config", "CONFIG_ERROR", e)
+    except Exception as e:  # noqa: BLE001
+        return fail("technical", "QUERY_RULE_FAILURE", e, traceback.format_exc())
+
+    try:
         candidates, excluded, counts = apply_exclusions(rows, sample, history)
         candidates = order_candidates(candidates, sample, history)
         strat = Stratifier(sample, run_seed, rounding)
@@ -1267,7 +1321,7 @@ def validate(conn: Connection, s: Settings, config_id=None, project: Optional[st
                 for key in ("pull", "count", "output"):
                     if queries.get(key):
                         conn.query("EXPLAIN " + queries[key] + (" AND 1=0" if key == "output" else ""))
-                for _, text in gate_queries(sample, s, params):
+                for _, text in [*gate_queries(sample, s, params), *queries["key_queries"]]:
                     conn.query("EXPLAIN " + text)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"SQL check failed: {error_text(e)}")
