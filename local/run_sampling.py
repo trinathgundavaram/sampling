@@ -193,7 +193,7 @@ def cmd_runs(conn, s, args) -> tuple:
             params.append(value)
     rows = conn.query(f"SELECT TOP {int(args.limit)} Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Run_Stat, "
                       f"Curr_Ind, Config_Hash, Finalized_By, Override_Rsn_Txt, Smpl_Method_Cd, Random_Seed_Nbr, "
-                      f"Target_Cnt, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
+                      f"Target_Ty, Target_Val, Target_Cnt, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
                       f"Start_Dtts, End_Dtts, Triggered_By, Error_Ty, Error_Txt "
                       f"FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE {' AND '.join(where)} ORDER BY Start_Dtts DESC",
                       params)
@@ -307,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--run-param", action="append", metavar="KEY=VALUE", help="a {key} / $key value (repeat)")
         sp.add_argument("--run-params", metavar="JSON", help='all values at once, e.g. {"pull_date": "2026-10-30"}')
         sp.add_argument("--filter", action="append", metavar="SQL",
-                        help="a condition on the source table, ANDed to Scope_Sql_Txt (repeat), "
+                        help="a condition on the rows Scope_Sql_Txt returns (repeat), "
                              "e.g. \"BTCH_ID = 'B42'\"")
 
     r = sub.add_parser("run", help="run the samples of a scope (a project, a table, a run type)")

@@ -14,8 +14,11 @@ its batches:
                           by, or history based)
         LEVEL             a stratification level (by the value a SELECT returns per case, or by its buckets'
                           SELECTs), optionally only under some parent buckets (Parent_Path_Txt)
-        BUCKET            a bucket of a level: FRACTION of the parent's target, ALL there is, or the REMAINDER
-                          the others leave; a different mix per parent bucket (Parent_Path_Txt)
+        BUCKET            a bucket of a level: a PCT of the parent's target, a CNT of cases, ALL there is, or
+                          the REMAINDER the others leave; a different mix per parent bucket (Parent_Path_Txt)
+
+    Every SQL column is a whole SELECT, joins and all. Scope_Sql_Txt returns the source rows of the run (at least
+    the key columns; the target table gets the rows it returns), Diversity_Sql_Txt the key columns and one value.
 
     Every selection criterion is a whole SELECT, joins and all, returning the key columns of the cases it matches
     (EXCLUSION, PRIORITY, BUCKET), plus one value column where a value is needed (a PRIORITY EXPRESSION, a LEVEL
@@ -28,14 +31,19 @@ One run = one sample:
     run row (RUNNING)         GOVT_RGLTRY_SamplingRun with the config it uses; its rules in
                               GOVT_RGLTRY_SamplingRunRule
     gates                     every GATE rule must return a row (e.g. "the batch is closed"), else GATE_NOT_MET
-    pull                      one SELECT of the source (Scope_Sql_Txt AND the run's extra_filters): the key columns
+    pull                      the key columns of the rows Scope_Sql_Txt returns (NULL: every source row), the
+                              run's extra_filters applied to them
     rule queries              each rule's SELECT; the pulled cases it returns are marked (or given its value)
     exclude                   first matching exclusion rule is the reason; history rules read earlier runs
-    order                     priority criteria in order, then Priority_Rank_Sql_Txt, then the key columns
-    stratify                  per level and parent: FRACTION buckets, then ALL buckets, then REMAINDER buckets
-                              take what is left (unused quota flows to them); equal shares are water-filled
+    target                    Target_Ty CNT: Target_Val cases | PCT: Target_Val % of the candidates (Rounding_Cd),
+                              within Min_Target_Cnt / Max_Target_Cnt
+    order                     priority criteria in order, then the key columns
+    stratify                  per level and parent: CNT then PCT buckets (Seq_Nbr order, never more than the
+                              parent's target), then ALL buckets, then REMAINDER buckets take what is left (unused
+                              quota flows to them); equal shares are water-filled
     select per leaf           RANKED: in priority order | RANDOM: seeded shuffle | SYSTEMATIC: seeded start,
-                              every k-th; rotating across Diversity_Sql_Txt values (Diversity_Cap_Cnt per value)
+                              every k-th; rotating across the Diversity_Sql_Txt values (at most Diversity_Cap_Val
+                              per value: a CNT, or a PCT of the bucket's target)
     top up                    Shortfall_Cd TOPUP: from the rest of the candidates, in priority order
     target table              Tgt_Schema_Nm.Tgt_Table_Nm (created by another process): the selected cases'
                               source rows, every column, with the ETL_* audit and SMPL_* run columns set by sampling
@@ -79,7 +87,8 @@ log = logging.getLogger(__name__)
 
 VALID_METHODS = ("RANKED", "RANDOM", "SYSTEMATIC")
 VALID_ROUNDING = ("FLOOR", "ROUND", "CEIL")
-QUOTA_MODES = ("FRACTION", "ALL", "REMAINDER")
+QUOTA_MODES = ("PCT", "CNT", "ALL", "REMAINDER")
+AMOUNT_TYPES = ("CNT", "PCT")   # Target_Ty, Max_Ty, Diversity_Cap_Ty: a number of cases or a percentage
 UNLISTED_POLICIES = ("SHARE", "REMAINDER", "SKIP")
 QUERY = "QUERY"   # rule_ty: rule_sql_txt is a SELECT returning the key_columns of the matching cases (default)
 EXCLUSION_TYPES = (QUERY, "PRIOR_SELECTION")
@@ -109,24 +118,25 @@ SAMPLE_KEY = ("project_cd", "table_nm", "run_ty")
 ALL_TABLES = "*"   # Table_Nm / Run_Ty of a rule applying to every table / run type of the project
 _SNAPSHOT_RULE_COLUMNS = ("rule_id", "project_cd", "table_nm", "run_ty", "rule_class_cd", "seq_nbr", "rule_nm",
                           "rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
-                          "target_fraction_val", "max_cnt", "sort_dir_cd", "lookback_days", "history_scope_cd",
+                          "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd",
                           "rule_desc")
 # the config columns a run row carries (the configuration the run used)
-_RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scope_sql_txt", "target_cnt",
-                       "smpl_method_cd", "priority_rank_sql_txt", "rounding_cd", "diversity_sql_txt",
-                       "diversity_cap_cnt", "shortfall_cd", "keep_excluded_ind", "tgt_schema_nm", "tgt_table_nm")
+_RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scope_sql_txt", "target_ty",
+                       "target_val", "min_target_cnt", "max_target_cnt", "smpl_method_cd", "rounding_cd",
+                       "diversity_sql_txt", "diversity_cap_ty", "diversity_cap_val", "shortfall_cd",
+                       "keep_excluded_ind", "tgt_schema_nm", "tgt_table_nm")
 RUN_REPORT_MAX = 16000      # Run_Rpt_Txt
 ERROR_DETAIL_MAX = 8000     # Error_Detail_Txt (the end of the traceback is kept)
 # the optional GOVT_RGLTRY_SamplingRule columns each class reads (any other one set is reported)
 _RULE_COLUMNS = ("rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
-                 "target_fraction_val", "max_cnt", "sort_dir_cd", "lookback_days", "history_scope_cd")
+                 "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd")
 _USED = {"PARAM": {"rule_sql_txt"},
          "GATE": {"rule_sql_txt"},
          "EXCLUSION": {"rule_ty", "rule_sql_txt", "lookback_days", "history_scope_cd"},
          "PRIORITY": {"rule_ty", "rule_sql_txt", "sort_dir_cd", "lookback_days", "history_scope_cd"},
          "LEVEL": {"rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd"},
-         "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "target_fraction_val",
-                    "max_cnt"}}
+         "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "quota_val", "max_ty",
+                    "max_val"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 # Configured SQL only reads: a statement word anywhere (outside quotes) is refused. Rows run under the service
 # account, so this guards against a pasted script or a slip, not against someone who may write the rows anyway.
@@ -139,11 +149,13 @@ _STATEMENT_WORDS = ("INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", 
 _STATEMENT_RE = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in _STATEMENT_WORDS) + r")\b", re.I)
 _QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|/\*.*?\*/", re.S)
 _SELECT_START = re.compile(r"^\s*(LOCKING\s+.*?\s+FOR\s+ACCESS\s+)?\(*\s*(SELECT|SEL|WITH)\b", re.I | re.S)
-_CONFIG_SQL = ("scope_sql_txt", "priority_rank_sql_txt", "diversity_sql_txt")
+_CONFIG_SQL = ("scope_sql_txt", "diversity_sql_txt")   # each a SELECT
 _NEEDS_ORDER = ("RANKED", "SYSTEMATIC")
 
-BASE_RANK = "smp_base_rank"
-DIVERSITY = "smp_div"
+# Diversity_Sql_Txt runs like a value rule (mark_query_rules); the pulled rows carry its value in DIVERSITY
+DIVERSITY_RULE = {"rule_id": "div", "rule_class_cd": "DIVERSITY", "rule_nm": "Diversity_Sql_Txt"}
+DIVERSITY = "smp_r_div"
+SCOPE_ALIAS = "smp_scope"
 EXTRA_FILTERS = "extra_filters"   # the run parameter holding the run's filter condition (SQL)
 
 
@@ -290,19 +302,16 @@ def config_problems(sample: Sample) -> list:
     method = sample.method
     if method not in VALID_METHODS:
         problems.append(f"smpl_method_cd {method!r} must be one of {', '.join(VALID_METHODS)}")
-    ordered = any(p for p in sample.priorities if _up(p.get("rule_ty"), QUERY) in PRIORITY_TYPES) \
-        or str(c.get("priority_rank_sql_txt") or "").strip()
+    ordered = any(p for p in sample.priorities if _up(p.get("rule_ty"), QUERY) in PRIORITY_TYPES)
     if method in _NEEDS_ORDER and not ordered:
-        problems.append(f"smpl_method_cd {method} needs PRIORITY rules or priority_rank_sql_txt")
+        problems.append(f"smpl_method_cd {method} needs PRIORITY rules (an EXPRESSION rule orders by a value)")
+    if "priority_rank_sql_txt" in c and _text(c, "priority_rank_sql_txt"):
+        problems.append("priority_rank_sql_txt is no longer used: order by a PRIORITY rule with rule_ty EXPRESSION")
     if _up(c.get("rounding_cd"), "FLOOR") not in VALID_ROUNDING:
         problems.append(f"rounding_cd must be one of {', '.join(VALID_ROUNDING)}")
     if _up(c.get("shortfall_cd"), "TOPUP") not in SHORTFALL_POLICIES:
         problems.append(f"shortfall_cd must be one of {', '.join(SHORTFALL_POLICIES)}")
-    try:
-        if int(c.get("target_cnt") or 0) < 1:
-            problems.append("target_cnt must be >= 1")
-    except (TypeError, ValueError):
-        problems.append(f"target_cnt {c.get('target_cnt')!r} is not a whole number")
+    problems += _target_problems(c)
     if not sample.keys:
         problems.append("key_columns_txt is empty")
     for col in ("src_schema_nm", "src_table_nm"):
@@ -311,11 +320,10 @@ def config_problems(sample: Sample) -> list:
             problems.append(f"{col} is empty (the source table: Src_Schema_Nm.Src_Table_Nm)")
         elif not _IDENT.match(name):
             problems.append(f"{col} {name!r} must be a plain name ($env allowed), the database and the table apart")
-    if c.get("diversity_cap_cnt") not in (None, ""):
-        if not str(c.get("diversity_sql_txt") or "").strip():
-            problems.append("diversity_cap_cnt needs diversity_sql_txt")
-        elif int(c["diversity_cap_cnt"]) < 1:
-            problems.append("diversity_cap_cnt must be >= 1")
+    cap = _amount_problems(c, "diversity_cap_ty", "diversity_cap_val", minimum=1)
+    problems += cap
+    if not cap and c.get("diversity_cap_val") not in (None, "") and not _text(c, "diversity_sql_txt"):
+        problems.append("diversity_cap_val needs diversity_sql_txt")
     if str(c.get("diversity_sql_txt") or "").strip() and method == "SYSTEMATIC":
         problems.append("diversity_sql_txt cannot be combined with SYSTEMATIC (it steps through a fixed order)")
 
@@ -390,6 +398,92 @@ def config_problems(sample: Sample) -> list:
     return problems + _sql_problems(sample)
 
 
+def _number(value) -> Optional[float]:
+    """value as a number, None when empty or not a number."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _whole(value) -> bool:
+    n = _number(value)
+    return n is not None and abs(n - round(n)) < 1e-9
+
+
+def _amount_problems(row: dict, ty_col: str, val_col: str, minimum: float = 0, required: bool = False) -> list:
+    """A number-or-percentage pair (Target_Ty / Target_Val, Max_Ty / Max_Val, Diversity_Cap_Ty / _Val): CNT a whole
+    number >= minimum, PCT above 0 and at most 100. Both or neither (required: both)."""
+    kind, value = row.get(ty_col), row.get(val_col)
+    if value in (None, "") and kind in (None, ""):
+        return [f"{val_col} is empty"] if required else []
+    kind = _up(kind, "CNT" if required else "")
+    if kind not in AMOUNT_TYPES:
+        return [f"{ty_col} must be one of {', '.join(AMOUNT_TYPES)} (with {val_col})"]
+    n = _number(value)
+    if n is None:
+        return [f"{val_col} {value!r} must be a number ({ty_col} {kind})"]
+    if kind == "CNT" and (not _whole(n) or n < minimum):
+        return [f"{val_col} must be a whole number >= {minimum:g} ({ty_col} CNT)"]
+    if kind == "PCT" and not 0 < n <= 100:
+        return [f"{val_col} must be above 0 and at most 100 ({ty_col} PCT: a percentage)"]
+    return []
+
+
+def _target_problems(c: dict) -> list:
+    if "target_cnt" in c and "target_val" not in c:
+        return ["target_cnt is no longer used: set target_ty (CNT | PCT) and target_val"]
+    out = _amount_problems(c, "target_ty", "target_val", minimum=1, required=True)
+    limits = {}
+    for col in ("min_target_cnt", "max_target_cnt"):
+        if c.get(col) in (None, ""):
+            continue
+        if not _whole(c[col]) or _number(c[col]) < 1:
+            out.append(f"{col} must be a whole number >= 1")
+        elif _up(c.get("target_ty"), "CNT") != "PCT":
+            out.append(f"{col} is only used with target_ty PCT")
+        else:
+            limits[col] = int(_number(c[col]))
+    if len(limits) == 2 and limits["min_target_cnt"] > limits["max_target_cnt"]:
+        out.append("min_target_cnt is above max_target_cnt")
+    return out
+
+
+def round_target(value: float, rounding_cd: str) -> int:
+    mode = (rounding_cd or "FLOOR").upper()
+    if mode == "CEIL":
+        return max(0, math.ceil(value - 1e-9))
+    if mode == "ROUND":
+        return max(0, round(value))
+    return max(0, math.floor(value + 1e-9))
+
+
+def resolve_target(config: dict, candidates: int, rounding_cd: str) -> int:
+    """The number of cases a run targets: Target_Val (CNT), or Target_Val % of the candidates (PCT, rounded by
+    Rounding_Cd) within Min_Target_Cnt / Max_Target_Cnt."""
+    value = _number(config.get("target_val")) or 0
+    if _up(config.get("target_ty"), "CNT") != "PCT":
+        return int(round(value))
+    target = round_target(candidates * value / 100, rounding_cd)
+    if config.get("min_target_cnt") not in (None, ""):
+        target = max(target, int(_number(config["min_target_cnt"])))
+    if config.get("max_target_cnt") not in (None, ""):
+        target = min(target, int(_number(config["max_target_cnt"])))
+    return target
+
+
+def amount(row: dict, ty_col: str, val_col: str, of: int, rounding_cd: str) -> Optional[int]:
+    """A CNT / PCT pair as a number of cases: CNT the value, PCT that percentage of `of` (rounded); None if unset."""
+    value = _number(row.get(val_col))
+    if value is None:
+        return None
+    if _up(row.get(ty_col), "CNT") == "PCT":
+        return round_target(of * value / 100, rounding_cd)
+    return int(round(value))
+
+
 def sql_problems(text, what: str, select: bool = False) -> list:
     """Why a configured piece of SQL is not a plain read: a statement word, ';', a -- comment (it would comment out
     the rest of the query the engine builds around it), unbalanced parentheses or quotes. select: it must be a
@@ -421,7 +515,7 @@ def sql_problems(text, what: str, select: bool = False) -> list:
 
 
 def _sql_problems(sample: Sample) -> list:
-    out = [p for col in _CONFIG_SQL for p in sql_problems(sample.config.get(col), col)]
+    out = [p for col in _CONFIG_SQL for p in sql_problems(sample.config.get(col), col, select=True)]
     for cls in RULE_CLASSES:
         for r in _rules_of(sample, cls):
             out += sql_problems(r.get("rule_sql_txt"), f"{cls} rule {r.get('rule_nm')}",
@@ -439,9 +533,10 @@ def _is_query(rule: dict) -> bool:
 
 
 def _is_value(rule: dict) -> bool:
-    """A SELECT returning a value per case besides the key columns: a PRIORITY EXPRESSION, a LEVEL by value."""
+    """A SELECT returning a value per case besides the key columns: a PRIORITY EXPRESSION, a LEVEL by value,
+    Diversity_Sql_Txt."""
     cls = _up(rule.get("rule_class_cd"))
-    return cls == "LEVEL" or (cls == "PRIORITY" and _up(rule.get("rule_ty")) == "EXPRESSION")
+    return cls in ("LEVEL", "DIVERSITY") or (cls == "PRIORITY" and _up(rule.get("rule_ty")) == "EXPRESSION")
 
 
 def _rules_of(sample: Sample, cls: str) -> list:
@@ -471,7 +566,7 @@ def _level_problems(lvl: dict) -> list:
         out.append(f"level {name}: no rule_sql_txt (a SELECT of each case's value) and no BUCKET rules")
     groups = {}
     for b in lvl["buckets"]:
-        bname, mode = str(b.get("rule_nm") or ""), _up(b.get("quota_cd"), "FRACTION")
+        bname, mode = str(b.get("rule_nm") or ""), _up(b.get("quota_cd"), "PCT")
         what = f"level {name} bucket {bname!r}"
         if "/" in bname:
             out.append(f"{what}: rule_nm must not contain '/'")
@@ -482,16 +577,18 @@ def _level_problems(lvl: dict) -> list:
             out.append(f"{what}: rule_ty must be one of {', '.join(BUCKET_TYPES)}")
         if lvl["value_level"] and (_text(b) or b.get("rule_ty") not in (None, "")):
             out.append(f"{what}: rule_sql_txt and rule_ty are only used on a level without its own SELECT")
-        if mode not in QUOTA_MODES:
-            out.append(f"{what}: quota_cd must be one of {', '.join(QUOTA_MODES)}")
-        fraction = b.get("target_fraction_val")
+        value = _number(b.get("quota_val"))
         if mode == "FRACTION":
-            if fraction is None or not 0 <= float(fraction) <= 1:
-                out.append(f"{what}: FRACTION needs target_fraction_val between 0 and 1")
-        elif fraction is not None:
-            out.append(f"{what}: target_fraction_val is not used with quota_cd {mode}")
-        if b.get("max_cnt") is not None and int(b["max_cnt"]) < 0:
-            out.append(f"{what}: max_cnt must be >= 0")
+            out.append(f"{what}: quota_cd FRACTION is now PCT, with quota_val a percentage (0.8 -> 80)")
+        elif mode not in QUOTA_MODES:
+            out.append(f"{what}: quota_cd must be one of {', '.join(QUOTA_MODES)}")
+        elif mode == "PCT" and (value is None or not 0 <= value <= 100):
+            out.append(f"{what}: PCT needs quota_val between 0 and 100 (a percentage of the parent's target)")
+        elif mode == "CNT" and (not _whole(value) or value < 0):
+            out.append(f"{what}: CNT needs quota_val, a whole number >= 0 (cases)")
+        elif mode in ("ALL", "REMAINDER") and b.get("quota_val") not in (None, ""):
+            out.append(f"{what}: quota_val is not used with quota_cd {mode}")
+        out += [f"{what}: {p}" for p in _amount_problems(b, "max_ty", "max_val")]
         group = groups.setdefault(_up(b.get("parent_path_txt"), "*"), {})
         if _norm(bname) in group:
             out.append(f"{what}: appears more than once under parent_path_txt {b.get('parent_path_txt') or '*'!r}")
@@ -503,10 +600,9 @@ def _level_problems(lvl: dict) -> list:
                 out.append(f"level {name} under {parent!r}: a bucket without rule_sql_txt takes every case left, "
                            f"so it must be the only one and the last (seq_nbr)")
     for parent, group in groups.items():
-        total = sum(float(b.get("target_fraction_val") or 0) for b in group.values()
-                    if _up(b.get("quota_cd"), "FRACTION") == "FRACTION")
-        if total > 1 + 1e-6:
-            out.append(f"level {name} under {parent!r}: target_fraction_val values add up to {total:.4f}, more than 1")
+        total = sum(_number(b.get("quota_val")) or 0 for b in group.values() if _up(b.get("quota_cd"), "PCT") == "PCT")
+        if total > 100 + 1e-6:
+            out.append(f"level {name} under {parent!r}: the PCT quota_val values add up to {total:g}, more than 100")
     return out
 
 
@@ -521,51 +617,51 @@ def _col(rule: dict) -> str:
 
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     """{source, scope, pull, key_queries, output (or None), tgt_table_nm}: the SQL of a run, $env and
-    parameters resolved; the run's extra_filters (params[EXTRA_FILTERS], SQL) are ANDed to the scope, so the pull
-    and the target table's rows read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull.
-    output: every column of the source rows in scope (the selected cases' keys are ANDed to it)."""
+    parameters resolved. scope: the rows of the run - Scope_Sql_Txt (a SELECT, NULL = every source row) with the
+    run's extra_filters (params[EXTRA_FILTERS], a condition on its rows) applied, so the pull and the target table
+    read the same rows. key_queries: (rule, SELECT) of every rule and of Diversity_Sql_Txt, run after the pull.
+    output: every column of the rows in scope (the selected cases' keys are ANDed to it)."""
     def sql(text, identifier=False):
         return substitute_params(s.resolve_env(str(text or "").strip(), identifier=identifier), params)
 
     c = sample.config
     source = f"{sql(c.get('src_schema_nm'), identifier=True)}.{sql(c.get('src_table_nm'), identifier=True)}"
     keys = sample.keys
-    scope = sql(c.get("scope_sql_txt")) or "1=1"
+    rows = sql(c.get("scope_sql_txt")) or f"SELECT * FROM {source}"
+    condition = "1=1"
     filters = str(params.get(EXTRA_FILTERS) or "").strip()
     if filters:
         problems = sql_problems(filters, "extra_filters")
         if problems:
             raise ValueError("; ".join(problems))
-        scope = f"({scope}) AND ({sql(filters)})"
-    columns = list(keys)
-    if str(c.get("diversity_sql_txt") or "").strip():
-        columns.append(f"({sql(c['diversity_sql_txt'])}) AS {DIVERSITY}")
-    priority = sql(c.get("priority_rank_sql_txt"))
-    if priority:
-        columns.append(f"ROW_NUMBER() OVER (ORDER BY {priority}, {', '.join(keys)}) AS {BASE_RANK}")
+        condition = sql(filters)
+    scope = f"FROM ({rows}) {SCOPE_ALIAS} WHERE ({condition})"
 
     key_queries = [(r, sql(r["rule_sql_txt"])) for r in query_rules(sample)]
+    if _text(c, "diversity_sql_txt"):
+        key_queries.append((DIVERSITY_RULE, sql(c["diversity_sql_txt"])))
     out = {"source": source, "scope": scope, "key_queries": key_queries,
-           "pull": f"SELECT {', '.join(columns)} FROM {source} WHERE ({scope})", "output": None}
+           "pull": f"SELECT {', '.join(keys)} {scope}", "output": None}
     if _text(c, "tgt_table_nm"):
         out["tgt_table_nm"] = f"{sql(c.get('tgt_schema_nm'), identifier=True)}.{sql(c['tgt_table_nm'], identifier=True)}"
-        out["output"] = f"SELECT * FROM {source} WHERE ({scope})"
+        out["output"] = f"SELECT * {scope}"
     return out
 
 
 def target_table_columns(conn: Connection, queries: dict, sample: Sample) -> list:
-    """The target table's columns, checked against the source: each is set by sampling (SAMPLE_AUDIT_COLS,
-    SAMPLE_RUN_COLS) or copied from the source column of the same name (in any case). ConfigError when the table lacks
-    SAMPLE_REQUIRED or a key column, or has a column that is neither."""
+    """The target table's columns, checked against the rows in scope (the columns Scope_Sql_Txt returns): each is
+    set by sampling (SAMPLE_AUDIT_COLS, SAMPLE_RUN_COLS) or copied from the scope column of the same name (in any
+    case). ConfigError when the table lacks SAMPLE_REQUIRED or a key column, or has a column that is neither."""
     table = queries["tgt_table_nm"]
     columns = conn.columns(f"SELECT * FROM {table} WHERE 1=0")
-    source = {c.lower() for c in conn.columns(f"SELECT * FROM {queries['source']} WHERE 1=0")}
+    source = {c.lower() for c in conn.columns(f"{queries['output']} AND 1=0")}
     have = {c.lower() for c in columns}
     problems = [f"needs the column {c.upper()}" for c in SAMPLE_REQUIRED if c not in have]
     problems += [f"needs the key column {k}" for k in sample.keys if k.lower() not in have]
     other = [c for c in columns if c.lower() not in (*SAMPLE_AUDIT_COLS, *SAMPLE_RUN_COLS) and c.lower() not in source]
     if other:
-        problems.append(f"has columns that are neither in the source nor set by sampling: {', '.join(other)}")
+        problems.append(f"has columns that are neither returned by the scope (Scope_Sql_Txt) nor set by sampling: "
+                        f"{', '.join(other)}")
     if problems:
         raise ConfigError(f"target table {table}: " + "; ".join(problems))
     return columns
@@ -723,12 +819,10 @@ def _sortable(v) -> tuple:
 
 
 def order_candidates(rows: list, sample: Sample, history: dict) -> list:
-    """Priority order: criterion 1, 2, ... then priority_rank_sql_txt, then the key columns (stable sorts from the
-    last key to the first). Sets row['_order'] = 0, 1, ..."""
+    """Priority order: criterion 1, 2, ... then the key columns (stable sorts from the last key to the first).
+    Sets row['_order'] = 0, 1, ..."""
     keys = [k.lower() for k in sample.keys]
     rows = sorted(rows, key=lambda r: tuple(_sortable(r.get(k)) for k in keys))
-    if any(BASE_RANK in r for r in rows[:1]):
-        rows.sort(key=lambda r: r[BASE_RANK])
     for p in reversed(sample.priorities):
         kind, col = _up(p.get("rule_ty"), QUERY), _col(p)
         if kind == QUERY:
@@ -753,15 +847,6 @@ def order_candidates(rows: list, sample: Sample, history: dict) -> list:
 # ---------------------------------------------------------------------------
 # Quotas and selection
 # ---------------------------------------------------------------------------
-
-def round_target(value: float, rounding_cd: str) -> int:
-    mode = (rounding_cd or "FLOOR").upper()
-    if mode == "CEIL":
-        return max(0, math.ceil(value - 1e-9))
-    if mode == "ROUND":
-        return max(0, round(value))
-    return max(0, math.floor(value + 1e-9))
-
 
 def diversified(pool: list, n: int, cap: Optional[int], use_diversity: bool) -> list:
     """The first n of `pool`, rotating across the diversity values (in order of first appearance), at most
@@ -815,26 +900,36 @@ class Stratifier:
         self.method = sample.method
         self.seed = seed
         self.rounding = rounding_cd
-        self.cap = int(sample.config["diversity_cap_cnt"]) if sample.config.get("diversity_cap_cnt") not in (None, "") \
-            else None
-        self.use_diversity = bool(str(sample.config.get("diversity_sql_txt") or "").strip())
+        self.config = sample.config
+        self.use_diversity = bool(_text(sample.config, "diversity_sql_txt"))
+        self.target = 0
         self.leaves = {}   # leaf path -> {candidates, target, selected}
         self.nodes = {}    # every bucket path -> {candidates, target, selected}
+        self.notes = []    # quotas cut to fit their parent's target
 
     def rng(self, path: str) -> random.Random:
         return random.Random(f"{self.seed}|{path}")
 
+    def cap_for(self, n: int) -> Optional[int]:
+        """The diversity cap per value when picking n: Diversity_Cap_Val (CNT) or that % of n (PCT), at least 1."""
+        if not self.use_diversity:
+            return None
+        cap = amount(self.config, "diversity_cap_ty", "diversity_cap_val", n, self.rounding)
+        return None if cap is None else max(1, cap)
+
     def pick(self, rows: list, n: int, path: str) -> list:
-        return select(rows, n, self.method, self.rng(path), self.cap, self.use_diversity)
+        return select(rows, n, self.method, self.rng(path), self.cap_for(n), self.use_diversity)
 
     def run(self, rows: list, target: int) -> list:
+        self.target = target
         return self._allocate(rows, target, 0, "")
 
     def top_up(self, rest: list, n: int, chosen: list) -> list:
-        """Up to n more from `rest` (the candidates not chosen), in the method's order; diversity_cap_cnt still
-        holds across the whole sample."""
-        pool = self.pick(rest, len(rest), "TOPUP")
-        if not (self.use_diversity and self.cap):
+        """Up to n more from `rest` (the candidates not chosen), in the method's order; the diversity cap (a PCT:
+        of the whole sample's target) still holds across the whole sample."""
+        cap = self.cap_for(self.target)
+        pool = select(rest, len(rest), self.method, self.rng("TOPUP"), cap, self.use_diversity)
+        if not (self.use_diversity and cap):
             return pool[:n]
         used = {}
         for r in chosen:
@@ -842,7 +937,7 @@ class Stratifier:
         out = []
         for r in pool:
             v = _norm(r.get(DIVERSITY))
-            if len(out) < n and used.get(v, 0) < self.cap:
+            if len(out) < n and used.get(v, 0) < cap:
                 used[v] = used.get(v, 0) + 1
                 out.append(r)
         return out
@@ -892,28 +987,38 @@ class Stratifier:
 
         def mode(key):
             spec = group.get(key)
-            return _up(spec.get("quota_cd"), "FRACTION") if spec else unlisted
+            return _up(spec.get("quota_cd"), "PCT") if spec else unlisted
 
         def cap(key):
-            spec = group.get(key) or {}
-            return int(spec["max_cnt"]) if spec.get("max_cnt") is not None else None
+            """Max_Val: a CNT, or a PCT of the bucket's candidates; None = no cap."""
+            return amount(group.get(key) or {}, "max_ty", "max_val", len(buckets[key]), self.rounding)
 
         def sub(key):
             return f"{path}/{labels[key]}" if path else labels[key]
 
-        named = sum(float(b.get("target_fraction_val") or 0) for b in group.values()
-                    if _up(b.get("quota_cd"), "FRACTION") == "FRACTION")
-        sharing = [k for k in buckets if mode(k) == "SHARE"]
+        named = sum(_number(b.get("quota_val")) or 0 for b in group.values()
+                    if _up(b.get("quota_cd"), "PCT") == "PCT") / 100
+        sharing = [k for k in sorted(buckets) if mode(k) == "SHARE"]
+        in_order = [k for k in group if k in buckets]   # the level's bucket rows in Seq_Nbr order
         chosen = {}
         targets = {}
-        for key in sorted(buckets):
-            m = mode(key)
-            if m == "FRACTION":
-                t = round_target(target * float(group[key]["target_fraction_val"]), self.rounding)
-            elif m == "SHARE":
-                t = round_target(target * max(0.0, 1.0 - named) / len(sharing), self.rounding)
-            else:
-                continue
+        left, counted = target, 0
+        for kind in ("CNT", "PCT"):
+            for key in (k for k in in_order if mode(k) == kind):
+                value = _number(group[key].get("quota_val")) or 0
+                want = int(round(value)) if kind == "CNT" else round_target(target * value / 100, self.rounding)
+                t = min(want, left)
+                if t < want:
+                    self.notes.append(f"{sub(key)}: quota {kind} {value:g} ({want}) cut to {t}: the quotas under "
+                                      f"{path or 'the sample'} exceed its target of {target}")
+                if cap(key) is not None:
+                    t = min(t, cap(key))
+                left -= t
+                counted += t if kind == "CNT" else 0
+                targets[key] = t
+                chosen[key] = self._allocate(buckets[key], t, index + 1, sub(key))
+        for key in sharing:
+            t = round_target(max(0.0, target * (1.0 - named) - counted) / len(sharing), self.rounding)
             targets[key] = t if cap(key) is None else min(t, cap(key))
             chosen[key] = self._allocate(buckets[key], targets[key], index + 1, sub(key))
 
@@ -997,10 +1102,12 @@ def run_report(summary: dict) -> str:
     """Run_Rpt_Txt: the counts per exclusion rule and bucket (JSON), within RUN_REPORT_MAX characters (the bucket
     counts are left out when they do not fit)."""
     report = {"exclusions": summary.get("exclusions"), "buckets": summary.get("buckets")}
+    if summary.get("notes"):
+        report["notes"] = summary["notes"]
     text = json.dumps(report, default=str)
     if len(text) > RUN_REPORT_MAX:
         text = json.dumps({"exclusions": summary.get("exclusions"), "buckets": "too many to store: see the "
-                           "selections' Stratum_Path_Txt"}, default=str)[:RUN_REPORT_MAX]
+                           "selections' Stratum_Path_Txt", "notes": summary.get("notes")}, default=str)[:RUN_REPORT_MAX]
     return text
 
 
@@ -1011,11 +1118,12 @@ def _finish_run(conn, s, run_id, summary, sample: Sample, error_type=None, messa
     conn.execute(f"""
         UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun
         SET Run_Stat = ?, End_Dtts = ?, In_Scope_Cnt = ?, Excluded_Cnt = ?, Candidate_Cnt = ?, Selected_Cnt = ?,
-            Shortfall_Cnt = ?, Error_Ty = ?, Error_Txt = ?, Error_Detail_Txt = ?, Run_Rpt_Txt = ?, Curr_Ind = ?,
-            LastUpdt_Dtts = ?, LastUpdt_ID = USER
+            Shortfall_Cnt = ?, Target_Cnt = ?, Error_Ty = ?, Error_Txt = ?, Error_Detail_Txt = ?, Run_Rpt_Txt = ?,
+            Curr_Ind = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER
         WHERE Smpl_Run_ID = ?""",
         ["ERROR" if error_type else "COMPLETED", s.now(), summary.get("in_scope"), summary.get("excluded"),
-         summary.get("candidates"), summary.get("selected"), summary.get("shortfall"), error_type,
+         summary.get("candidates"), summary.get("selected"), summary.get("shortfall"), summary.get("target_cnt"),
+         error_type,
          (message or None) and message[:4000], detail, None if error_type else run_report(summary),
          0 if error_type else 1, s.now(), run_id])
 
@@ -1034,8 +1142,8 @@ def _key_condition(keys: list, row: dict, params: list) -> str:
 
 
 def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) -> dict:
-    """{case_key: {column: value}} of the selected cases: their source rows, every column, read back from the
-    source under the run's scope (one row per case: the pull refuses a scope with a case twice)."""
+    """{case_key: {column: value}} of the selected cases: their rows in scope, every column, read back under the
+    run's scope (one row per case: the pull refuses a scope with a case twice)."""
     keys = sample.keys
     out = {}
     for i in range(0, len(chosen), OUTPUT_KEY_CHUNK):
@@ -1136,7 +1244,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     dry_run    : do everything but write (no run row).
     force_reason: replace a FINAL sample of this run_key (recorded on the new run row); without it a rerun of a
                  finalised run_key fails as FINALIZED.
-    extra_filters: a SQL condition on the source table ANDed to Scope_Sql_Txt for this run: which load, batch or
+    extra_filters: a SQL condition on the rows Scope_Sql_Txt returns, for this run: which load, batch or
                  SCD2 version of an incremental table to read, e.g. "BTCH_ID = 'B42' AND ETL_IS_CURR_IND = 'Y'".
                  Kept with the run's parameters, so a later case replacement reads the same rows.
     """
@@ -1146,10 +1254,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     config, method = sample.config, sample.method
     project, table, run_type = sample.key
     rounding = _up(config.get("rounding_cd"), "FLOOR")
-    try:
-        target = int(config.get("target_cnt") or 0)
-    except (TypeError, ValueError):
-        target = 0
+    percent = _up(config.get("target_ty"), "CNT") == "PCT"
+    target = None if percent else resolve_target(config, 0, rounding)   # a PCT target: once the candidates are known
     run_seed = None
     if method in ("RANDOM", "SYSTEMATIC"):
         run_seed = int(seed) if seed not in (None, "") else random.SystemRandom().getrandbits(63)
@@ -1179,7 +1285,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                "by_stratum": {}, "buckets": {}, "retired_runs": 0, "dry_run": dry_run,
                "config_hash": sample.config_hash}
     log.info("sampling starting: sample=%s run_key=%s method=%s target=%s meta_db=%s host=%s%s",
-             label, run_key, method, target, s.meta_db, conn.host, " (dry run)" if dry_run else "")
+             label, run_key, method, target if target is not None else f"{config.get('target_val')} %",
+             s.meta_db, conn.host, " (dry run)" if dry_run else "")
 
     def fail(kind: str, error_type: str, exc_or_text, detail=None) -> dict:
         message = exc_or_text if isinstance(exc_or_text, str) else error_text(exc_or_text)
@@ -1258,6 +1365,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         candidates, excluded, counts = apply_exclusions(rows, sample, history)
         candidates = order_candidates(candidates, sample, history)
+        target = resolve_target(config, len(candidates), rounding)
+        summary["target_cnt"] = target
         strat = Stratifier(sample, run_seed, rounding)
         chosen = strat.run(candidates, target)
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
@@ -1271,7 +1380,9 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         return fail("technical", "SELECT_FAILURE", e, traceback.format_exc())
     summary.update(in_scope=in_scope, excluded=in_scope - len(candidates), candidates=len(candidates),
                    selected=len(chosen), shortfall=max(0, target - len(chosen)), exclusions=counts,
-                   by_stratum=strat.leaves, buckets=strat.nodes)
+                   by_stratum=strat.leaves, buckets=strat.nodes, notes=strat.notes)
+    for note in strat.notes:
+        log.warning("%s: %s", label, note)
 
     output = None
     if queries["output"]:

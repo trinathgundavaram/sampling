@@ -21,8 +21,8 @@ def _sample(db, target=4, **kw):
     """Cases d00..d09 Denied and w00..w04 Withdrawn; half and half, highest case_id first."""
     _cases_table(db, [(f"d{i:02d}", "Denied", "X") for i in range(10)] + [(f"w{i:02d}", "Withdrawn", "Y") for i in range(5)])
     insert_config(db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=target,
-                  priority_rank_sql_txt="case_id DESC", **kw)
-    insert_strata(db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
+                  order_by="case_id DESC", **kw)
+    insert_strata(db, 1, 1, 0, "disp", "disp", {"Denied": 50, "Withdrawn": 50})
 
 
 def _run(conn, s, **kw):
@@ -45,20 +45,21 @@ def _selected(raw, run_key="K1"):
 def test_every_run_stores_the_rules_it_used_and_their_hash(raw, conn, settings):
     _sample(raw.db)
     first = _run(conn, settings)
-    run = _rows(raw, "SELECT Config_Hash, Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt, Target_Cnt, "
-                     "Priority_Rank_Sql_Txt FROM GOVT_RGLTRY_SamplingRun")[0]
+    run = _rows(raw, "SELECT Config_Hash, Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt, Target_Ty, Target_Val, "
+                     "Target_Cnt FROM GOVT_RGLTRY_SamplingRun")[0]
     assert run[0] == first["config_hash"] and len(run[0]) == 64
-    assert run[1:] == ("main", "u", "case_id", 4, "case_id DESC")             # the config the run used
-    assert _rows(raw, "SELECT Smpl_Run_ID, Rule_ID, Rule_Class_Cd, Rule_Nm, Target_Fraction_Val, Table_Nm, Run_Ty "
+    assert run[1:] == ("main", "u", "case_id", "CNT", 4, 4)             # the config the run used, the target it had
+    assert _rows(raw, "SELECT Smpl_Run_ID, Rule_ID, Rule_Class_Cd, Rule_Nm, Quota_Cd, Quota_Val, Table_Nm, Run_Ty "
                       "FROM GOVT_RGLTRY_SamplingRunRule ORDER BY Rule_ID") == \
-        [(first["smpl_run_id"], 1000, "LEVEL", "disp", None, "T1", "WKLY"),
-         (first["smpl_run_id"], 1001, "BUCKET", "Denied", 0.5, "T1", "WKLY"),
-         (first["smpl_run_id"], 1002, "BUCKET", "Withdrawn", 0.5, "T1", "WKLY")]
+        [(first["smpl_run_id"], 1000, "LEVEL", "disp", None, None, "T1", "WKLY"),
+         (first["smpl_run_id"], 1001, "BUCKET", "Denied", "PCT", 50, "T1", "WKLY"),
+         (first["smpl_run_id"], 1002, "BUCKET", "Withdrawn", "PCT", 50, "T1", "WKLY"),
+         (first["smpl_run_id"], 8001, "PRIORITY", "ORDER", None, None, "T1", "WKLY")]
 
     raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET LastUpdt_ID = 'someone', LastUpdt_Dtts = CURRENT_TIMESTAMP")
     assert _run(conn, settings, dry_run=True)["config_hash"] == first["config_hash"]   # who / when do not count
-    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET target_fraction_val = 0.75 WHERE rule_nm = 'Denied'")
-    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET target_fraction_val = 0.25 WHERE rule_nm = 'Withdrawn'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET quota_val = 75 WHERE rule_nm = 'Denied'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET quota_val = 25 WHERE rule_nm = 'Withdrawn'")
     assert _run(conn, settings, run_key="K2")["config_hash"] != first["config_hash"]
 
 
@@ -67,7 +68,7 @@ def test_a_failed_run_keeps_its_snapshot_too(raw, conn, settings):
     out = _run(conn, settings)
     assert out["error_type"] == "CONFIG_ERROR"
     assert _rows(raw, "SELECT Smpl_Method_Cd, Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun") == [("BOGUS", None)]
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRunRule") == [(3,)]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRunRule") == [(4,)]
 
 
 # ── finalise ──────────────────────────────────────────────────────────────

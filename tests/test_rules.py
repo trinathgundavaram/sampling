@@ -20,7 +20,7 @@ def _cases(prefix, n, disp, area="A", code="X", rev=0, batch="B1", flag="N"):
 
 
 def _config(db, target, **kw):
-    kw.setdefault("priority_rank_sql_txt", "case_id")
+    kw.setdefault("order_by", "case_id")
     insert_config(db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=target, **kw)
 
 
@@ -43,8 +43,8 @@ def test_a_level_applies_only_under_its_parent(raw, conn, settings):
     _cases_table(raw.db, _cases("d", 40, "Denied", "Part B") + _cases("e", 40, "Denied", "Other")
               + _cases("w", 40, "Withdrawn", "Part B"))
     _config(raw.db, 20)
-    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
-    insert_strata(raw.db, 2, 1, 1, "area", "area", {"Part B": {"target_fraction_val": 0.2, "parent_path_txt": "Denied"}},
+    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 50, "Withdrawn": 50})
+    insert_strata(raw.db, 2, 1, 1, "area", "area", {"Part B": {"quota_val": 20, "parent_path_txt": "Denied"}},
                   applies_to="Denied")
     out = _run(conn, settings)
     assert _selected(out) == {"Denied/Part B": 2, "Denied/Other": 8, "Withdrawn": 10}
@@ -54,9 +54,9 @@ def test_a_most_specific_parent_path_wins(raw, conn, settings):
     _cases_table(raw.db, _cases("d", 40, "Denied", "P") + _cases("e", 40, "Denied", "Q")
               + _cases("w", 40, "Withdrawn", "P") + _cases("x", 40, "Withdrawn", "Q"))
     _config(raw.db, 20)
-    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
-    insert_strata(raw.db, 2, 1, 1, "area", "area", {"P": {"target_fraction_val": 0.2, "parent_path_txt": "*"}})
-    insert_bucket(raw.db, 300, 1, "P", parent_path_txt="Denied", target_fraction_val=0.8)
+    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 50, "Withdrawn": 50})
+    insert_strata(raw.db, 2, 1, 1, "area", "area", {"P": {"quota_val": 20, "parent_path_txt": "*"}})
+    insert_bucket(raw.db, 300, 1, "P", parent_path_txt="Denied", quota_val=80)
     out = _run(conn, settings)
     assert _selected(out) == {"Denied/P": 8, "Denied/Q": 2, "Withdrawn/P": 2, "Withdrawn/Q": 8}
 
@@ -69,7 +69,7 @@ def test_b_all_and_remainder(raw, conn, settings):
     _config(raw.db, 30)
     insert_strata(raw.db, 1, 1, 0, "disp", "disp", {
         "Withdrawn": {"quota_cd": "ALL"}, "Dismissed": {"quota_cd": "ALL", "max_cnt": 2},
-        "Approved": {"target_fraction_val": 0.2}, "Denied": {"quota_cd": "REMAINDER"}})
+        "Approved": {"quota_val": 20}, "Denied": {"quota_cd": "REMAINDER"}})
     out = _run(conn, settings)
     # Approved is short (2 of 6): its unused quota flows to the remainder
     assert _selected(out) == {"Withdrawn": 5, "Dismissed": 2, "Approved": 2, "Denied": 21}
@@ -79,7 +79,7 @@ def test_b_all_and_remainder(raw, conn, settings):
 def test_b_skip_policy_leaves_unlisted_values_out(raw, conn, settings):
     _cases_table(raw.db, _cases("d", 50, "Denied") + _cases("z", 50, "Unknown"))
     _config(raw.db, 10, shortfall_cd="NONE")
-    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 0.5}, unlisted_cd="SKIP")
+    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"Denied": 50}, unlisted_cd="SKIP")
     out = _run(conn, settings)
     assert _selected(out) == {"Denied": 5, "Unknown": 0} and out["shortfall"] == 5
 
@@ -128,7 +128,7 @@ def _source(db, rows):
                "etl_load_dt_tm TIMESTAMP, etl_last_updt_dt_tm TIMESTAMP)")
     db.executemany("INSERT INTO src VALUES (?, ?, ?, 'N', TIMESTAMP '2020-01-01 00:00:00', NULL)", rows)
     insert_config(db, src_table_nm="src", exclusion_sql=None, scope_sql_txt="etl_is_curr_ind = 'Y'", target_cnt=4,
-                  priority_rank_sql_txt="case_id", tgt_schema_nm="main", tgt_table_nm="smpl_t")
+                  order_by="case_id", tgt_schema_nm="main", tgt_table_nm="smpl_t")
 
 
 def test_e_the_target_table_gets_every_source_column(raw, conn, settings):
@@ -155,7 +155,7 @@ def test_e_the_target_table_columns_are_checked(raw, conn, settings):
     out = _run(conn, settings)
     assert out["error_type"] == "CONFIG_ERROR"
     assert "needs the column SMPL_RUN_KEY" in out["error"] and "needs the key column case_id" in out["error"]
-    assert "neither in the source nor set by sampling: notes" in out["error"]
+    assert "neither returned by the scope (Scope_Sql_Txt) nor set by sampling: notes" in out["error"]
     bad = validate(conn, settings, project="UMCM", check_sql=True)
     assert "needs the column SMPL_RUN_KEY" in bad["configs"][0]["problems"][0]
 
@@ -188,7 +188,7 @@ def test_f_prior_selection_excluded_and_unselected_carried_over(raw, conn, setti
     insert_rule(raw.db, "EXCLUSION", 1, "ALREADY_AUDITED", seq_nbr=1, rule_ty="PRIOR_SELECTION", lookback_days=30,
                 history_scope_cd="SAMPLE")
     # priority: highest case_id first, but last cycle's unselected cases before anything else
-    set_config(raw.db, priority_rank_sql_txt="case_id DESC")
+    set_config(raw.db, order_by="case_id DESC")
     second = _run(conn, settings, run_key="W2", as_of=AS_OF + timedelta(days=7))
     assert second["exclusions"] == {"ALREADY_AUDITED": 3} and second["candidates"] == 7
     assert _rows(raw, "SELECT Exclusion_Rsn_Txt, COUNT(*) FROM GOVT_RGLTRY_SampleSelection WHERE Run_Key = 'W2' "
@@ -224,7 +224,7 @@ def test_f_sql_exclusions_first_match_and_stats(raw, conn, settings):
 def test_priority_conditions_and_expressions_in_order(raw, conn, settings):
     _cases_table(raw.db, [("p1", "D", "A", "X", 0, "B1", "N"), ("p2", "D", "A", "Y", 1, "B1", "N"),
                        ("p3", "D", "A", "X", 1, "B1", "N"), ("p4", "D", "A", "Y", None, "B1", "N")])
-    _config(raw.db, 4, priority_rank_sql_txt=None)
+    _config(raw.db, 4, order_by=None)
     insert_rule(raw.db, "PRIORITY", 1, "REV", seq_nbr=1, rule_ty="CONDITION", rule_sql_txt="rev = 1")
     insert_rule(raw.db, "PRIORITY", 2, "CODE", seq_nbr=2, rule_ty="EXPRESSION", rule_sql_txt="code", sort_dir_cd="DESC")
     _run(conn, settings)
@@ -265,11 +265,11 @@ def test_rule_rows_are_validated(raw, conn, settings):
     insert_rule(raw.db, "PARAM", 3, "p", rule_sql_txt="SELECT 1", quota_cd="ALL")      # a column PARAM does not use
     insert_rule(raw.db, "TYPO", 4, "x")
     insert_bucket(raw.db, 5, 7, "orphan")                                               # no LEVEL 7
-    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"A/B": 0.7, "C": 0.6, "D": {"quota_cd": "ALL",
-                                                                          "target_fraction_val": 0.1}})
+    insert_strata(raw.db, 1, 1, 0, "disp", "disp", {"A/B": 70, "C": 60, "D": {"quota_cd": "ALL",
+                                                                          "quota_val": 10}})
     problems = " | ".join(validate(conn, settings, project="UMCM")["configs"][0]["problems"])
     for text in ("SYSTEMATIC", "lookback_days must be >= 1", "rule_ty must be one of", "must not contain '/'",
-                 "add up to 1.3000", "not used with quota_cd ALL", "PARAM rule p: quota_cd is not used",
+                 "add up to 130, more than 100", "not used with quota_cd ALL", "PARAM rule p: quota_cd is not used",
                  "rule_class_cd 'TYPO'", "level_nbr 7, which has no LEVEL"):
         assert text in problems, (text, problems)
 
@@ -320,14 +320,15 @@ def test_shared_rules_and_the_most_specific_row_wins(raw, conn, settings):
     monthly = run_sampling(conn, settings, ("umcm", "t1", "mnt"), as_of=AS_OF)   # any case
     assert monthly["exclusions"] == {"LEAVE_OUT": 5} and monthly["run_ty"] == "MNT"
     assert _rows(raw, "SELECT r.Run_Ty, rr.Rule_ID, rr.Table_Nm, rr.Run_Ty FROM GOVT_RGLTRY_SamplingRunRule rr "
-                      "JOIN GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = rr.Smpl_Run_ID ORDER BY 1, 2") == \
+                      "JOIN GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = rr.Smpl_Run_ID WHERE rr.Rule_Class_Cd = "
+                      "'EXCLUSION' ORDER BY 1, 2") == \
         [("MNT", 1, "*", "*"), ("WKLY", 2, "T1", "WKLY")]                 # each run's rules, as they were
 
 
 def test_run_types_of_a_table_keep_their_own_samples_and_history(raw, conn, settings):
     _cases_table(raw.db, _cases("c", 10, "D"))
-    _config(raw.db, 3, priority_rank_sql_txt="case_id DESC")                               # T1 weekly
-    _config(raw.db, 3, table_nm="T1", run_ty="MNT", config_id=2, priority_rank_sql_txt="case_id DESC")
+    _config(raw.db, 3, order_by="case_id DESC")                               # T1 weekly
+    _config(raw.db, 3, table_nm="T1", run_ty="MNT", config_id=2, order_by="case_id DESC")
     _run(conn, settings, run_key="2026-08")
     monthly = run_sampling(conn, settings, ("UMCM", "T1", "MNT"), run_key="2026-08", as_of=AS_OF)
     assert monthly["retired_runs"] == 0                     # the same run_key of another run type is its own sample
@@ -349,7 +350,7 @@ def test_names_and_columns_in_any_case(raw, conn, settings):
     raw.db.execute('CREATE TABLE "Src_Mixed" ("CASE_ID" VARCHAR, "Code" VARCHAR, "ETL_IS_CURR_IND" VARCHAR)')
     raw.db.executemany('INSERT INTO "Src_Mixed" VALUES (?, ?, ?)', [(f"m{i}", "K", "Y") for i in range(5)])
     insert_config(raw.db, src_schema_nm="MAIN", src_table_nm="src_mixed", key_columns="Case_Id", exclusion_sql=None,
-                  scope_sql_txt="etl_is_curr_ind = 'Y'", target_cnt=2, priority_rank_sql_txt="case_id",
+                  scope_sql_txt="etl_is_curr_ind = 'Y'", target_cnt=2, order_by="case_id",
                   project_cd="umcm", run_ty="wkly", table_nm="t1", tgt_schema_nm="Main", tgt_table_nm="SMPL_MIXED")
     raw.db.execute('CREATE TABLE smpl_mixed ("case_id" VARCHAR, "CODE" VARCHAR, "Etl_Is_Curr_Ind" VARCHAR, '
                    '"Smpl_Run_Key" VARCHAR, "SMPL_ORDER_NBR" INTEGER)')

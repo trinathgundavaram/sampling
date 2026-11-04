@@ -143,26 +143,39 @@ def key(n=1, project=PROJECT, run_ty=RUN_TY) -> tuple:
     return (project, f"T{n}", run_ty)
 
 
+_CONFIGS = {}   # (id(db), config n) -> (project, table, run type) of the row insert_config wrote
+
+
 def _config_key(db, config_id) -> tuple:
     """(project, table, run type) of config n's row (the defaults when it has none yet)."""
-    row = db.execute("SELECT Project_Cd, Table_Nm, Run_Ty FROM GOVT_RGLTRY_SamplingConfig WHERE UPPER(Table_Nm) = ?",
-                     [f"T{config_id}"]).fetchone()
-    return tuple(row) if row else key(config_id)
+    return _CONFIGS.get((id(db), config_id)) or key(config_id)
 
 
-def insert_config(db, config_id=1, smpl_method_cd="RANKED", priority_rank_sql_txt="revision DESC", target_cnt=150,
+def _where(db, config_id) -> tuple:
+    """The WHERE of config n's row and its parameters."""
+    project, table, run_ty = _config_key(db, config_id)
+    return "UPPER(Project_Cd) = UPPER(?) AND UPPER(Table_Nm) = UPPER(?) AND UPPER(Run_Ty) = UPPER(?)", \
+        [project, table, run_ty]
+
+
+def insert_config(db, config_id=1, smpl_method_cd="RANKED", order_by="revision DESC", target_cnt=150,
                   rounding_cd="FLOOR", src_table_nm="case_source", key_columns="case_id",
                   exclusion_sql="auto_closed = 1", scope_sql_txt="pull_date = '{batch_id}'", project_cd=PROJECT,
                   run_ty=RUN_TY, table_nm=None, src_schema_nm=META_DB, active_ind=1, **more):
-    """One GOVT_RGLTRY_SamplingConfig row: the sample (project_cd, T<config_id>, run_ty). exclusion_sql (a
-    condition, the fixtures' shorthand) becomes an EXCLUSION rule named EXCLUDED (rule_id 9000 + config_id)."""
+    """One GOVT_RGLTRY_SamplingConfig row: the sample (project_cd, T<config_id>, run_ty), target_cnt cases (CNT;
+    target_ty / target_val in `more` for a percentage). The tests' shorthands (set_config): scope_sql_txt may be a
+    condition on the source (stored as SELECT * FROM the source WHERE it), exclusion_sql (a condition) becomes an
+    EXCLUSION rule named EXCLUDED (rule_id 9000 + config_id), order_by ('expr [DESC]') a last PRIORITY EXPRESSION
+    rule named ORDER (rule_id 8000 + config_id)."""
     db.execute("""
         INSERT INTO GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty, Active_Ind, Src_Schema_Nm, Src_Table_Nm,
-            Key_Columns_Txt, Scope_Sql_Txt, Target_Cnt, Smpl_Method_Cd, Priority_Rank_Sql_Txt, Rounding_Cd)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            Key_Columns_Txt, Target_Ty, Target_Val, Smpl_Method_Cd, Rounding_Cd)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'CNT', ?, ?, ?)""",
                [project_cd, table_nm or f"T{config_id}", run_ty, active_ind, src_schema_nm, src_table_nm,
-                key_columns, scope_sql_txt, target_cnt, smpl_method_cd, priority_rank_sql_txt, rounding_cd])
+                key_columns, target_cnt, smpl_method_cd, rounding_cd])
+    _CONFIGS[(id(db), config_id)] = (project_cd, table_nm or f"T{config_id}", run_ty)
     set_config(db, config_id, **more)
+    set_config(db, config_id, scope_sql_txt=scope_sql_txt, order_by=order_by)
     if exclusion_sql:
         insert_rule(db, "EXCLUSION", 9000 + config_id, "EXCLUDED", config_id, seq_nbr=0, rule_sql_txt=exclusion_sql)
 
@@ -173,8 +186,9 @@ _SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)
 def as_select(db, config_id, text, value=False):
     """A condition (or, value=True, an expression) on the config's source table as the SELECT a rule holds:
     the key columns of the rows where it is true (or each row's key columns and value)."""
+    where, params = _where(db, config_id)
     schema, table, keys = db.execute("SELECT Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt FROM "
-                                     "GOVT_RGLTRY_SamplingConfig WHERE UPPER(Table_Nm) = ?", [f"T{config_id}"]).fetchone()
+                                     f"GOVT_RGLTRY_SamplingConfig WHERE {where}", params).fetchone()
     if value:
         return f"SELECT {keys}, {text} AS v FROM {schema}.{table}"
     return f"SELECT {keys} FROM {schema}.{table} WHERE {text}"
@@ -203,27 +217,53 @@ def insert_rule(db, rule_class_cd, rule_id, rule_nm, config_id=1, seq_nbr=100, a
 
 def insert_strata(db, strata_id, config_id, level_nbr, name, expr, mix: dict, applies_to="*",
                   unlisted_cd="SHARE"):
-    """One LEVEL rule (rule_id 1000 * strata_id) and its BUCKET rules; mix = {bucket_name: fraction}
-    (FRACTION buckets) or {bucket_name: dict of bucket columns}."""
+    """One LEVEL rule (rule_id 1000 * strata_id) and its BUCKET rules; mix = {bucket_name: percentage}
+    (PCT buckets) or {bucket_name: dict of bucket columns}."""
     insert_rule(db, "LEVEL", 1000 * strata_id, name, config_id, seq_nbr=1, rule_sql_txt=expr, level_nbr=level_nbr,
                 parent_path_txt=applies_to, unlisted_cd=unlisted_cd)
     for i, (bucket, spec) in enumerate(mix.items()):
         insert_bucket(db, 1000 * strata_id + i + 1, level_nbr, bucket, config_id=config_id, seq_nbr=i + 1,
-                      **(spec if isinstance(spec, dict) else {"target_fraction_val": spec}))
+                      **(spec if isinstance(spec, dict) else {"quota_val": spec}))
 
 
 def insert_bucket(db, rule_id, level_nbr, bucket_name, config_id=1, parent_path_txt="*", seq_nbr=100,
-                  rule_sql_txt=None, quota_cd="FRACTION", target_fraction_val=None, max_cnt=None, active_ind=1):
+                  rule_sql_txt=None, quota_cd="PCT", quota_val=None, max_cnt=None, active_ind=1, **cols):
+    """One BUCKET rule; max_cnt n is the shorthand of max_ty CNT, max_val n."""
     if rule_sql_txt and rule_sql_txt.strip() == "1=1":
         rule_sql_txt = None   # every case: the bucket without rule_sql_txt takes the rest
+    if max_cnt is not None:
+        cols.update(max_ty="CNT", max_val=max_cnt)
     insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_nbr, active_ind, rule_sql_txt=rule_sql_txt,
-                level_nbr=level_nbr, parent_path_txt=parent_path_txt, quota_cd=quota_cd,
-                target_fraction_val=target_fraction_val, max_cnt=max_cnt)
+                level_nbr=level_nbr, parent_path_txt=parent_path_txt, quota_cd=quota_cd, quota_val=quota_val, **cols)
 
 
 def set_config(db, config_id=1, **cols):
+    """Update config n's row. Shorthands: scope_sql_txt a condition (-> SELECT * FROM the source WHERE it),
+    diversity_sql_txt an expression (-> SELECT the key columns and it), target_cnt n (-> CNT n),
+    diversity_cap_cnt n (-> CNT n), order_by 'expr [DESC]' (-> the ORDER rule; None removes it)."""
     for name, value in cols.items():
-        db.execute(f"UPDATE GOVT_RGLTRY_SamplingConfig SET {name} = ? WHERE UPPER(Table_Nm) = ?", [value, f"T{config_id}"])
+        if name == "order_by":
+            db.execute("DELETE FROM GOVT_RGLTRY_SamplingRule WHERE Rule_ID = ?", [8000 + config_id])
+            if value:
+                expr, _, direction = value.strip().partition(" ")
+                insert_rule(db, "PRIORITY", 8000 + config_id, "ORDER", config_id, seq_nbr=10000,
+                            rule_ty="EXPRESSION", rule_sql_txt=expr, sort_dir_cd=direction.strip().upper() or None)
+            continue
+        if name == "target_cnt":
+            set_config(db, config_id, target_ty="CNT", target_val=value)
+            continue
+        if name == "diversity_cap_cnt":
+            set_config(db, config_id, diversity_cap_ty=None if value is None else "CNT", diversity_cap_val=value)
+            continue
+        if name == "scope_sql_txt" and value and not _SELECT.match(value):
+            where, params = _where(db, config_id)
+            schema, table = db.execute("SELECT Src_Schema_Nm, Src_Table_Nm FROM GOVT_RGLTRY_SamplingConfig "
+                                       f"WHERE {where}", params).fetchone()
+            value = f"SELECT * FROM {schema}.{table} WHERE {value}"
+        if name == "diversity_sql_txt" and value and not _SELECT.match(value):
+            value = as_select(db, config_id, value, value=True)
+        where, params = _where(db, config_id)
+        db.execute(f"UPDATE GOVT_RGLTRY_SamplingConfig SET {name} = ? WHERE {where}", [value, *params])
 
 
 def build_source(db, n=1000, table="case_source"):
@@ -241,5 +281,5 @@ def build_source(db, n=1000, table="case_source"):
 def um_config(db, **kw):
     insert_config(db, **kw)
     insert_strata(db, 1, kw.get("config_id", 1), 0, "category", "category",
-                  {"Denied": 0.80, "Withdrawn": 0.10, "Dismissed": 0.02, "Approved": 0.08})
-    insert_strata(db, 2, kw.get("config_id", 1), 1, "area", "area", {"Area A": 0.13, "Area B": 0.08})
+                  {"Denied": 80, "Withdrawn": 10, "Dismissed": 2, "Approved": 8})
+    insert_strata(db, 2, kw.get("config_id", 1), 1, "area", "area", {"Area A": 13, "Area B": 8})

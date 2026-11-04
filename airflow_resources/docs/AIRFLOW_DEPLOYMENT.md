@@ -133,7 +133,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `project` / `table` / `run_type` | **The scope**: every active sample of the project (required), optionally only one table and / or one run type. Matched against `GOVT_RGLTRY_SamplingConfig` (`Project_Cd`, `Table_Nm`, `Run_Ty`) in any case |
 | `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
 | `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name. `{run_key}`, `{as_of_date}`, `{project_cd}`, `{table_nm}` and `{run_ty}` (the sample's own) are always available |
-| `extra_filters` | Optional SQL condition on the source table (or a list of them), ANDed to `Scope_Sql_Txt` for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
+| `extra_filters` | Optional SQL condition (or a list of them) on the rows `Scope_Sql_Txt` returns, for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `As_Of_Dt_Key`, `Smpl_Cycle_Dt_Key` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
 | `runs` | Optional list of scopes, e.g. `[{"name": "weekly", "run_type": "WKLY"}, {"name": "odag1_monthly", "table": "ODAG1", "run_type": "MNT", "run_params": {...}}]`. Each entry is layered over the Variable (an entry naming only a run type samples the Variable's project and table at that run type). Without `schedule_interval` in the entries: one task each, all on the Variable's schedule. With it: [timed runs](#timed-runs) |
@@ -144,7 +144,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried. A GATE rule not met (`GATE_NOT_MET`, the data is not ready) is retried the same way |
 | `retry_delay_minutes` | Minutes between retries (default 5). With GATE rules, `retries` × `retry_delay_minutes` is how long a run waits for the data |
 | `execution_timeout_minutes` / `dagrun_timeout_minutes` | Task limit (default 120) / DAG run limit (default 480) |
-| `fail_on_shortfall` | true = fail the task when a sample has fewer than `Target_Cnt` cases (default false: a warning) |
+| `fail_on_shortfall` | true = fail the task when a sample has fewer cases than its target (`Target_Val`, or the percentage resolved: the run row's `Target_Cnt`) (default false: a warning) |
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
 | `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
@@ -312,7 +312,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (115 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (127 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

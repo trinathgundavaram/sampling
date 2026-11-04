@@ -37,15 +37,22 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingConfig (
   Src_Schema_Nm          VARCHAR(128)   NOT NULL,          -- database of the source table or view, $env allowed
   Src_Table_Nm           VARCHAR(128)   NOT NULL,          -- the source table or view, $env allowed
   Key_Columns_Txt        VARCHAR(1000)  NOT NULL,          -- comma separated columns identifying one case
-  Scope_Sql_Txt          VARCHAR(8000),                    -- WHERE condition: this run's rows (default 1=1),
+  Scope_Sql_Txt          VARCHAR(8000),                    -- a SELECT returning the key columns of this run's
+                                                           -- cases (any joins), NULL = every source row,
                                                            -- {name} / $name parameters and $env allowed
-  Target_Cnt             INTEGER        DEFAULT 150 NOT NULL,   -- sample size
+  Target_Ty              VARCHAR(3)     DEFAULT 'CNT' NOT NULL,   -- CNT: Target_Val cases | PCT: Target_Val %
+                                                           -- of the candidates (after scope and exclusions)
+  Target_Val             DECIMAL(18,4)  NOT NULL,          -- the sample size: 150 (CNT) or 5 = 5 % (PCT)
+  Min_Target_Cnt         INTEGER,                          -- optional: at least this many (a PCT target)
+  Max_Target_Cnt         INTEGER,                          -- optional: at most this many (a PCT target)
   Smpl_Method_Cd         VARCHAR(20)    DEFAULT 'RANKED' NOT NULL,  -- RANKED | RANDOM | SYSTEMATIC
-  Priority_Rank_Sql_Txt  VARCHAR(8000),                    -- optional ORDER BY list after the PRIORITY rules
-  Rounding_Cd            VARCHAR(10)    DEFAULT 'FLOOR' NOT NULL,   -- FLOOR | ROUND | CEIL of each bucket's share
-  Diversity_Sql_Txt      VARCHAR(1000),                    -- optional SQL expression: picks rotate across its
-                                                           -- values (e.g. a code family) within each bucket
-  Diversity_Cap_Cnt      INTEGER,                          -- optional: at most this many picks per value
+  Rounding_Cd            VARCHAR(10)    DEFAULT 'FLOOR' NOT NULL,   -- FLOOR | ROUND | CEIL of a percentage
+  Diversity_Sql_Txt      VARCHAR(8000),                    -- optional SELECT returning the key columns and one
+                                                           -- value: picks rotate across the values (e.g. a code
+                                                           -- family) within each bucket
+  Diversity_Cap_Ty       VARCHAR(3),                       -- optional cap per value: CNT | PCT (of the target of
+                                                           -- the bucket being picked)
+  Diversity_Cap_Val      DECIMAL(18,4),                    -- the cap: 3 (CNT) or 10 = 10 % (PCT)
   Shortfall_Cd           VARCHAR(10)    DEFAULT 'TOPUP' NOT NULL,   -- TOPUP: fill a short sample from the other
                                                            -- candidates by priority | NONE: leave it short
   Keep_Excluded_Ind      SMALLINT       DEFAULT 1 NOT NULL,       -- 1 = store excluded rows with their reason too
@@ -97,8 +104,8 @@ UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
 --   BUCKET     a bucket of the level with the same Level_Nbr: Rule_Nm = the
 --              value or the bucket's name (no '/'), Rule_Sql_Txt = its SELECT
 --              (bucket levels only, first in Seq_Nbr order, NULL = the rest),
---              Parent_Path_Txt = under which parents this row applies, Quota_Cd,
---              Target_Fraction_Val, Max_Cnt.
+--              Parent_Path_Txt = under which parents this row applies, Quota_Cd
+--              + Quota_Val, Max_Ty + Max_Val.
 CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule (
   Rule_ID                INTEGER        NOT NULL,          -- unique in the table
   Project_Cd             VARCHAR(30)    NOT NULL,
@@ -112,9 +119,12 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule (
   Level_Nbr              INTEGER,                          -- LEVEL / BUCKET
   Parent_Path_Txt        VARCHAR(1000)  DEFAULT '*',       -- LEVEL / BUCKET: parent bucket path pattern
   Unlisted_Cd            VARCHAR(10),                      -- LEVEL: SHARE (default) | REMAINDER | SKIP
-  Quota_Cd               VARCHAR(10),                      -- BUCKET: FRACTION (default) | ALL | REMAINDER
-  Target_Fraction_Val    FLOAT,                            -- BUCKET FRACTION: 0 to 1 of the parent's target
-  Max_Cnt                INTEGER,                          -- BUCKET: optional cap
+  Quota_Cd               VARCHAR(10),                      -- BUCKET: PCT (default) | CNT | ALL | REMAINDER
+  Quota_Val              DECIMAL(18,4),                    -- BUCKET PCT: 0 to 100 % of the parent's target |
+                                                           -- CNT: that many cases
+  Max_Ty                 VARCHAR(3),                       -- BUCKET: optional cap, CNT | PCT (of the bucket's
+                                                           -- candidates)
+  Max_Val                DECIMAL(18,4),                    -- the cap: 20 (CNT) or 50 = 50 % (PCT)
   Sort_Dir_Cd            VARCHAR(4),                       -- PRIORITY EXPRESSION: ASC (default) | DESC
   Lookback_Days          INTEGER,                          -- PRIOR_SELECTION / PRIOR_CANDIDATE
   History_Scope_Cd       VARCHAR(10),                      -- SAMPLE (default) | TABLE | PROJECT
@@ -166,12 +176,16 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRun (
   Src_Table_Nm           VARCHAR(128),
   Key_Columns_Txt        VARCHAR(1000),
   Scope_Sql_Txt          VARCHAR(8000),
-  Target_Cnt             INTEGER,
+  Target_Ty              VARCHAR(3),
+  Target_Val             DECIMAL(18,4),
+  Min_Target_Cnt         INTEGER,
+  Max_Target_Cnt         INTEGER,
+  Target_Cnt             INTEGER,                          -- the number of cases the run targeted
   Smpl_Method_Cd         VARCHAR(20),
-  Priority_Rank_Sql_Txt  VARCHAR(8000),
   Rounding_Cd            VARCHAR(10),
-  Diversity_Sql_Txt      VARCHAR(1000),
-  Diversity_Cap_Cnt      INTEGER,
+  Diversity_Sql_Txt      VARCHAR(8000),
+  Diversity_Cap_Ty       VARCHAR(3),
+  Diversity_Cap_Val      DECIMAL(18,4),
   Shortfall_Cd           VARCHAR(10),
   Keep_Excluded_Ind      SMALLINT,
   Tgt_Schema_Nm          VARCHAR(128),
@@ -200,8 +214,9 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRunRule (
   Parent_Path_Txt        VARCHAR(1000),
   Unlisted_Cd            VARCHAR(10),
   Quota_Cd               VARCHAR(10),
-  Target_Fraction_Val    FLOAT,
-  Max_Cnt                INTEGER,
+  Quota_Val              DECIMAL(18,4),
+  Max_Ty                 VARCHAR(3),
+  Max_Val                DECIMAL(18,4),
   Sort_Dir_Cd            VARCHAR(4),
   Lookback_Days          INTEGER,
   History_Scope_Cd       VARCHAR(10),

@@ -87,7 +87,8 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["smpl_run_id"], 1, None, "UMCM", "T1", "WKLY",
                     "case_source", 150, "tester")]
     rules = _rows(raw, "SELECT Rule_ID, Rule_Class_Cd, Rule_Nm FROM GOVT_RGLTRY_SamplingRunRule ORDER BY Rule_ID")
-    assert len(rules) == 9 and rules[0] == (1000, "LEVEL", "category") and rules[-1] == (9001, "EXCLUSION", "EXCLUDED")
+    assert len(rules) == 10 and rules[0] == (1000, "LEVEL", "category") and rules[-1] == (9001, "EXCLUSION", "EXCLUDED")
+    assert (8001, "PRIORITY", "ORDER") in rules
     report = json.loads(_rows(raw, "SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])
     assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
     assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
@@ -112,7 +113,7 @@ def test_rerun_retires_the_earlier_run_of_the_same_run_key(raw, conn, settings):
 
 def test_random_reproducible_with_stored_seed(raw, conn, settings):
     build_source(raw.db)
-    um_config(raw.db, smpl_method_cd="RANDOM", priority_rank_sql_txt=None)
+    um_config(raw.db, smpl_method_cd="RANDOM", order_by=None)
     first = _run(conn, settings)
     assert first["seed"] is not None
     stored = _rows(raw, "SELECT Random_Seed_Nbr FROM GOVT_RGLTRY_SamplingRun")[0][0]
@@ -126,9 +127,9 @@ def test_random_reproducible_with_stored_seed(raw, conn, settings):
 
 def test_systematic_needs_priority_and_records_config_error(raw, conn, settings):
     build_source(raw.db)
-    um_config(raw.db, smpl_method_cd="SYSTEMATIC", priority_rank_sql_txt=None)
+    um_config(raw.db, smpl_method_cd="SYSTEMATIC", order_by=None)
     out = _run(conn, settings)
-    assert out["status"] == "ERROR" and out["error_kind"] == "config" and "priority_rank_sql_txt" in out["error"]
+    assert out["status"] == "ERROR" and out["error_kind"] == "config" and "needs PRIORITY rules" in out["error"]
     assert _rows(raw, "SELECT Run_Stat, Error_Ty, Curr_Ind FROM GOVT_RGLTRY_SamplingRun") == \
         [("ERROR", "CONFIG_ERROR", 0)]
 
@@ -136,7 +137,7 @@ def test_systematic_needs_priority_and_records_config_error(raw, conn, settings)
 def test_null_exclusion_column_keeps_the_row(raw, conn, settings):
     raw.db.execute("CREATE TABLE u (case_id VARCHAR, flag VARCHAR)")
     raw.db.execute("INSERT INTO u VALUES ('a', 'Y'), ('b', NULL), ('c', 'N')")
-    insert_config(raw.db, src_table_nm="u", exclusion_sql="flag = 'Y'", scope_sql_txt=None, priority_rank_sql_txt="case_id",
+    insert_config(raw.db, src_table_nm="u", exclusion_sql="flag = 'Y'", scope_sql_txt=None, order_by="case_id",
                   target_cnt=10)
     out = _run(conn, settings)
     assert out["candidates"] == 2 and out["excluded"] == 1 and out["shortfall"] == 8
@@ -146,9 +147,9 @@ def test_bucket_values_match_without_case_or_trailing_blanks(raw, conn, settings
     raw.db.execute("CREATE TABLE u (case_id VARCHAR, cat VARCHAR)")
     raw.db.executemany("INSERT INTO u VALUES (?, ?)", [(f"d{i}", "DENIED  ") for i in range(50)]
                        + [(f"a{i}", "approved") for i in range(50)])
-    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, priority_rank_sql_txt="case_id",
+    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, order_by="case_id",
                   target_cnt=10)
-    insert_strata(raw.db, 1, 1, 0, "cat", "cat", {"Denied": 0.8, "Approved": 0.2})
+    insert_strata(raw.db, 1, 1, 0, "cat", "cat", {"Denied": 80, "Approved": 20})
     out = _run(conn, settings)
     assert {k: v["selected"] for k, v in out["by_stratum"].items()} == {"Approved": 2, "Denied": 8}
 
@@ -156,7 +157,7 @@ def test_bucket_values_match_without_case_or_trailing_blanks(raw, conn, settings
 def test_pull_failure_rolls_nothing_in_and_logs(raw, conn, settings):
     build_source(raw.db)
     um_config(raw.db)
-    raw.fail_on = "FROM main.case_source WHERE (pull_date = '2026-08-01')"
+    raw.fail_on = "SELECT case_id FROM (SELECT * FROM main.case_source WHERE pull_date = '2026-08-01')"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PULL_FAILURE" and out["error_kind"] == "technical"
     assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0
@@ -175,7 +176,7 @@ def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
     build_source(raw.db)
-    um_config(raw.db, smpl_method_cd="SYSTEMATIC", priority_rank_sql_txt=None)
+    um_config(raw.db, smpl_method_cd="SYSTEMATIC", order_by=None)
     _run(conn, settings)
     _run(conn, settings)
     assert _rows(raw, "SELECT COUNT(*), MIN(Run_Stat), MAX(Run_Stat) FROM GOVT_RGLTRY_SamplingRun")[0] == (2, "ERROR", "ERROR")
@@ -237,15 +238,19 @@ def test_validate_with_sql_check(raw, conn, settings):
     assert problems["T1"] == [] and "SQL check failed" in problems["T2"][0]
 
 
-def test_queries_resolve_env_and_tie_break_on_keys():
+def test_queries_resolve_env_and_read_the_scope_select():
     s = Settings(meta_db="M", environment="PROD")
-    sample = Sample(config={"src_schema_nm": "UMCM_$ENV_T", "src_table_nm": "u", "key_columns_txt": "a, b",
-                            "scope_sql_txt": "db = '$env'",
-                            "smpl_method_cd": "RANKED", "priority_rank_sql_txt": "x DESC"})
-    q = build_queries(sample, s, {})
-    assert q["pull"] == "SELECT a, b, ROW_NUMBER() OVER (ORDER BY x DESC, a, b) AS smp_base_rank " \
-                        "FROM UMCM_T.u WHERE (db = '')"
-    assert "count" not in q
+    config = {"src_schema_nm": "UMCM_$ENV_T", "src_table_nm": "u", "key_columns_txt": "a, b",
+              "scope_sql_txt": "SELECT u.* FROM UMCM_$ENV_T.u JOIN UMCM_$ENV_T.b ON b.a = u.a WHERE db = '$env'",
+              "smpl_method_cd": "RANKED", "tgt_schema_nm": "OUT", "tgt_table_nm": "s"}
+    q = build_queries(Sample(config=config), s, {"extra_filters": "b = 1"})
+    assert q["pull"] == "SELECT a, b FROM (SELECT u.* FROM UMCM_T.u JOIN UMCM_T.b ON b.a = u.a WHERE db = '') " \
+                        "smp_scope WHERE (b = 1)"
+    assert q["output"] == "SELECT * FROM (SELECT u.* FROM UMCM_T.u JOIN UMCM_T.b ON b.a = u.a WHERE db = '') " \
+                          "smp_scope WHERE (b = 1)"
+    # no scope: every row of the source
+    q = build_queries(Sample(config={**config, "scope_sql_txt": None}), s, {})
+    assert q["pull"] == "SELECT a, b FROM (SELECT * FROM UMCM_T.u) smp_scope WHERE (1=1)"
     assert Settings(meta_db="M", environment="DEV").resolve_env("UMCM_$ENV_STG") == "UMCM_DEV_STG"
 
 

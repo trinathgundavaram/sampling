@@ -208,7 +208,7 @@ def test_a_final_sample_is_not_replaced_by_the_dag(monkeypatch, variable, raw, s
 def test_technical_problem_is_retried(monkeypatch, variable, raw):
     build_source(raw.db)
     um_config(raw.db)
-    raw.fail_on = "FROM main.case_source WHERE (pull_date"
+    raw.fail_on = "SELECT case_id FROM (SELECT * FROM main.case_source WHERE pull_date"
     with pytest.raises(RuntimeError):
         _run_task(monkeypatch, raw)
 

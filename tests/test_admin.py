@@ -17,8 +17,8 @@ def _sample(db, target=4, **kw):
     db.executemany("INSERT INTO u VALUES (?, ?, ?)", [(f"d{i:02d}", "Denied", "X") for i in range(10)]
                    + [(f"w{i:02d}", "Withdrawn", "Y") for i in range(5)])
     kw.setdefault("exclusion_sql", None)
-    insert_config(db, src_table_nm="u", scope_sql_txt=None, target_cnt=target, priority_rank_sql_txt="case_id DESC", **kw)
-    insert_strata(db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
+    insert_config(db, src_table_nm="u", scope_sql_txt=None, target_cnt=target, order_by="case_id DESC", **kw)
+    insert_strata(db, 1, 1, 0, "disp", "disp", {"Denied": 50, "Withdrawn": 50})
 
 
 def _rows(raw, sql):
@@ -83,7 +83,7 @@ def test_shared_batch_rules_use_each_samples_project_table_and_run_type(raw, con
     """One PARAM and one GATE row for the whole project (Table_Nm / Run_Ty '*'): each sample finds its own batch."""
     _sample(raw.db)
     insert_config(raw.db, config_id=2, table_nm="T1", run_ty="MNT", src_table_nm="u", exclusion_sql=None,
-                  scope_sql_txt=None, target_cnt=2, priority_rank_sql_txt="case_id")   # T1 monthly
+                  scope_sql_txt=None, target_cnt=2, order_by="case_id")   # T1 monthly
     raw.db.execute("CREATE TABLE Batch_Control_Example (Project_Cd VARCHAR, Table_Nm VARCHAR, Run_Ty VARCHAR, "
                    "Btch_ID VARCHAR, Batch_Close_Ind INTEGER)")
     raw.db.executemany("INSERT INTO Batch_Control_Example VALUES ('UMCM', 'T1', ?, ?, ?)",

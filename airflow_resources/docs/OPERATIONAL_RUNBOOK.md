@@ -23,8 +23,8 @@ How to deploy is in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md). What is stil
 
 ## 1. What sampling does (business view)
 
-Every cycle (a day, a week, a month) an audit team needs a fixed number of cases (`Target_Cnt`, e.g. 150) drawn
-from what was loaded, with:
+Every cycle (a day, a week, a month) an audit team needs a number of cases (`Target_Val`: e.g. 150 cases, or 5 % of
+the cases there are) drawn from what was loaded, with:
 
 - **exclusions**: cases that must never be audited (auto-approvals, no prior authorisation needed, a service
   type, a case already audited recently);
@@ -61,13 +61,14 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 1. Parameters | Each PARAM rule runs in `Seq_Nbr` order; the first column of the first row becomes `{Rule_Nm}`. Values passed with the run win. `{as_of_date}`, `{project_cd}`, `{table_nm}`, `{run_ty}` are always there. The `run_key` template is filled (`{batch_id}` → `B42`). The run's `extra_filters` are kept with the parameters | PARAM rules, the run's `run_params`, `extra_filters`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
 | 2. Run row | `GOVT_RGLTRY_SamplingRun` row, `Run_Stat` `RUNNING`, with the configuration it uses, its `Config_Hash`, and its rules in `GOVT_RGLTRY_SamplingRunRule`. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
 | 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
-| 3. Check | Every rule row is checked (classes, types, fractions, names, columns a class does not use) | both configuration tables | `CONFIG_ERROR` (not retried) |
-| 4. Pull | One `SELECT` of the source's key columns in `Scope_Sql_Txt` AND the run's `extra_filters` | `GOVT_RGLTRY_SamplingConfig`, `extra_filters` | `PULL_FAILURE` |
+| 3. Check | Every row is checked (classes, types, numbers and percentages, names, columns a class does not use, every SQL a `SELECT`) | both configuration tables | `CONFIG_ERROR` (not retried) |
+| 4. Pull | The key columns of the rows `Scope_Sql_Txt` returns (NULL: every source row), the run's `extra_filters` applied to them | `GOVT_RGLTRY_SamplingConfig`, `extra_filters` | `PULL_FAILURE` |
 | 4a. Rule queries | Each EXCLUSION / PRIORITY / LEVEL / BUCKET rule's `SELECT` runs on its own; the pulled cases it returns (by `Key_Columns_Txt`) match it, or get its value. Cases it returns outside the scope are ignored | the rules | `QUERY_RULE_FAILURE` (technical, retried); no key columns in the result: `CONFIG_ERROR` |
 | 5. Exclude | A row matching any EXCLUSION rule is not a candidate; the first matching rule (`Seq_Nbr`) is its reason. History rules read earlier runs | EXCLUSION rules | |
-| 6. Order | PRIORITY rule 1, then 2, … then `Priority_Rank_Sql_Txt`, then the key columns | PRIORITY rules, `Priority_Rank_Sql_Txt` | |
-| 7. Stratify | Level by level, each parent's target is split between its buckets (FRACTION, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
-| 8. Select | Per leaf bucket: RANKED (first in order), RANDOM (seeded shuffle) or SYSTEMATIC (every k-th); rotating across `Diversity_Sql_Txt` values | `Smpl_Method_Cd`, `Diversity_Sql_Txt`, `Diversity_Cap_Cnt` | `SELECT_FAILURE` |
+| 6. Target | `Target_Ty` `CNT`: `Target_Val` cases; `PCT`: `Target_Val` % of the candidates (rounded by `Rounding_Cd`), within `Min_Target_Cnt` / `Max_Target_Cnt` | `GOVT_RGLTRY_SamplingConfig` | |
+| 6a. Order | PRIORITY rule 1, then 2, … then the key columns | PRIORITY rules | |
+| 7. Stratify | Level by level, each parent's target is split between its buckets (CNT, then PCT, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
+| 8. Select | Per leaf bucket: RANKED (first in order), RANDOM (seeded shuffle) or SYSTEMATIC (every k-th); rotating across `Diversity_Sql_Txt` values | `Smpl_Method_Cd`, `Diversity_Sql_Txt`, `Diversity_Cap_Ty` / `_Val` | `SELECT_FAILURE` |
 | 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap still holds) | `Shortfall_Cd` | |
 | 10. Target table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-target-table)) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
 | 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts (`Run_Rpt_Txt`) | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
@@ -110,9 +111,13 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
   table (e.g. 1–99 for one sample, 101–199 for the next).
 - **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the target table's columns are
   matched without regard to case (`umcm` = `UMCM`).
-- **SQL text**: every rule's `Rule_Sql_Txt` (PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET) is a whole `SELECT`
-  (4.2), and the config's `Scope_Sql_Txt` a condition on the source row. Quotes are doubled inside an `INSERT`
-  literal.
+- **SQL text**: every SQL column is a whole `SELECT`: every rule's `Rule_Sql_Txt` (PARAM, GATE, EXCLUSION,
+  PRIORITY, LEVEL, BUCKET, 4.2), and the config's `Scope_Sql_Txt` (the run's source rows) and `Diversity_Sql_Txt`
+  (the key columns and a value) (4.1). Only `extra_filters`, given when a run is triggered, is a condition. Quotes are
+  doubled inside an `INSERT` literal.
+- **A number or a percentage**: the sample size (`Target_Ty` + `Target_Val`), a bucket's quota (`Quota_Cd` `CNT` /
+  `PCT` + `Quota_Val`), a bucket's cap (`Max_Ty` + `Max_Val`) and the diversity cap (`Diversity_Cap_Ty` +
+  `Diversity_Cap_Val`) are each `CNT` (that many cases) or `PCT` (that percentage, 0–100: `5` = 5 %).
 - **`$env`** anywhere is replaced by the environment (`DEV` → `dev` ...; UAT / PROD → empty): `EXPORT_FEED_$ENV_T`.
 - **`{name}` / `$name`** is replaced by a run parameter, quotes doubled; you write the quotes:
   `BTCH_ID = '{batch_id}'`. A token with no value is a configuration error. `{project_cd}`, `{table_nm}` and
@@ -140,13 +145,14 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 | `Smpl_Desc` | Optional description |
 | `Src_Schema_Nm`, `Src_Table_Nm` | The source table (or view) to sample from: its database and its name, each a plain name, `$env` allowed |
 | `Key_Columns_Txt` | Comma separated columns that identify one case. Must be unique within the scope (checked every run) |
-| `Scope_Sql_Txt` | WHERE condition: this run's rows (default `1=1`) |
-| `Target_Cnt` | Sample size |
+| `Scope_Sql_Txt` | A `SELECT` of this run's source rows (any joins), e.g. `SELECT * FROM EXPORT_FEED_$ENV_T.ODAG1 WHERE BTCH_ID = '{batch_id}' AND ETL_IS_CURR_IND = 'Y'`. It must return the key columns, one row per case; the target table gets the rows (and columns) it returns. NULL = every row of the source |
+| `Target_Ty` | `CNT` (default): `Target_Val` cases / `PCT`: `Target_Val` % of the candidates (the cases left after the scope and the exclusions) |
+| `Target_Val` | The sample size: `150` (CNT) or `5` = 5 % (PCT) |
+| `Min_Target_Cnt`, `Max_Target_Cnt` | Optional, PCT only: at least / at most this many cases (5 %, but at least 30 and at most 200). A minimum above the candidates leaves the sample short (`Shortfall_Cd`) |
 | `Smpl_Method_Cd` | `RANKED` / `RANDOM` / `SYSTEMATIC` ([6.1](#61-sampling-methods)) |
-| `Priority_Rank_Sql_Txt` | Optional ORDER BY list after the PRIORITY rules, e.g. `AUTHZN_REQ_DT_TM DESC` |
-| `Rounding_Cd` | `FLOOR` / `ROUND` / `CEIL` of each bucket's share (default `FLOOR`) |
-| `Diversity_Sql_Txt` | Optional expression: within each bucket, picks rotate across its values |
-| `Diversity_Cap_Cnt` | Optional: at most this many picks per `Diversity_Sql_Txt` value in the whole sample |
+| `Rounding_Cd` | `FLOOR` / `ROUND` / `CEIL` of every percentage: the target, each bucket's share, a cap (default `FLOOR`) |
+| `Diversity_Sql_Txt` | Optional `SELECT` of the key columns and one value (any joins, e.g. a code family from a reference table): within each bucket, picks rotate across the values (cases it does not return form one group, `NULL`) |
+| `Diversity_Cap_Ty`, `Diversity_Cap_Val` | Optional: at most this many picks per value – `CNT` `3`, or `PCT` `10` = 10 % of the target of the bucket being picked (of the whole sample's target during the top-up), at least 1 |
 | `Shortfall_Cd` | `TOPUP` (default) / `NONE` |
 | `Keep_Excluded_Ind` | 1 (default) = store excluded rows with their reason too |
 | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | Optional: the target table's database and name (both or neither), `$env` allowed, [4.3](#43-the-target-table) |
@@ -175,9 +181,9 @@ The others, by class:
 | `Level_Nbr` | | | | | 0, 1, … | its level |
 | `Parent_Path_Txt` | | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) |
 | `Unlisted_Cd` | | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | |
-| `Quota_Cd` | | | | | | `FRACTION` (default) / `ALL` / `REMAINDER` |
-| `Target_Fraction_Val` | | | | | | FRACTION: 0 to 1 |
-| `Max_Cnt` | | | | | | optional cap |
+| `Quota_Cd` | | | | | | `PCT` (default) / `CNT` / `ALL` / `REMAINDER` |
+| `Quota_Val` | | | | | | PCT: 0 to 100 (% of the parent's target); CNT: a number of cases |
+| `Max_Ty`, `Max_Val` | | | | | | optional cap: `CNT` a number, or `PCT` a % of the bucket's candidates |
 | `Sort_Dir_Cd` | | | | EXPRESSION: `ASC` (default) / `DESC` | | |
 | `Lookback_Days`, `History_Scope_Cd` | | | PRIOR_SELECTION | PRIOR_* | | |
 
@@ -192,8 +198,9 @@ Run_Ty = '{run_ty}' AND <closed>`.
 **Run-time filters (`extra_filters`)** – for a source table holding several loads, batches or SCD2 versions of a
 case, the run can be given a SQL condition (the Variable, a `runs` entry, a trigger, or `--filter "SQL"` locally),
 e.g. `BTCH_ID = 'B42' AND ETL_IS_CURR_IND = 'Y'`, or an SCD2 version valid on the
-run date: `DATE '{as_of_date}' BETWEEN EFF_DT AND END_DT`. Each layer's (and each `--filter`'s) condition is ANDed
-to `Scope_Sql_Txt`, so the pull and the target table read the same rows; it is kept in `Run_Parm_Txt`,
+run date: `DATE '{as_of_date}' BETWEEN EFF_DT AND END_DT`. The conditions (each layer's, each `--filter`'s, ANDed)
+apply to the rows `Scope_Sql_Txt` returns, so the pull and the target table read the same rows; they are kept in
+`Run_Parm_Txt`,
 so a later case replacement reads it too. It is checked like any configured SQL (only reading, no `;`, no `--`).
 When the filters leave two rows with the same key columns, the run stops with "key_columns_txt do not identify a
 case uniquely": add the filter that picks one version. (A rule's own `SELECT` reads its tables itself: give a value
@@ -206,7 +213,7 @@ Nothing is pulled or written but the run row. Example – sample only a closed b
 
 **Every selection rule is a SQL statement**: a whole `SELECT` returning the key columns of the cases it matches
 (same column names, any case; joins, subqueries, `WITH`, any table – anything that reads). Each runs on its own
-after the pull; only the cases in the run's scope (`Scope_Sql_Txt` and `extra_filters`) count, so a rule need not
+after the pull; only the cases in the run's scope (`Scope_Sql_Txt`, `extra_filters`) count, so a rule need not
 repeat them (a filter on the batch keeps it fast). It may use `$env`, `{batch_id}` and the other run parameters. It
 must be a `SELECT` that only reads (checked like a PARAM rule); `validate --check-sql` EXPLAINs every one. Where a
 value is needed (a PRIORITY `EXPRESSION`, a LEVEL by value) the `SELECT` returns one more column, the value, and each
@@ -224,15 +231,17 @@ reason; each rule's count is in the run's `Run_Rpt_Txt`.
 and a value, the cases ordered by it (`Sort_Dir_Cd`; cases it does not return, or NULL, last). `PRIOR_CANDIDATE`:
 considered by an earlier run but never selected, first (carry-over). `PRIOR_SELECTION`: selected earlier, last.
 Both read `History_Scope_Cd` like the exclusion. RANKED takes the first ones, SYSTEMATIC steps through the order,
-RANDOM ignores it.
+RANDOM ignores it. To order by a column (newest first, say), use an `EXPRESSION` rule: `SELECT <keys>,
+AUTHZN_REQ_DT_TM FROM <source> WHERE <the current version>` with `Sort_Dir_Cd` `DESC`. After the PRIORITY rules,
+ties are broken by the key columns.
 
-Example – 21% of the ODAG1 weekly sample Behavioral Health, BH meaning a code on a list and a BH provider:
+Example – 21 % of the ODAG1 weekly sample Behavioral Health, BH meaning a code on a list and a BH provider:
 
 ```sql
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Unlisted_Cd)
 VALUES (241, 'UMCM', 'ODAG1', 'WKLY', 'LEVEL', 1, 'program', 1, '*', 'SKIP');
-INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Target_Fraction_Val, Rule_Sql_Txt)
-VALUES (242, 'UMCM', 'ODAG1', 'WKLY', 'BUCKET', 1, 'Behavioral Health', 1, '*', 'FRACTION', 0.21,
+INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Quota_Val, Rule_Sql_Txt)
+VALUES (242, 'UMCM', 'ODAG1', 'WKLY', 'BUCKET', 1, 'Behavioral Health', 1, '*', 'PCT', 21,
         'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY
          FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 a
          JOIN REF_$ENV.BH_PROC_CODES c ON c.PROC_CD = a.PROC_CD AND c.ACT_IND = 1
@@ -252,21 +261,25 @@ BUCKET rows' `SELECT`s, tried in `Seq_Nbr` order, the first that returned the ca
 `Rule_Sql_Txt` takes every case left (only one, and last); cases matching none are bucket `OTHER`.
 `Parent_Path_Txt`: the parents this level splits – `*` = all, `Denied` = only within Denied, `Denied/*` … (`*` and
 `?` wildcards, not case specific); under other parents the level is skipped. `Unlisted_Cd`: what happens to a value
-with no BUCKET row, or to `OTHER` – `SHARE` = share `1 − Σ fractions` equally, `REMAINDER` = as `Quota_Cd`
+with no BUCKET row, or to `OTHER` – `SHARE` = share what the PCT and CNT buckets leave equally, `REMAINDER` = as `Quota_Cd`
 REMAINDER, `SKIP` = never selected. No LEVEL rules = no stratification: the whole pool is one bucket (`ALL`).
 
 **BUCKET** – a bucket of the LEVEL with the same `Level_Nbr`. `Parent_Path_Txt`: when several patterns match a
 parent, the most specific wins (fewest wildcards, then longest), so one level can have a different mix per parent.
 How a parent's target T is split:
 
-1. FRACTION buckets: `round(T × fraction)`; unlisted SHARE buckets: `round(T × (1 − Σ fractions) / n)`.
+1. CNT buckets: `Quota_Val` cases each, then PCT buckets: `round(T × Quota_Val / 100)`, both in `Seq_Nbr` order
+   and never more than what is left of T: when the quotas add up to more than T (fixed numbers under a small
+   percentage target, say), the later buckets are cut and the run report's `notes` says which. Unlisted SHARE
+   buckets: `round((T × (1 − Σ PCT / 100) − Σ CNT) / n)`.
 2. ALL buckets share what is left of T after step 1, equally, each up to what it has.
-3. REMAINDER buckets share T minus what was *actually* selected in 1 and 2 – so a short FRACTION bucket's unused
+3. REMAINDER buckets share T minus what was *actually* selected in 1 and 2 – so a short PCT or CNT bucket's unused
    quota flows to them.
 4. "Share equally" is water-filled: a bucket with fewer cases than its share keeps all it has and the others share
    the rest again. 20 between buckets of 2, 50 and 50 cases → 2, 9, 9.
+5. `Max_Ty` / `Max_Val` caps a bucket at every step: `CNT` a number, `PCT` a percentage of the bucket's candidates.
 
-A level's fractions under one `Parent_Path_Txt` add up to 1 at most.
+A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at most.
 
 ### 4.3 The target table
 
@@ -301,7 +314,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt`, `Error_Detail_Txt`, `Run_Rpt_Txt`, `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
+| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt`, `Error_Detail_Txt`, `Run_Rpt_Txt`, `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
@@ -315,8 +328,8 @@ two run types is two samples.
 the configuration and rules as loaded, without who changed a row and when: equal hashes = the same rules.
 
 **`Run_Rpt_Txt`** (JSON, VARCHAR(16000)): `{"exclusions": {Rule_Nm: count}, "buckets": {path: {"candidates",
-"target", "selected"}}}` – every bucket node, not only the leaves (`Denied` and `Denied/Part B`). A failed run has
-none. When the buckets do not fit, they are left out of it (the selections' `Stratum_Path_Txt` has them).
+"target", "selected"}}, "notes": [...]}` – every bucket node, not only the leaves (`Denied` and `Denied/Part B`);
+`notes` (only when there are some) names each quota cut to fit its parent's target. A failed run has none. When the buckets do not fit, they are left out of it (the selections' `Stratum_Path_Txt` has them).
 
 **`Selection_Stat`**: `SELECTED` for the cases the run picked; `REPLACED` for a case taken out later
 (`Selected_Ind` back to 0) and `REPLACEMENT` for the case put in for it (`Selected_Ind` 1, the same
@@ -334,9 +347,9 @@ and counts per bucket, are a `GROUP BY` on it.
 ### 6.1 Sampling methods
 | Code | Meaning | Needs |
 |---|---|---|
-| `RANKED` | The first n of each bucket in priority order | PRIORITY rules or `Priority_Rank_Sql_Txt` |
+| `RANKED` | The first n of each bucket in priority order | PRIORITY rules |
 | `RANDOM` | A seeded shuffle of each bucket (seed on the run row; rerun with `--seed` to reproduce) | – |
-| `SYSTEMATIC` | Seeded start, then every k-th in priority order. No `Diversity_Sql_Txt` | PRIORITY rules or `Priority_Rank_Sql_Txt` |
+| `SYSTEMATIC` | Seeded start, then every k-th in priority order. No `Diversity_Sql_Txt` | PRIORITY rules |
 
 ### 6.2 Rule classes and their values
 | Column | Values |
@@ -346,7 +359,8 @@ and counts per bucket, are a `GROUP BY` on it.
 | `Rule_Ty` (EXCLUSION) | `QUERY` (default), `PRIOR_SELECTION` |
 | `Rule_Ty` (PRIORITY) | `QUERY` (default), `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
 | `Rule_Ty` (BUCKET) | `QUERY` (default) |
-| `Quota_Cd` (BUCKET) | `FRACTION`, `ALL`, `REMAINDER` |
+| `Quota_Cd` (BUCKET) | `PCT` (default), `CNT`, `ALL`, `REMAINDER` |
+| `Target_Ty`, `Max_Ty`, `Diversity_Cap_Ty` | `CNT` (a number of cases), `PCT` (a percentage, 0–100) |
 | `Unlisted_Cd` (LEVEL) | `SHARE`, `REMAINDER`, `SKIP` |
 | `History_Scope_Cd` | `SAMPLE` (default), `TABLE`, `PROJECT` |
 | `GOVT_RGLTRY_SamplingConfig.Shortfall_Cd` | `TOPUP`, `NONE` |
@@ -373,7 +387,7 @@ and counts per bucket, are a `GROUP BY` on it.
 Some source columns are dates stored as `VARCHAR(10)` (ODAG1 `DETRMTN_NOTFTN_DT`: its format is Q6 of
 OPEN_ITEMS.md). Compare them as dates, with the format they are written in:
 
-| Stored as | Condition (in a rule's `WHERE`, `Scope_Sql_Txt`, `extra_filters`) |
+| Stored as | Condition (in the `WHERE` of a rule's or the scope's `SELECT`, `extra_filters`) |
 |---|---|
 | `2026-08-07` | `CAST(col AS DATE FORMAT 'YYYY-MM-DD') = DATE '{as_of_date}'` |
 | `08/07/2026` | `CAST(col AS DATE FORMAT 'MM/DD/YYYY') = DATE '{as_of_date}'` |
@@ -398,7 +412,7 @@ section D.
 | Requirement | Rows |
 |---|---|
 | Sample only after the batch is closed | GATE: `SELECT 1 FROM <control table> WHERE … = '{batch_id}' AND <closed>` |
-| Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `Scope_Sql_Txt` `BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
+| Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `Scope_Sql_Txt` `SELECT * FROM <source> WHERE BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
 | One batch lookup for every table and run type | PARAM and GATE rows with `Table_Nm` / `Run_Ty` `*` whose SQL uses `{project_cd}`, `{table_nm}`, `{run_ty}` |
 | A daily, a weekly and a monthly sample of one table | three config rows (`Run_Ty` `DLY`, `WKLY`, `MNT`); shared rules `Run_Ty` `*`, the differences a row per run type; Variable `runs` entries with their own `schedule_interval` |
 | The monthly sample has its own mix | its LEVEL / BUCKET rows with `Run_Ty` `MNT` (the same `Rule_Nm` replaces the shared row) |
@@ -407,12 +421,14 @@ section D.
 | … nor a case a weekly sample of the table took | the same, `History_Scope_Cd` `TABLE` |
 | Last week's unselected cases first | PRIORITY, `PRIOR_CANDIDATE`, `Seq_Nbr` 1 |
 | Revisions first, then inpatient | PRIORITY rules in that order, each a `SELECT` of its cases |
-| 80 % denials, 10 % withdrawals | LEVEL 0 with `Rule_Sql_Txt` `SELECT <keys>, <disposition column> FROM <source>`, FRACTION BUCKETs named by the values |
+| 80 % denials, 10 % withdrawals | LEVEL 0 with `Rule_Sql_Txt` `SELECT <keys>, <disposition column> FROM <source>`, PCT BUCKETs named by the values (`Quota_Val` 80, 10) |
 | Every withdrawal there is, denials the rest | BUCKET Withdrawn `ALL`, BUCKET Denied `REMAINDER` |
 | Functional areas only within denials | LEVEL 1 `Parent_Path_Txt` `Denied`, its BUCKETs `Parent_Path_Txt` `Denied` |
 | Areas defined by several columns or other tables | LEVEL 1 with `Rule_Sql_Txt` NULL, one BUCKET per area with its `SELECT` (any joins) in `Rule_Sql_Txt`, a last BUCKET without `Rule_Sql_Txt` for the rest |
 | Equal portions | BUCKETs `REMAINDER` (or no BUCKET rows: unlisted `SHARE`) |
-| No more than 3 of one code | `Diversity_Sql_Txt` the code, `Diversity_Cap_Cnt` 3 |
+| No more than 3 of one code | `Diversity_Sql_Txt` `SELECT <keys>, <code> FROM <source>`, `Diversity_Cap_Ty` `CNT`, `Diversity_Cap_Val` 3 |
+| 5 % of the week's cases, at least 30, at most 200 | `Target_Ty` `PCT`, `Target_Val` 5, `Min_Target_Cnt` 30, `Max_Target_Cnt` 200 |
+| Always 10 inpatient cases, the rest by mix | BUCKET Inpatient `Quota_Cd` `CNT`, `Quota_Val` 10; the others PCT / REMAINDER |
 | Exactly 150 or flag it | `Shortfall_Cd` `NONE`, Variable `fail_on_shortfall` true |
 | A table of the selected cases for the auditors | `Tgt_Schema_Nm` + `Tgt_Table_Nm` (4.3) |
 
@@ -543,7 +559,7 @@ time), with the same `Selection_Order_Nbr`; the target table gets its source row
 `GOVT_RGLTRY_SamplingRunRule` rows), not today's. When the bucket has no candidate left, `--any-bucket` takes the
 next one overall (the mix then differs from the quotas: the reason records why). Allowed on a `FINAL` sample. A
 replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycles. Not checked by a replacement:
-`Diversity_Cap_Cnt`.
+the diversity cap (`Diversity_Cap_Val`).
 
 ## 11. First run on DEV (checklist)
 

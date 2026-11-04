@@ -76,8 +76,8 @@ def test_validate_and_show_config(local_db, capsys):
     capsys.readouterr()
     assert cli.main(["show-config", "--project", "UMCM", "--table", "T1", "--run-type", "WKLY"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert {b["rule_nm"]: b["target_fraction_val"] for b in shown["levels"][0]["buckets"]} == \
-        {"Denied": 0.8, "Withdrawn": 0.1, "Dismissed": 0.02, "Approved": 0.08}
+    assert {b["rule_nm"]: b["quota_val"] for b in shown["levels"][0]["buckets"]} == \
+        {"Denied": 80, "Withdrawn": 10, "Dismissed": 2, "Approved": 8}
     assert shown["problems"] == []
 
 

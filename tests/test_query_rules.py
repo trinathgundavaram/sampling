@@ -26,12 +26,12 @@ def _data(raw):
     db.executemany("INSERT INTO bh_codes VALUES (?, ?)", [("H0031", "Y"), ("99213", "N")])
     db.executemany("INSERT INTO providers VALUES (?, ?)", [(1, "PSY"), (2, "MD")])
     insert_config(db, src_table_nm="cases", scope_sql_txt=None, exclusion_sql=None, target_cnt=100,
-                  priority_rank_sql_txt="case_id")
+                  order_by="case_id")
 
 
-def _bh_level(db, bh_sql=BH_QUERY, fraction=0.21):
+def _bh_level(db, bh_sql=BH_QUERY, pct=21):
     insert_rule(db, "LEVEL", 10, "program", seq_nbr=1, level_nbr=0, parent_path_txt="*", unlisted_cd="SKIP")
-    insert_bucket(db, 11, 0, "Behavioral Health", seq_nbr=1, rule_sql_txt=bh_sql, target_fraction_val=fraction)
+    insert_bucket(db, 11, 0, "Behavioral Health", seq_nbr=1, rule_sql_txt=bh_sql, quota_val=pct)
     db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET rule_ty = 'QUERY' WHERE rule_id = 11")
     insert_bucket(db, 12, 0, "Other", seq_nbr=2, rule_sql_txt="1=1", quota_cd="REMAINDER")
 
@@ -46,7 +46,7 @@ def test_a_21_percent_bucket_from_a_join(raw, conn, settings):
     out = run_sampling(conn, settings, key(1), run_key="K1", as_of=AS_OF)
     assert out["status"] == "COMPLETED", out.get("error")
     assert out["selected"] == 100 and _bh_count(raw) == 21
-    assert out["rule_queries"] == {"Behavioral Health": 40}
+    assert out["rule_queries"]["Behavioral Health"] == 40
     # the BH cases picked are BH ones
     picked = {r[0] for r in raw.db.execute("SELECT Case_Key FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1 "
                                            "AND Stratum_Path_Txt = 'Behavioral Health'").fetchall()}
@@ -55,8 +55,8 @@ def test_a_21_percent_bucket_from_a_join(raw, conn, settings):
 
 def test_only_the_pulled_cases_count(raw, conn, settings):
     """A QUERY returning cases outside the scope adds nothing: the scope stays the config's."""
-    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingConfig SET scope_sql_txt = 'case_id < ''c050''' WHERE Table_Nm = 'T1'")
-    _bh_level(raw.db, fraction=0.5)
+    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingConfig SET scope_sql_txt = 'SELECT * FROM main.cases WHERE case_id < ''c050''' WHERE Table_Nm = 'T1'")
+    _bh_level(raw.db, pct=50)
     out = run_sampling(conn, settings, key(1), run_key="K1", as_of=AS_OF)
     assert out["in_scope"] == 50 and _bh_count(raw) == 10          # 10 BH cases among c000..c049
 
@@ -82,7 +82,7 @@ def test_a_query_without_the_key_columns_is_a_config_error(raw, conn, settings):
 
 def test_a_query_must_be_a_select_that_only_reads(raw, conn, settings):
     _bh_level(raw.db)
-    insert_rule(raw.db, "BUCKET", 13, "Cond", seq_nbr=0, level_nbr=0, parent_path_txt="*", target_fraction_val=0.1,
+    insert_rule(raw.db, "BUCKET", 13, "Cond", seq_nbr=0, level_nbr=0, parent_path_txt="*", quota_val=10,
                 rule_sql_txt="proc_cd = 'H0031'", raw_sql=True)                    # a condition, not a SELECT
     insert_rule(raw.db, "EXCLUSION", 20, "BAD", rule_ty="QUERY", rule_sql_txt="SELECT case_id FROM cases; DELETE FROM x")
     insert_rule(raw.db, "PRIORITY", 30, "OLD_STYLE", rule_ty="CONDITION", rule_sql_txt="disp = 'Denied'", raw_sql=True)
@@ -112,7 +112,7 @@ def test_a_value_select_needs_one_value_per_case(raw, conn, settings):
 
 def test_query_only_on_condition_levels(raw, conn, settings):
     insert_rule(raw.db, "LEVEL", 10, "disp", seq_nbr=1, rule_sql_txt="disp", level_nbr=0, parent_path_txt="*")
-    insert_bucket(raw.db, 11, 0, "Denied", target_fraction_val=0.5)
+    insert_bucket(raw.db, 11, 0, "Denied", quota_val=50)
     raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET rule_ty = 'QUERY' WHERE rule_id = 11")
     insert_rule(raw.db, "PRIORITY", 30, "P", rule_ty="NOPE", rule_sql_txt="x")
     problems = config_problems(load_config(conn, settings, key(1)))

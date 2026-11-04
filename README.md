@@ -9,14 +9,16 @@ versions sharing the same engine code:
 - **`local/`** – a command line (`python run_sampling.py …`) reading the login from `dev.env`.
 
 What a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
-buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
+buckets (a percentage, a number of cases, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
 (no repeats, carry-over) and code variety; the selected cases' source rows go to a target table per sample. No field name or value is in the code.
 A sample is one **project + table + run type** (DLY, WKLY, MNT …), as the framework scopes its batches; a rule row
 may name one table and run type or `*` for all of them (the most specific row wins), so run types share rules or
 have their own.
-Every exclusion, priority and bucket rule is a whole `SELECT` (any joins) returning the keys of the cases it
-matches. For tables holding several loads, batches or SCD2 versions, a run can be given
-`extra_filters`: a SQL condition ANDed to the scope.
+The sample size, bucket quotas and caps are each a number of cases or a percentage (`CNT` / `PCT`): 150 cases, or 5 %
+of the candidates within a minimum and a maximum.
+Every SQL column is a whole `SELECT` (any joins): the scope returns the run's source rows, every exclusion, priority
+and bucket rule the keys of the cases it matches, the diversity rule each case's value. For tables holding several
+loads, batches or SCD2 versions, a run can be given `extra_filters`: a SQL condition on the scope's rows.
 
 Every run keeps the configuration and the rules it used (with a hash), in plain columns (no CLOB). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.

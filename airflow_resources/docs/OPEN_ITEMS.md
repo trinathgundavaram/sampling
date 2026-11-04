@@ -7,7 +7,7 @@ any answer: they become rows.
 
 | # | Question | Fills |
 |---|---|---|
-| Q1 | The values of `AUTHZN_REQ_DETRMTN_TY` (approved / denied / withdrawn / dismissed …) and each one's share or mode (fraction, all there is, the remainder). How expedited is coded in `AUTHZN_REQ_STD_OR_EXPDT_IND` | level 0 buckets, a priority SELECT |
+| Q1 | The values of `AUTHZN_REQ_DETRMTN_TY` (approved / denied / withdrawn / dismissed …) and each one's share or mode (a percentage, a number of cases, all there is, the remainder). How expedited is coded in `AUTHZN_REQ_STD_OR_EXPDT_IND` | level 0 buckets, a priority SELECT |
 | Q2 | How a case maps to a functional area: which of `ISS_DESC`, `SVC_CTGRY_CD`, `REQ_PROV_TY`, `SVC_PROV_TY` … and the values / conditions (or tables to join) per area, with each area's share | level 1 BUCKET rules (`Rule_Sql_Txt`, a SELECT each) |
 | Q3 | Where "Revision" comes from: ODAG1 has no such column (a SELECT may join the table that has it) | a priority SELECT |
 | Q4 | How to identify auto-approvals, SHRPA / no prior authorisation required, diabetic supplies (columns, values, or another table to join) | exclusion rules |
@@ -54,7 +54,8 @@ their TODOs are answered, then `Active_Ind = 1` and `validate --project UMCM --t
 
 **Config:** `Project_Cd` `UMCM`, `Table_Nm` `ODAG1`, `Run_Ty` `WKLY`, `Src_Schema_Nm` `EXPORT_FEED_$ENV_T`,
 `Src_Table_Nm` `SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1`, `Key_Columns_Txt` `AUTHZN_ID, SRC_DATA_KEY`,
-`Scope_Sql_Txt` `<CURRENT>`, `Target_Cnt` 150, `RANKED`, `FLOOR`, no diversity (Q9), `TOPUP`, `Keep_Excluded_Ind`
+`Scope_Sql_Txt` `SELECT * FROM <ODAG1> WHERE <CURRENT>`, `Target_Ty` `CNT`, `Target_Val` 150 (a percentage is
+possible: `PCT` with `Min_Target_Cnt` / `Max_Target_Cnt`), `RANKED`, `FLOOR`, no diversity (Q9), `TOPUP`, `Keep_Excluded_Ind`
 1, `Tgt_Schema_Nm` / `Tgt_Table_Nm` TODO(Q10) (the target table, runbook 4.3).
 
 The PARAM and GATE rows use the sample's own `{project_cd}`, `{table_nm}` and `{run_ty}`, so with `Table_Nm` /
@@ -73,4 +74,4 @@ the same rows). The other rows are ODAG1 weekly only.
 | 231 | `ODAG1` / `WKLY` | LEVEL | 1 | `determination` | level 0, parent `*`, `SKIP` | `SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REQ_DETRMTN_TY FROM <ODAG1> WHERE <CURRENT>` |
 | 232 | `ODAG1` / `WKLY` | BUCKET | 1 | TODO(Q1) the denial value | level 0, `REMAINDER` (other values and quotas TODO(Q1)) | |
 | 241 | `ODAG1` / `WKLY` | LEVEL | 1 | `functional_area` | level 1, parent TODO(Q8) the denial bucket, `SHARE` | (none: buckets select) |
-| 242 | `ODAG1` / `WKLY` | BUCKET | 1 | TODO(Q2) one per area | level 1, `FRACTION` TODO(Q2) | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q2) |
+| 242 | `ODAG1` / `WKLY` | BUCKET | 1 | TODO(Q2) one per area | level 1, `PCT` `Quota_Val` TODO(Q2) (or `CNT` cases) | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q2) |

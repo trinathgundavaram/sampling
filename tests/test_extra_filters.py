@@ -1,4 +1,4 @@
-"""extra_filters: a SQL condition given at run time, ANDed to the scope, for tables
+"""extra_filters: a SQL condition given at run time on the rows the scope returns, for tables
 that hold several loads, batches or SCD2 versions of a case."""
 import json
 from datetime import date
@@ -20,14 +20,16 @@ def _data(raw):
     rows = [(f"c{i:02d}", "Denied", "B1", "Y") for i in range(10)]
     rows += [(f"c{i:02d}", "Denied", "B2", ind) for i in range(10) for ind in ("N", "Y")]
     db.executemany("INSERT INTO h VALUES (?, ?, ?, ?)", rows)
-    insert_config(db, src_table_nm="h", scope_sql_txt=None, exclusion_sql=None, target_cnt=4,
-                  priority_rank_sql_txt="case_id")
+    insert_config(db, src_table_nm="h", scope_sql_txt=None, exclusion_sql=None, target_cnt=4, order_by=None)
+    # a rule's SELECT reads its own rows: one per case
+    insert_rule(db, "PRIORITY", 900, "by_id", rule_ty="EXPRESSION",
+                rule_sql_txt="SELECT DISTINCT case_id, case_id AS v FROM h")
     # the level's SELECT reads one version of each case of the run's batch
     insert_rule(db, "LEVEL", 1000, "disp", seq_nbr=1, level_nbr=0, parent_path_txt="*",
                 rule_sql_txt="SELECT case_id, disp FROM h WHERE btch_id = '{batch}' AND curr_ind = 'Y'")
     db.execute("INSERT INTO GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Active_Ind, Rule_Class_Cd, "
-               "Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Target_Fraction_Val) "
-               "VALUES (1001, 'UMCM', 'T1', 'WKLY', 1, 'BUCKET', 1, 'Denied', 0, '*', 'FRACTION', 1.0)")
+               "Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Quota_Val) "
+               "VALUES (1001, 'UMCM', 'T1', 'WKLY', 1, 'BUCKET', 1, 'Denied', 0, '*', 'PCT', 100)")
 
 
 def _rows(raw, sql):
@@ -56,7 +58,7 @@ def test_without_filters_the_duplicate_versions_are_refused(raw, conn, settings)
 
 
 def test_filters_add_to_scope_sql(raw, conn, settings):
-    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingConfig SET scope_sql_txt = 'case_id < ''c05''' WHERE Table_Nm = 'T1'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingConfig SET scope_sql_txt = 'SELECT * FROM main.h WHERE case_id < ''c05''' WHERE Table_Nm = 'T1'")
     out = run_sampling(conn, settings, key(1), run_key="B1", as_of=AS_OF, run_params={"batch": "B1"},
                        extra_filters="btch_id = 'B1'")
     assert out["in_scope"] == 5 and out["selected"] == 4
