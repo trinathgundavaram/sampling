@@ -1,9 +1,10 @@
 -- ============================================================================
--- Drops the 4 sampling tables in {{META_DB}} - DESTROYS every row in them.
+-- Drops the 5 sampling tables in {{META_DB}} - DESTROYS every row in them.
 -- Only for a fresh redeploy: python local/run_sampling.py deploy-schema --drop-first
--- The sample tables (GOVT_RGLTRY_SAMPLING_CONFIG.output_db / output_table) are not dropped.
+-- The sample tables (GOVT_RGLTRY_SamplingConfig.Smpl_Schema_Nm / Smpl_Table_Nm) are not dropped.
 -- ============================================================================
-DROP TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLE_SELECTIONS;
-DROP TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RUN;
-DROP TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RULE;
-DROP TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_CONFIG;
+DROP TABLE {{META_DB}}.GOVT_RGLTRY_SampleSelection;
+DROP TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRunRule;
+DROP TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRun;
+DROP TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule;
+DROP TABLE {{META_DB}}.GOVT_RGLTRY_SamplingConfig;

@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from conftest import insert_config, insert_rule, insert_strata, load_cli
+from conftest import insert_config, insert_rule, insert_strata, key, load_cli
 from sampling.admin import history_days, purge_selections
 from sampling.engine import finalize_run, run_sampling, sql_problems
 from sampling.settings import ConfigError, Settings
@@ -17,7 +17,7 @@ def _sample(db, target=4, **kw):
     db.executemany("INSERT INTO u VALUES (?, ?, ?)", [(f"d{i:02d}", "Denied", "X") for i in range(10)]
                    + [(f"w{i:02d}", "Withdrawn", "Y") for i in range(5)])
     kw.setdefault("exclusion_sql", None)
-    insert_config(db, universe_table="u", scope_sql=None, target_volume=target, priority_rank_sql="case_id DESC", **kw)
+    insert_config(db, src_table_nm="u", scope_sql_txt=None, target_cnt=target, priority_rank_sql_txt="case_id DESC", **kw)
     insert_strata(db, 1, 1, 0, "disp", "disp", {"Denied": 0.5, "Withdrawn": 0.5})
 
 
@@ -52,66 +52,94 @@ def test_param_and_gate_sql_must_be_a_select():
 
 def test_a_run_refuses_writing_sql(raw, conn, settings):
     _sample(raw.db)
-    insert_rule(raw.db, "EXCLUSION", 11, "bad", rule_sql="disp = 'x'; DELETE FROM GOVT_RGLTRY_SAMPLING_RUN")
-    out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
+    insert_rule(raw.db, "EXCLUSION", 11, "bad", rule_sql_txt="disp = 'x'; DELETE FROM GOVT_RGLTRY_SamplingRun")
+    out = run_sampling(conn, settings, key(1), run_key="K1", as_of=AS_OF)
     assert out["error_type"] == "CONFIG_ERROR" and "';' is not allowed" in out["error"]
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS") == [(0,)]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection") == [(0,)]
 
 
-# the ODAG1 PARAM and GATE rules (OPEN_ITEMS.md, section D)
-ODAG1_BATCH_SQL = (
-    "SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM HSABC_$ENV.ComplianceRequestControl WHERE Project_Cd = 'CMSUNIV' "
-    "AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches",
-    "SELECT 1 FROM HSABC_$ENV.ComplianceRequestControl WHERE Btch_ID = '{batch_id}' "
-    "HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1",
+# A batch lookup as PARAM and GATE rules hold it: the sample's own project, table and run type are placeholders,
+# so one pair of rows (Table_Nm / Run_Ty '*') serves every sample of a project. The control table is configuration
+# (an example name here), never code.
+BATCH_SQL = (
+    "SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM {db}.Batch_Control_Example WHERE Project_Cd = '{{project_cd}}' "
+    "AND Table_Nm = '{{table_nm}}' AND Run_Ty = '{{run_ty}}' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) "
+    "closed_batches",
+    "SELECT 1 FROM {db}.Batch_Control_Example WHERE Btch_ID = '{{batch_id}}' AND Project_Cd = '{{project_cd}}' "
+    "AND Table_Nm = '{{table_nm}}' AND Run_Ty = '{{run_ty}}' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1",
 )
 
 
-def test_the_odag1_batch_lookup_reads_and_follows_the_environment():
-    """The framework's ComplianceRequestControl is in HSABC_$ENV: HSABC_DEV in DEV, HSABC in UAT / PROD."""
-    for text in ODAG1_BATCH_SQL:
+def test_a_batch_lookup_reads_and_follows_the_environment():
+    """A control table in HSABC_$ENV: HSABC_DEV in DEV, HSABC in UAT / PROD."""
+    for text in (t.format(db="HSABC_$ENV") for t in BATCH_SQL):
         assert sql_problems(text, "batch", select=True) == []
         for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
             resolved = Settings(meta_db="M", environment=env).resolve_env(text, identifier=False)
-            assert f" {db}.ComplianceRequestControl " in resolved and "$" not in resolved
+            assert f" {db}.Batch_Control_Example " in resolved and "$" not in resolved
+
+
+def test_shared_batch_rules_use_each_samples_project_table_and_run_type(raw, conn, settings):
+    """One PARAM and one GATE row for the whole project (Table_Nm / Run_Ty '*'): each sample finds its own batch."""
+    _sample(raw.db)
+    insert_config(raw.db, config_id=2, table_nm="T1", run_ty="MNT", src_table_nm="u", exclusion_sql=None,
+                  scope_sql_txt=None, target_cnt=2, priority_rank_sql_txt="case_id")   # T1 monthly
+    raw.db.execute("CREATE TABLE Batch_Control_Example (Project_Cd VARCHAR, Table_Nm VARCHAR, Run_Ty VARCHAR, "
+                   "Btch_ID VARCHAR, Batch_Close_Ind INTEGER)")
+    raw.db.executemany("INSERT INTO Batch_Control_Example VALUES ('UMCM', 'T1', ?, ?, ?)",
+                       [("WKLY", "W1", 1), ("WKLY", "W2", 1), ("WKLY", "W3", 0), ("MNT", "M1", 1)])
+    insert_rule(raw.db, "PARAM", 31, "batch_id", table_nm="*", run_ty="*", rule_sql_txt=BATCH_SQL[0].format(db="main"))
+    insert_rule(raw.db, "GATE", 32, "closed", table_nm="*", run_ty="*", rule_sql_txt=BATCH_SQL[1].format(db="main"))
+    weekly = run_sampling(conn, settings, key(1), run_key="{batch_id}", as_of=AS_OF)
+    assert (weekly["status"], weekly["run_key"]) == ("COMPLETED", "W2")
+    monthly = run_sampling(conn, settings, key(1, run_ty="MNT"), run_key="{batch_id}", as_of=AS_OF)
+    assert (monthly["status"], monthly["run_key"]) == ("COMPLETED", "M1")
+    assert monthly["params"]["project_cd"] == "UMCM" and monthly["params"]["run_ty"] == "MNT"
 
 
 # ── retention ──────────────────────────────────────────────────────────────
 
 def _counts(raw):
-    return dict(_rows(raw, "SELECT run_key || ':' || etl_is_curr_ind, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS "
+    return dict(_rows(raw, "SELECT Run_Key || ':' || Curr_Ind, COUNT(*) FROM GOVT_RGLTRY_SampleSelection "
                            "GROUP BY 1"))
 
 
 def test_purge_keeps_what_is_still_needed(raw, conn, settings):
-    _sample(raw.db, keep_excluded=1)
-    insert_rule(raw.db, "EXCLUSION", 11, "not_w04", rule_sql="case_id = 'w04'")
-    run_sampling(conn, settings, 1, run_key="OLD", as_of=AS_OF - timedelta(days=100))
-    run_sampling(conn, settings, 1, run_key="OLD", as_of=AS_OF - timedelta(days=100))      # retires the first
-    run_sampling(conn, settings, 1, run_key="FIN", as_of=AS_OF - timedelta(days=100))
-    finalize_run(conn, settings, 1, "FIN", "auditor")
-    run_sampling(conn, settings, 1, run_key="NEW", as_of=AS_OF)
-    assert _counts(raw) == {"OLD:N": 15, "OLD:Y": 15, "FIN:Y": 15, "NEW:Y": 15}
+    _sample(raw.db, keep_excluded_ind=1)
+    insert_rule(raw.db, "EXCLUSION", 11, "not_w04", rule_sql_txt="case_id = 'w04'")
+    run_sampling(conn, settings, key(1), run_key="OLD", as_of=AS_OF - timedelta(days=100))
+    run_sampling(conn, settings, key(1), run_key="OLD", as_of=AS_OF - timedelta(days=100))      # retires the first
+    run_sampling(conn, settings, key(1), run_key="FIN", as_of=AS_OF - timedelta(days=100))
+    finalize_run(conn, settings, key(1), "FIN", "auditor")
+    run_sampling(conn, settings, key(1), run_key="NEW", as_of=AS_OF)
+    assert _counts(raw) == {"OLD:0": 15, "OLD:1": 15, "FIN:1": 15, "NEW:1": 15}
 
-    shown = purge_selections(conn, settings, 30, config_id=1, as_of=AS_OF)
+    shown = purge_selections(conn, settings, 30, project="UMCM", as_of=AS_OF)
     assert shown["configs"][0]["rows"] == {"retired_runs": 15, "unselected_of_current_runs": 11}
-    assert _counts(raw)["OLD:N"] == 15                                                       # counted only
-    purge_selections(conn, settings, 30, config_id=1, as_of=AS_OF, apply=True)
-    assert _counts(raw) == {"OLD:Y": 4, "FIN:Y": 15, "NEW:Y": 15}           # selected kept, FINAL and new untouched
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLING_RUN") == [(4,)]                     # run rows never go
+    assert _counts(raw)["OLD:0"] == 15                                                       # counted only
+    purge_selections(conn, settings, 30, project="UMCM", table="T1", as_of=AS_OF, apply=True)
+    assert _counts(raw) == {"OLD:1": 4, "FIN:1": 15, "NEW:1": 15}           # selected kept, FINAL and new untouched
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRun") == [(4,)]                     # run rows never go
 
 
 def test_purge_respects_the_history_rules(raw, conn, settings):
     _sample(raw.db)
-    insert_rule(raw.db, "PRIORITY", 21, "carry_over", rule_type="PRIOR_CANDIDATE", lookback_days=90)
-    insert_config(raw.db, config_id=2, universe_table="u", project_name="UMCM")
-    insert_rule(raw.db, "EXCLUSION", 211, "no_repeat", config_id=2, rule_type="PRIOR_SELECTION", lookback_days=180,
-                history_scope="PROJECT")
-    assert history_days(conn, settings, 1) == 180                  # config 2 reads config 1's rows (PROJECT)
-    out = purge_selections(conn, settings, 120, config_id=1, as_of=AS_OF, apply=True)
+    insert_rule(raw.db, "PRIORITY", 21, "carry_over", rule_ty="PRIOR_CANDIDATE", lookback_days=90)
+    assert history_days(conn, settings, key(1)) == 90
+    insert_config(raw.db, config_id=2, src_table_nm="u")
+    insert_rule(raw.db, "EXCLUSION", 211, "no_repeat", config_id=2, rule_ty="PRIOR_SELECTION", lookback_days=150,
+                history_scope_cd="TABLE")
+    assert history_days(conn, settings, key(1)) == 90               # TABLE: T2's rule reads T2's rows only
+    insert_rule(raw.db, "EXCLUSION", 212, "no_repeat", config_id=2, table_nm="T1", run_ty="MNT",
+                rule_ty="PRIOR_SELECTION", lookback_days=160, history_scope_cd="TABLE")
+    assert history_days(conn, settings, key(1)) == 160              # T1's monthly rule reads T1's weekly rows
+    insert_rule(raw.db, "EXCLUSION", 213, "no_repeat_p", config_id=2, rule_ty="PRIOR_SELECTION", lookback_days=180,
+                history_scope_cd="PROJECT")
+    assert history_days(conn, settings, key(1)) == 180              # config 2 reads config 1's rows (PROJECT)
+    out = purge_selections(conn, settings, 120, project="UMCM", table="T1", as_of=AS_OF, apply=True)
     assert "keep at least" in out["configs"][0]["skipped"]
     with pytest.raises(ConfigError):
-        purge_selections(conn, settings, 0, config_id=1)
+        purge_selections(conn, settings, 0, project="UMCM")
 
 
 def test_cli_purge(raw, monkeypatch, tmp_path, capsys):
@@ -124,4 +152,4 @@ def test_cli_purge(raw, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     _sample(raw.db)
-    assert cli.main(["purge", "--config-id", "1", "--older-than-days", "30"]) == 0
+    assert cli.main(["purge", "--project", "UMCM", "--older-than-days", "30"]) == 0

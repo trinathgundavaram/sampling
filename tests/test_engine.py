@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from conftest import build_universe, insert_config, insert_strata, um_config
+from conftest import build_source, insert_config, insert_strata, key, um_config
 from sampling.db import build_run_key, generate_run_id, substitute_params
 from sampling.engine import (Sample, Stratifier, build_queries, discover_configs, round_target, run_sampling,
                              run_scope, select, validate)
@@ -18,7 +18,7 @@ PARAMS = {"batch_id": "2026-08-01"}
 def _run(conn, s, config_id=1, **kw):
     kw.setdefault("run_params", PARAMS)
     kw.setdefault("as_of", AS_OF)
-    return run_sampling(conn, s, config_id, **kw)
+    return run_sampling(conn, s, key(config_id), **kw)
 
 
 def _rows(raw, sql):
@@ -47,8 +47,8 @@ def test_select_methods():
 def test_stratify_any_number_of_levels_shares_equally():
     rows = [{"smp_r_1": a, "smp_r_2": b, "smp_r_3": c, "_order": 0}
             for a in ("X", "Y") for b in ("P", "Q") for c in ("M", "N") for _ in range(10)]
-    levels = [{"rule_id": i, "level_order": i, "buckets": [], "value_level": True} for i in (1, 2, 3)]
-    strat = Stratifier(Sample(config={"sampling_method": "RANKED"}, levels=levels), None, "FLOOR")
+    levels = [{"rule_id": i, "level_nbr": i, "buckets": [], "value_level": True} for i in (1, 2, 3)]
+    strat = Stratifier(Sample(config={"smpl_method_cd": "RANKED"}, levels=levels), None, "FLOOR")
     chosen = strat.run(rows, 40)
     assert len(chosen) == 40 and len(strat.leaves) == 8 and all(v["selected"] == 5 for v in strat.leaves.values())
 
@@ -64,7 +64,7 @@ FROZEN_BY_STRATUM = {
 
 
 def test_um_regression_matches_frozen_output(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     out = _run(conn, settings)
     assert out["status"] == "COMPLETED", out
@@ -74,66 +74,70 @@ def test_um_regression_matches_frozen_output(raw, conn, settings):
 
 
 def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     out = _run(conn, settings, triggered_by="tester")
-    sel = _rows(raw, "SELECT COUNT(*), SUM(selected_flag), MIN(run_key), MIN(sample_cycle) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")
-    assert sel[0] == (1000, 150, "2026-08-01", AS_OF)        # the 20 excluded kept too (keep_excluded)
-    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE excluded_flag = 1 "
+    sel = _rows(raw, "SELECT COUNT(*), SUM(Selected_Ind), MIN(Run_Key), MIN(Smpl_Cycle_Dt_Key) FROM GOVT_RGLTRY_SampleSelection")
+    assert sel[0] == (1000, 150, "2026-08-01", AS_OF)        # the 20 excluded kept too (keep_excluded_ind)
+    assert _rows(raw, "SELECT Exclusion_Rsn_Txt, COUNT(*) FROM GOVT_RGLTRY_SampleSelection WHERE Excluded_Ind = 1 "
                       "GROUP BY 1") == [("EXCLUDED", 20)]
-    run = _rows(raw, "SELECT status, total_in_scope, total_excluded, total_candidates, total_selected, shortfall, "
-                     "triggered_by, run_id, etl_is_curr_ind, error_type FROM GOVT_RGLTRY_SAMPLING_RUN")
-    assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["sample_run_id"], "Y", None)]
-    report = json.loads(_rows(raw, "SELECT run_report FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])
+    run = _rows(raw, "SELECT Run_Stat, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
+                     "Triggered_By, Smpl_Run_ID, Curr_Ind, Error_Ty, Project_Cd, Table_Nm, Run_Ty, Src_Table_Nm, "
+                     "Target_Cnt, LoadUser_ID FROM GOVT_RGLTRY_SamplingRun")
+    assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["smpl_run_id"], 1, None, "UMCM", "T1", "WKLY",
+                    "case_source", 150, "tester")]
+    rules = _rows(raw, "SELECT Rule_ID, Rule_Class_Cd, Rule_Nm FROM GOVT_RGLTRY_SamplingRunRule ORDER BY Rule_ID")
+    assert len(rules) == 9 and rules[0] == (1000, "LEVEL", "category") and rules[-1] == (9001, "EXCLUSION", "EXCLUDED")
+    report = json.loads(_rows(raw, "SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])
     assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
     assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
-    assert out["sample_run_id"].startswith("UMCM.weekly_sample::2026-08-01::attempt-1::tester::")
-    paths = _rows(raw, "SELECT DISTINCT stratum_path FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1")
+    assert out["smpl_run_id"].startswith("UMCM.T1.WKLY::2026-08-01::attempt-1::tester::")
+    paths = _rows(raw, "SELECT DISTINCT Stratum_Path_Txt FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1")
     assert {p[0] for p in paths} <= set(FROZEN_BY_STRATUM)
 
 
 def test_rerun_retires_the_earlier_run_of_the_same_run_key(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     first = _run(conn, settings)
     second = _run(conn, settings)
-    assert "::attempt-2::" in second["sample_run_id"] and second["retired_runs"] == 1
-    curr = _rows(raw, "SELECT sample_run_id, etl_is_curr_ind, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS GROUP BY 1, 2")
-    assert {(r[0], r[1]) for r in curr} == {(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")}
-    assert _rows(raw, "SELECT run_id, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN ORDER BY started_at") == \
-        [(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")]
+    assert "::attempt-2::" in second["smpl_run_id"] and second["retired_runs"] == 1
+    curr = _rows(raw, "SELECT Smpl_Run_ID, Curr_Ind, COUNT(*) FROM GOVT_RGLTRY_SampleSelection GROUP BY 1, 2")
+    assert {(r[0], r[1]) for r in curr} == {(first["smpl_run_id"], 0), (second["smpl_run_id"], 1)}
+    assert _rows(raw, "SELECT Smpl_Run_ID, Curr_Ind FROM GOVT_RGLTRY_SamplingRun ORDER BY Start_Dtts") == \
+        [(first["smpl_run_id"], 0), (second["smpl_run_id"], 1)]
     other = _run(conn, settings, run_key="OTHER")
     assert other["retired_runs"] == 0
 
 
 def test_random_reproducible_with_stored_seed(raw, conn, settings):
-    build_universe(raw.db)
-    um_config(raw.db, sampling_method="RANDOM", priority_rank_sql=None)
+    build_source(raw.db)
+    um_config(raw.db, smpl_method_cd="RANDOM", priority_rank_sql_txt=None)
     first = _run(conn, settings)
     assert first["seed"] is not None
-    stored = _rows(raw, "SELECT random_seed FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0]
+    stored = _rows(raw, "SELECT Random_Seed_Nbr FROM GOVT_RGLTRY_SamplingRun")[0][0]
     again = _run(conn, settings, seed=stored, run_key="replay")
 
     def picked(run_id):
-        return {r[0] for r in _rows(raw, f"SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 AND "
-                                         f"sample_run_id = '{run_id}'")}
-    assert picked(first["sample_run_id"]) == picked(again["sample_run_id"])
+        return {r[0] for r in _rows(raw, f"SELECT Case_Key FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1 AND "
+                                         f"Smpl_Run_ID = '{run_id}'")}
+    assert picked(first["smpl_run_id"]) == picked(again["smpl_run_id"])
 
 
 def test_systematic_needs_priority_and_records_config_error(raw, conn, settings):
-    build_universe(raw.db)
-    um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
+    build_source(raw.db)
+    um_config(raw.db, smpl_method_cd="SYSTEMATIC", priority_rank_sql_txt=None)
     out = _run(conn, settings)
-    assert out["status"] == "ERROR" and out["error_kind"] == "config" and "priority_rank_sql" in out["error"]
-    assert _rows(raw, "SELECT status, error_type, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN") == \
-        [("ERROR", "CONFIG_ERROR", "N")]
+    assert out["status"] == "ERROR" and out["error_kind"] == "config" and "priority_rank_sql_txt" in out["error"]
+    assert _rows(raw, "SELECT Run_Stat, Error_Ty, Curr_Ind FROM GOVT_RGLTRY_SamplingRun") == \
+        [("ERROR", "CONFIG_ERROR", 0)]
 
 
 def test_null_exclusion_column_keeps_the_row(raw, conn, settings):
     raw.db.execute("CREATE TABLE u (case_id VARCHAR, flag VARCHAR)")
     raw.db.execute("INSERT INTO u VALUES ('a', 'Y'), ('b', NULL), ('c', 'N')")
-    insert_config(raw.db, universe_table="u", exclusion_sql="flag = 'Y'", scope_sql=None, priority_rank_sql="case_id",
-                  target_volume=10)
+    insert_config(raw.db, src_table_nm="u", exclusion_sql="flag = 'Y'", scope_sql_txt=None, priority_rank_sql_txt="case_id",
+                  target_cnt=10)
     out = _run(conn, settings)
     assert out["candidates"] == 2 and out["excluded"] == 1 and out["shortfall"] == 8
 
@@ -142,98 +146,102 @@ def test_bucket_values_match_without_case_or_trailing_blanks(raw, conn, settings
     raw.db.execute("CREATE TABLE u (case_id VARCHAR, cat VARCHAR)")
     raw.db.executemany("INSERT INTO u VALUES (?, ?)", [(f"d{i}", "DENIED  ") for i in range(50)]
                        + [(f"a{i}", "approved") for i in range(50)])
-    insert_config(raw.db, universe_table="u", exclusion_sql=None, scope_sql=None, priority_rank_sql="case_id",
-                  target_volume=10)
+    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, priority_rank_sql_txt="case_id",
+                  target_cnt=10)
     insert_strata(raw.db, 1, 1, 0, "cat", "cat", {"Denied": 0.8, "Approved": 0.2})
     out = _run(conn, settings)
     assert {k: v["selected"] for k, v in out["by_stratum"].items()} == {"Approved": 2, "Denied": 8}
 
 
 def test_pull_failure_rolls_nothing_in_and_logs(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
-    raw.fail_on = "FROM case_universe WHERE (pull_date = '2026-08-01')"
+    raw.fail_on = "FROM main.case_source WHERE (pull_date = '2026-08-01')"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PULL_FAILURE" and out["error_kind"] == "technical"
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")[0][0] == 0
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0
 
 
 def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
-    raw.fail_on = "UPDATE main.GOVT_RGLTRY_SAMPLE_SELECTIONS"
+    raw.fail_on = "UPDATE main.GOVT_RGLTRY_SampleSelection"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PERSIST_FAILURE"
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")[0][0] == 0   # rolled back
-    assert _rows(raw, "SELECT status, error_type FROM GOVT_RGLTRY_SAMPLING_RUN") == [("ERROR", "PERSIST_FAILURE")]
-    assert "Traceback" in _rows(raw, "SELECT error_detail FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0   # rolled back
+    assert _rows(raw, "SELECT Run_Stat, Error_Ty FROM GOVT_RGLTRY_SamplingRun") == [("ERROR", "PERSIST_FAILURE")]
+    assert "Traceback" in _rows(raw, "SELECT Error_Detail_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0]
 
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
-    build_universe(raw.db)
-    um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
+    build_source(raw.db)
+    um_config(raw.db, smpl_method_cd="SYSTEMATIC", priority_rank_sql_txt=None)
     _run(conn, settings)
     _run(conn, settings)
-    assert _rows(raw, "SELECT COUNT(*), MIN(status), MAX(status) FROM GOVT_RGLTRY_SAMPLING_RUN")[0] == (2, "ERROR", "ERROR")
+    assert _rows(raw, "SELECT COUNT(*), MIN(Run_Stat), MAX(Run_Stat) FROM GOVT_RGLTRY_SamplingRun")[0] == (2, "ERROR", "ERROR")
 
 
 def test_unresolved_token_is_a_config_error(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     out = _run(conn, settings, run_params={})
     assert out["error_kind"] == "config" and "batch_id" in out["error"]
 
 
 def test_builtin_as_of_date_and_run_key_tokens(raw, conn, settings):
-    build_universe(raw.db)
-    um_config(raw.db, scope_sql="pull_date = CAST('{as_of_date}' AS DATE) AND '{run_key}' = '{run_key}'")
+    build_source(raw.db)
+    um_config(raw.db, scope_sql_txt="pull_date = CAST('{as_of_date}' AS DATE) AND '{run_key}' = '{run_key}'")
     out = _run(conn, settings, run_params={})
     assert out["status"] == "COMPLETED" and out["candidates"] == 980 and out["run_key"] == "2026-08-01"
 
 
 def test_duplicate_keys_are_a_config_error(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db, key_columns="category")
     out = _run(conn, settings)
     assert out["error_kind"] == "config" and "uniquely" in out["error"]
 
 
 def test_dry_run_writes_nothing(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     out = _run(conn, settings, dry_run=True)
-    assert out["selected"] == 150 and out["sample_run_id"] is None
-    for table in ("GOVT_RGLTRY_SAMPLING_RUN", "GOVT_RGLTRY_SAMPLE_SELECTIONS"):
+    assert out["selected"] == 150 and out["smpl_run_id"] is None
+    for table in ("GOVT_RGLTRY_SamplingRun", "GOVT_RGLTRY_SampleSelection"):
         assert _rows(raw, f"SELECT COUNT(*) FROM {table}")[0][0] == 0
 
 
-def test_run_scope_by_process_and_errors(raw, conn, settings):
-    build_universe(raw.db)
+def test_run_scope_by_project_table_run_type_and_errors(raw, conn, settings):
+    build_source(raw.db)
     um_config(raw.db, config_id=1)
-    insert_config(raw.db, config_id=2, sampling_method="BOGUS")
-    insert_config(raw.db, config_id=3, process_name="OTHER")
-    out = run_scope(conn, settings, process_name="WEEKLY", run_params=PARAMS, as_of=AS_OF)
-    assert [r["config_id"] for r in out["runs"]] == [1, 2] and out["failed"] == 1
+    insert_config(raw.db, config_id=2, smpl_method_cd="BOGUS")
+    insert_config(raw.db, config_id=3, run_ty="MNT")
+    insert_config(raw.db, config_id=4, project_cd="OTHER")
+    out = run_scope(conn, settings, project="umcm", run_type="wkly", run_params=PARAMS, as_of=AS_OF)
+    assert [r["table_nm"] for r in out["runs"]] == ["T1", "T2"] and out["failed"] == 1
     assert out["result"] == "1 OF 2 SAMPLE(S) FAILED"
+    assert discover_configs(conn, settings, "UMCM") == [key(1), key(2), key(3, run_ty="MNT")]
+    assert discover_configs(conn, settings, "Umcm", table="t1") == [key(1)]
     with pytest.raises(ConfigError):
-        run_scope(conn, settings, process_name="NOPE")
+        run_scope(conn, settings, project="NOPE")
     with pytest.raises(ConfigError):
         discover_configs(conn, settings)
 
 
 def test_validate_with_sql_check(raw, conn, settings):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
-    insert_config(raw.db, config_id=2, universe_table="missing_table", process_name="WEEKLY")
-    out = validate(conn, settings, process_name="WEEKLY", run_params=PARAMS, check_sql=True)
-    problems = {c["config_id"]: c["problems"] for c in out["configs"]}
-    assert problems[1] == [] and "SQL check failed" in problems[2][0]
+    insert_config(raw.db, config_id=2, src_table_nm="missing_table")
+    out = validate(conn, settings, project="UMCM", run_params=PARAMS, check_sql=True)
+    problems = {c["table_nm"]: c["problems"] for c in out["configs"]}
+    assert problems["T1"] == [] and "SQL check failed" in problems["T2"][0]
 
 
 def test_queries_resolve_env_and_tie_break_on_keys():
     s = Settings(meta_db="M", environment="PROD")
-    sample = Sample(config={"universe_table": "UMCM_$ENV_T.u", "key_columns": "a, b", "scope_sql": "db = '$env'",
-                            "sampling_method": "RANKED", "priority_rank_sql": "x DESC"})
+    sample = Sample(config={"src_schema_nm": "UMCM_$ENV_T", "src_table_nm": "u", "key_columns_txt": "a, b",
+                            "scope_sql_txt": "db = '$env'",
+                            "smpl_method_cd": "RANKED", "priority_rank_sql_txt": "x DESC"})
     q = build_queries(sample, s, {})
     assert q["pull"] == "SELECT a, b, ROW_NUMBER() OVER (ORDER BY x DESC, a, b) AS smp_base_rank " \
                         "FROM UMCM_T.u WHERE (db = '')"

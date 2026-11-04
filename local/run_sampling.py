@@ -1,15 +1,15 @@
 """Local command line for the sampling engine: the same engine as the Airflow DAG, credentials from dev.env.
 
-    python run_sampling.py run --process-name UMCM_WEEKLY_SAMPLE --run-key 2026-10-30
-    python run_sampling.py run --config-id 1 --run-param pull_date=2026-10-30 --dry-run
-    python run_sampling.py run --config-id 1 --filter "BTCH_ID = 'B42'" --filter "ETL_IS_CURR_IND = 'Y'"
+    python run_sampling.py run --project UMCM --run-type WKLY --run-key 2026-10-30
+    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --run-param pull_date=2026-10-30 --dry-run
+    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --filter "BTCH_ID = 'B42'" --filter "ETL_IS_CURR_IND = 'Y'"
     python run_sampling.py validate --project UMCM --check-sql
-    python run_sampling.py show-config --config-id 1
-    python run_sampling.py runs --config-id 1
+    python run_sampling.py show-config --project UMCM --table ODAG1 --run-type WKLY
+    python run_sampling.py runs --project UMCM --table ODAG1 --run-type WKLY
     python run_sampling.py errors
-    python run_sampling.py finalize --config-id 1 --run-key B42
-    python run_sampling.py replace --config-id 1 --run-key B42 --case-key "AUTHZN_ID=123" --reason "no record"
-    python run_sampling.py run --config-id 1 --run-key B42 --force-reason "rules corrected, approved by ..."
+    python run_sampling.py finalize --project UMCM --table ODAG1 --run-type WKLY --run-key B42
+    python run_sampling.py replace --project UMCM --table ODAG1 --run-type WKLY --run-key B42 --case-key "AUTHZN_ID=123" --reason "no record"
+    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --run-key B42 --force-reason "rules corrected, approved by ..."
     python run_sampling.py purge --project UMCM --older-than-days 400 [--apply]
     python run_sampling.py mark-failed --run-id <run_id>
     python run_sampling.py test-connection
@@ -132,8 +132,20 @@ def _filters(args) -> str:
 
 
 def _scope(args) -> dict:
-    return {k: v for k, v in (("config_id", args.config_id), ("project", args.project),
-                              ("process_name", args.process_name)) if v not in (None, "")}
+    return {k: v for k, v in (("project", args.project), ("table", args.table), ("run_type", args.run_type))
+            if v not in (None, "")}
+
+
+def _key(args) -> tuple:
+    """One sample: (project, table, run_type)."""
+    return (args.project, args.table, args.run_type)
+
+
+def _filter_sample(args, where: list, params: list) -> None:
+    for col, value in (("Project_Cd", args.project), ("Table_Nm", args.table), ("Run_Ty", args.run_type)):
+        if value not in (None, ""):
+            where.append(f"UPPER({col}) = ?")
+            params.append(str(value).strip().upper())
 
 
 def cmd_run(conn, s, args) -> tuple:
@@ -151,11 +163,11 @@ def _user(args) -> str:
 
 
 def cmd_finalize(conn, s, args) -> tuple:
-    return finalize_run(conn, s, args.config_id, args.run_key, _user(args)), 0
+    return finalize_run(conn, s, _key(args), args.run_key, _user(args)), 0
 
 
 def cmd_replace(conn, s, args) -> tuple:
-    return replace_case(conn, s, args.config_id, args.run_key, args.case_key, args.reason, _user(args),
+    return replace_case(conn, s, _key(args), args.run_key, args.case_key, args.reason, _user(args),
                         any_bucket=args.any_bucket), 0
 
 
@@ -166,7 +178,7 @@ def cmd_validate(conn, s, args) -> tuple:
 
 
 def cmd_show_config(conn, s, args) -> tuple:
-    sample = load_config(conn, s, args.config_id)
+    sample = load_config(conn, s, _key(args))
     return {"config": sample.config, "params": sample.params, "gates": sample.gates,
             "exclusions": sample.exclusions, "priorities": sample.priorities, "levels": sample.levels,
             "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
@@ -174,39 +186,43 @@ def cmd_show_config(conn, s, args) -> tuple:
 
 def cmd_runs(conn, s, args) -> tuple:
     where, params = ["1=1"], []
-    for col, value in (("config_id", args.config_id), ("run_key", args.run_key), ("status", args.status)):
+    _filter_sample(args, where, params)
+    for col, value in (("Run_Key", args.run_key), ("Run_Stat", args.status)):
         if value not in (None, ""):
             where.append(f"{col} = ?")
             params.append(value)
-    rows = conn.query(f"SELECT TOP {int(args.limit)} run_id, run_key, config_id, sample_name, status, "
-                      f"etl_is_curr_ind, config_hash, finalized_by, override_reason, sampling_method, random_seed, target_volume, total_in_scope, "
-                      f"total_excluded, total_candidates, total_selected, shortfall, started_at, ended_at, "
-                      f"triggered_by, error_type, error_message FROM {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN "
-                      f"WHERE {' AND '.join(where)} ORDER BY started_at DESC", params)
+    rows = conn.query(f"SELECT TOP {int(args.limit)} Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Run_Stat, "
+                      f"Curr_Ind, Config_Hash, Finalized_By, Override_Rsn_Txt, Smpl_Method_Cd, Random_Seed_Nbr, "
+                      f"Target_Cnt, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
+                      f"Start_Dtts, End_Dtts, Triggered_By, Error_Ty, Error_Txt "
+                      f"FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE {' AND '.join(where)} ORDER BY Start_Dtts DESC",
+                      params)
     return {"runs": rows}, 0
 
 
 def cmd_errors(conn, s, args) -> tuple:
-    """Open errors: runs whose latest attempt of their (config_id, run_key) failed."""
+    """Open errors: runs whose latest attempt of their (sample, run_key) failed."""
     where, params = ["1=1"], []
-    for col, value in (("config_id", args.config_id), ("run_key", args.run_key)):
-        if value not in (None, ""):
-            where.append(f"{col} = ?")
-            params.append(value)
-    rows = conn.query(f"SELECT run_id, config_id, process_name, run_key, error_type, error_message, started_at "
-                      f"FROM (SELECT run_id, config_id, process_name, run_key, status, error_type, error_message, "
-                      f"started_at FROM {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN WHERE {' AND '.join(where)} "
-                      f"QUALIFY ROW_NUMBER() OVER (PARTITION BY config_id, run_key ORDER BY started_at DESC) = 1"
-                      f") latest WHERE status = 'ERROR' ORDER BY started_at DESC", params)
+    _filter_sample(args, where, params)
+    if args.run_key not in (None, ""):
+        where.append("Run_Key = ?")
+        params.append(args.run_key)
+    rows = conn.query(f"SELECT Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Error_Ty, Error_Txt, Start_Dtts "
+                      f"FROM (SELECT Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Run_Stat, Error_Ty, "
+                      f"Error_Txt, Start_Dtts FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE {' AND '.join(where)} "
+                      f"QUALIFY ROW_NUMBER() OVER (PARTITION BY Project_Cd, Table_Nm, Run_Ty, Run_Key "
+                      f"ORDER BY Start_Dtts DESC) = 1) latest WHERE Run_Stat = 'ERROR' ORDER BY Start_Dtts DESC",
+                      params)
     return {"errors": rows[:int(args.limit)]}, 0
 
 
 def cmd_mark_failed(conn, s, args) -> tuple:
     """Close a run left RUNNING by a crashed process (it wrote no selections: persistence is one transaction)."""
-    n = conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN SET status = 'ERROR', ended_at = ?, "
-                     f"error_type = 'ABANDONED', error_message = ? WHERE run_id = ? AND status = 'RUNNING'",
-                     [s.now(), f"marked failed by {getpass.getuser()}: {args.reason}"[:2000], args.run_id])
-    return {"run_id": args.run_id, "updated": n}, 0 if n else 1
+    n = conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun SET Run_Stat = 'ERROR', End_Dtts = ?, "
+                     f"Error_Ty = 'ABANDONED', Error_Txt = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
+                     f"WHERE Smpl_Run_ID = ? AND Run_Stat = 'RUNNING'",
+                     [s.now(), f"marked failed by {getpass.getuser()}: {args.reason}"[:4000], s.now(), args.run_id])
+    return {"smpl_run_id": args.run_id, "updated": n}, 0 if n else 1
 
 
 def cmd_purge(conn, s, args) -> tuple:
@@ -216,7 +232,7 @@ def cmd_purge(conn, s, args) -> tuple:
 
 def cmd_test_connection(conn, s, args) -> tuple:
     rows = conn.query("SELECT CURRENT_TIMESTAMP AS db_time, USER AS db_user, DATABASE AS default_database")
-    tables = conn.query("SELECT TableName FROM DBC.TablesV WHERE DatabaseName = ? AND TableName LIKE 'GOVT_RGLTRY_SAMPL%'",
+    tables = conn.query("SELECT TableName FROM DBC.TablesV WHERE DatabaseName = ? AND UPPER(TableName) LIKE 'GOVT_RGLTRY_SAMPL%'",
                         [s.meta_db])
     return {"connected": True, "host": conn.host, **(rows[0] if rows else {}),
             "sampling_tables": sorted(str(t["tablename"]).strip() for t in tables)}, 0
@@ -281,19 +297,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING (default SAMPLING_LOG_LEVEL or INFO)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    def scope(sp):
-        sp.add_argument("--config-id", type=int)
-        sp.add_argument("--project")
-        sp.add_argument("--process-name")
+    def scope(sp, required: bool = False):
+        """a project, optionally one table and / or one run type (required: exactly one sample)"""
+        sp.add_argument("--project", required=required, help="Project_Cd")
+        sp.add_argument("--table", required=required, help="Table_Nm")
+        sp.add_argument("--run-type", required=required, help="Run_Ty (DLY, WKLY, MNT ...)")
 
     def params(sp):
         sp.add_argument("--run-param", action="append", metavar="KEY=VALUE", help="a {key} / $key value (repeat)")
         sp.add_argument("--run-params", metavar="JSON", help='all values at once, e.g. {"pull_date": "2026-10-30"}')
         sp.add_argument("--filter", action="append", metavar="SQL",
-                        help="a condition on the universe table, ANDed to scope_sql (repeat), "
+                        help="a condition on the source table, ANDed to Scope_Sql_Txt (repeat), "
                              "e.g. \"BTCH_ID = 'B42'\"")
 
-    r = sub.add_parser("run", help="run the sampling configs of a scope")
+    r = sub.add_parser("run", help="run the samples of a scope (a project, a table, a run type)")
     scope(r)
     params(r)
     r.add_argument("--run-key", help="which logical run (default: the as-of date)")
@@ -304,30 +321,30 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--force-reason", help="replace a FINAL sample of the run key (recorded on the run row)")
 
     fz = sub.add_parser("finalize", help="make the current sample of a run key final")
-    fz.add_argument("--config-id", type=int, required=True)
+    scope(fz, required=True)
     fz.add_argument("--run-key", required=True)
     fz.add_argument("--by", help="recorded as finalized_by (default: your user name)")
 
     rp = sub.add_parser("replace", help="replace one selected case by the next candidate of its bucket")
-    rp.add_argument("--config-id", type=int, required=True)
+    scope(rp, required=True)
     rp.add_argument("--run-key", required=True)
-    rp.add_argument("--case-key", required=True, help="as in GOVT_RGLTRY_SAMPLE_SELECTIONS.case_key")
+    rp.add_argument("--case-key", required=True, help="as in GOVT_RGLTRY_SampleSelection.Case_Key")
     rp.add_argument("--reason", required=True)
     rp.add_argument("--any-bucket", action="store_true", help="take the next candidate of any bucket when its "
                                                               "own has none left")
     rp.add_argument("--by", help="recorded as status_by (default: your user name)")
 
-    v = sub.add_parser("validate", help="check the configs of a scope")
+    v = sub.add_parser("validate", help="check the samples of a scope")
     scope(v)
     params(v)
     v.add_argument("--check-sql", action="store_true", help="also run the parameter lookups and EXPLAIN every query")
 
-    sc = sub.add_parser("show-config", help="one config with every rule row and its problems")
-    sc.add_argument("--config-id", type=int, required=True)
+    sc = sub.add_parser("show-config", help="one sample with the rule rows it uses and its problems")
+    scope(sc, required=True)
 
-    for name, helptext in (("runs", "recent runs (GOVT_RGLTRY_SAMPLING_RUN)"), ("errors", "open errors: latest attempt failed")):
+    for name, helptext in (("runs", "recent runs (GOVT_RGLTRY_SamplingRun)"), ("errors", "open errors: latest attempt failed")):
         sp = sub.add_parser(name, help=helptext)
-        sp.add_argument("--config-id", type=int)
+        scope(sp)
         sp.add_argument("--run-key")
         sp.add_argument("--limit", type=int, default=20)
         if name == "runs":

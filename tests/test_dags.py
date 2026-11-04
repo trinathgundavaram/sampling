@@ -7,12 +7,12 @@ import pytest
 
 pytest.importorskip("airflow.sdk")
 
-from conftest import ROOT, build_universe, insert_config, um_config  # noqa: E402
+from conftest import ROOT, build_source, insert_config, key, um_config  # noqa: E402
 from sampling import dags  # noqa: E402
 from sampling.settings import ConfigError  # noqa: E402
 
 VAR_KEY = "govt_rgltry_umcm_sampling_config_var"
-BASE = {"td_conn_var": "DEV", "meta_db": "main", "load_env": "DEV", "project": "UMCM", "process_name": "WEEKLY",
+BASE = {"td_conn_var": "DEV", "meta_db": "main", "load_env": "DEV", "project": "UMCM", "run_type": "WKLY",
         "run_params": {"batch_id": "2026-08-01"}, "as_of": "2026-08-01", "access_lock": False}
 
 
@@ -39,7 +39,8 @@ def test_dag_parses_with_the_example_variable(variable):
     dag = _load_dag_file()
     assert dag.dag_id == "GOVT_RGLTRY_UMCM_SAMPLING" and dag.max_active_runs == 1
     assert set(dag.task_dict) == {"run_sampling", "trigger_next_dag", "success_email", "fail_email"}
-    assert set(dag.params) >= {"config_id", "project", "process_name", "run_key", "run_params", "seed", "as_of"}
+    assert set(dag.params) >= {"project", "table", "run_type", "run_key", "run_params", "seed", "as_of"}
+    assert "run" not in dag.params and type(dag.timetable).__name__ == "CronTriggerTimetable"
 
 
 def test_dag_parses_without_a_variable(monkeypatch):
@@ -49,9 +50,54 @@ def test_dag_parses_without_a_variable(monkeypatch):
 
 
 def test_runs_entries_become_tasks(variable):
-    variable({**BASE, "runs": [{"name": "weekly", "process_name": "WEEKLY"}, {"config_id": 7}]})
+    variable({**BASE, "runs": [{"name": "weekly", "run_type": "WKLY"}, {"table": "ODAG1", "run_type": "MNT"}]})
     dag = _load_dag_file()
-    assert sorted(dag.task_dict) == ["run_sampling_7", "run_sampling_weekly_weekly"]
+    assert sorted(dag.task_dict) == ["run_sampling_odag1_mnt", "run_sampling_weekly_wkly"]
+
+
+TIMED = {**BASE, "runs": [{"name": "daily", "run_type": "DLY", "schedule_interval": "0 6 * * *"},
+                          {"name": "weekly", "run_type": "WKLY", "schedule_interval": "0 8 * * 5"},
+                          {"name": "monthly", "run_type": "MNT", "schedule_interval": "0 9 1 * *"}]}
+
+
+class _DagRun:
+    def __init__(self, run_type="scheduled", when=None, conf=None):
+        import pendulum
+        self.run_type, self.conf = run_type, conf or {}
+        self.run_after = self.logical_date = when or pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")
+
+
+def test_timed_runs_one_task_scheduled_at_every_time(variable):
+    variable(TIMED)
+    dag = _load_dag_file()
+    assert list(dag.task_dict) == ["run_sampling"] and "run" in dag.params
+    assert type(dag.timetable).__name__ == "MultipleCronTriggerTimetable"
+    import pendulum
+    friday_8 = pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")         # a Friday
+    assert dags.chosen_runs(TIMED, _DagRun(when=friday_8)) == [1]
+    first_6 = pendulum.datetime(2026, 9, 1, 6, tz="America/Chicago")
+    assert dags.chosen_runs(TIMED, _DagRun(when=first_6)) == [0]
+    assert dags.chosen_runs(TIMED, _DagRun("manual", conf={"run": "Monthly, daily"})) == [2, 0]
+    assert dags.chosen_runs(TIMED, _DagRun("manual")) == [None]               # the Variable's own scope
+    with pytest.raises(ConfigError, match="not a name in runs"):
+        dags.chosen_runs(TIMED, _DagRun("manual", conf={"run": "yearly"}))
+
+
+def test_a_timed_run_samples_the_entries_due(monkeypatch, variable, raw):
+    from sampling.db import Connection
+    build_source(raw.db)
+    um_config(raw.db, run_ty="WKLY")
+    insert_config(raw.db, config_id=2, run_ty="MNT", table_nm="T1", exclusion_sql=None)   # T1 monthly
+    variable(TIMED)
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(raw, "close", lambda: None)
+    report = dags.run_timed_task(VAR_KEY, {}, _DagRun())                      # Friday 8:00: weekly only
+    assert [(r["table_nm"], r["run_ty"]) for r in report["runs"]] == [("T1", "WKLY")]
+    report = dags.run_timed_task(VAR_KEY, {"run": "weekly,monthly"}, _DagRun("manual", conf={"run": "weekly,monthly"}))
+    assert [(r["table_nm"], r["run_ty"], r["status"]) for r in report["runs"]] == \
+        [("T1", "WKLY", "COMPLETED"), ("T1", "MNT", "COMPLETED")]
+    with pytest.raises(dags.AirflowFailException, match="1 of 1 run"):        # no daily sample: a config problem
+        dags.run_timed_task(VAR_KEY, {}, _DagRun("manual", conf={"run": "daily"}))
 
 
 def test_trigger_keys_limit_what_an_upstream_dag_can_change(variable):
@@ -85,11 +131,11 @@ def test_sample_ready_email_and_its_summary(variable):
 
     class TI:
         def xcom_pull(self, task_ids):
-            return {"runs": [{"sample_name": "S<1>", "run_key": "B42", "status": "COMPLETED", "selected": 150,
-                              "target_volume": 150, "shortfall": 0, "output_table": "DB.OUT",
+            return {"runs": [{"project_cd": "UMCM", "table_nm": "S<1>", "run_ty": "WKLY", "run_key": "B42", "status": "COMPLETED", "selected": 150,
+                              "target_cnt": 150, "shortfall": 0, "smpl_table_nm": "DB.OUT",
                               "config_hash": "abcdef0123456789"}]}
     text = dags.sample_summary(TI(), ["run_sampling"])
-    assert "S&lt;1&gt;" in text and "<td>B42</td>" in text and "abcdef012345<" in text and "DB.OUT" in text
+    assert "UMCM.S&lt;1&gt;.WKLY" in text and "<td>B42</td>" in text and "abcdef012345<" in text and "DB.OUT" in text
     assert dags.sample_summary(type("E", (), {"xcom_pull": lambda self, task_ids: None})(), ["x"]) == \
         "<p>No sample was made.</p>"
     rendered = dag.get_template_env().from_string(ready.html_content).render(run_id="manual__1", ti=TI())
@@ -102,7 +148,7 @@ def test_retention_task(monkeypatch, variable, raw):
     dag = _load_dag_file()
     purge = dag.task_dict["purge_selections"]
     assert purge.upstream_task_ids == {"run_sampling"} and "purge_selections" in dag.task_dict["fail_email"].upstream_task_ids
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
@@ -114,9 +160,10 @@ def test_retention_task(monkeypatch, variable, raw):
 
 
 def test_layering_and_blocked_trigger_keys(variable):
-    variable({**BASE, "runs": [{"config_id": 5}]})
+    variable({**BASE, "runs": [{"table": "ODAG1", "name": "x", "schedule_interval": "0 1 * * *"}]})
     config = dags.resolve_config(VAR_KEY, {"RUN_KEY": "rk", "meta_db": "PROD_DB", "td_conn_var": "PROD"}, 0)
-    assert config["config_id"] == 5 and "process_name" not in config      # the entry's scope replaces the Variable's
+    assert (config["project"], config["table"], config["run_type"]) == ("UMCM", "ODAG1", "WKLY")   # layered
+    assert "schedule_interval" not in config and "name" not in config
     assert config["run_key"] == "rk" and config["meta_db"] == "main" and config["td_conn_var"] == "DEV"
 
 
@@ -127,7 +174,7 @@ def _run_task(monkeypatch, raw, overrides=None):
 
 
 def test_task_runs_the_scope_and_exports_the_connection(monkeypatch, variable, raw):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     report = _run_task(monkeypatch, raw)
     assert report["result"] == "ALL SAMPLES COMPLETED" and report["runs"][0]["selected"] == 150
@@ -139,8 +186,8 @@ def test_task_runs_the_scope_and_exports_the_connection(monkeypatch, variable, r
 
 def test_config_problem_fails_without_retry(monkeypatch, variable, raw):
     from airflow.sdk.exceptions import AirflowFailException
-    build_universe(raw.db)
-    insert_config(raw.db, sampling_method="BOGUS")
+    build_source(raw.db)
+    insert_config(raw.db, smpl_method_cd="BOGUS")
     with pytest.raises(AirflowFailException):
         _run_task(monkeypatch, raw)
 
@@ -150,18 +197,18 @@ def test_a_final_sample_is_not_replaced_by_the_dag(monkeypatch, variable, raw, s
     from sampling.db import Connection
     from sampling.engine import finalize_run
     monkeypatch.setattr(raw, "close", lambda: None)   # the task closes its connection: keep the test DB
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     _run_task(monkeypatch, raw)
-    finalize_run(Connection(raw, access_lock=False), settings, 1, "2026-08-01", "auditor")
+    finalize_run(Connection(raw, access_lock=False), settings, key(1), "2026-08-01", "auditor")
     with pytest.raises(AirflowFailException):        # FINALIZED is a configuration problem: no retry
         _run_task(monkeypatch, raw)
 
 
 def test_technical_problem_is_retried(monkeypatch, variable, raw):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
-    raw.fail_on = "FROM case_universe WHERE (pull_date"
+    raw.fail_on = "FROM main.case_source WHERE (pull_date"
     with pytest.raises(RuntimeError):
         _run_task(monkeypatch, raw)
 
@@ -169,19 +216,19 @@ def test_technical_problem_is_retried(monkeypatch, variable, raw):
 def test_unknown_scope_and_missing_meta_db_fail_without_retry(monkeypatch, variable, raw):
     from airflow.sdk.exceptions import AirflowFailException
     with pytest.raises(AirflowFailException):
-        _run_task(monkeypatch, raw, {"process_name": "NOPE"})
+        _run_task(monkeypatch, raw, {"project": "NOPE"})
     variable({**BASE, "meta_db": ""})
     with pytest.raises(AirflowFailException):
         _run_task(monkeypatch, raw)
 
 
 def test_as_of_and_run_params_from_a_trigger(monkeypatch, variable, raw):
-    build_universe(raw.db)
+    build_source(raw.db)
     um_config(raw.db)
     report = _run_task(monkeypatch, raw, {"as_of": "2026-09-01", "run_params": '{"batch_id": "2026-08-01"}',
                                           "dry_run": "true"})
     run = report["runs"][0]
-    assert run["as_of_date"] == "2026-09-01" and run["dry_run"] is True and run["sample_run_id"] is None
+    assert run["as_of_date"] == "2026-09-01" and run["dry_run"] is True and run["smpl_run_id"] is None
     with pytest.raises(ConfigError):
         dags._as_of({"as_of": "09/01/2026"}, None, "America/Chicago")
     assert dags._as_of({}, None, "America/Chicago") <= date.today()
@@ -189,7 +236,7 @@ def test_as_of_and_run_params_from_a_trigger(monkeypatch, variable, raw):
 
 def test_extra_filters_add_up_across_the_layers(variable):
     variable({**BASE, "extra_filters": "ETL_IS_CURR_IND = 'Y'",
-              "runs": [{"config_id": 5, "extra_filters": ["SRC = 'A'", "X = 1 OR Y = 2"]}]})
+              "runs": [{"table": "T5", "extra_filters": ["SRC = 'A'", "X = 1 OR Y = 2"]}]})
     config = dags.resolve_config(VAR_KEY, {"extra_filters": "BTCH_ID = 'B42'"}, 0)
     assert config["extra_filters"] == "(ETL_IS_CURR_IND = 'Y') AND (SRC = 'A') AND (X = 1 OR Y = 2) AND (BTCH_ID = 'B42')"
     variable({**BASE, "extra_filters": "A = 1"})

@@ -1,198 +1,242 @@
 -- ============================================================================
--- Stratified sampling - Teradata DDL (4 tables)
+-- Stratified sampling - Teradata DDL (5 tables), named as the framework's tables
 --
 -- {{META_DB}} is a placeholder: replace it with the metadata database
 -- (the Variable's meta_db / SAMPLING_META_DB) before running, or let
 --   python local/run_sampling.py deploy-schema
--- do it. The engine never creates or alters tables.
+-- do it. The engine never creates or alters tables. No secondary indexes:
+-- each table has only its primary index.
 --
---   GOVT_RGLTRY_SAMPLING_CONFIG     you    one row per sample: universe, scope, size, method, sample table
---   GOVT_RGLTRY_SAMPLING_RULE       you    every rule of a sample, one row each:
---                                  PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET
---   GOVT_RGLTRY_SAMPLING_RUN        engine one row per run attempt: status, totals, errors, report
---   GOVT_RGLTRY_SAMPLE_SELECTIONS   engine one row per case considered by a run
+-- A sample is one Project_Cd + Table_Nm + Run_Ty (DLY, WKLY, MNT ...), as the
+-- framework scopes its batches. Rules apply to it when their Table_Nm and
+-- Run_Ty are its own or '*' (every table / every run type); for the same rule
+-- the most specific row wins.
 --
--- act_ind = 1 means in use, 0 means ignored: never delete a configuration row.
--- A rerun of the same (config_id, run_key) marks the earlier run's rows
--- etl_is_curr_ind = 'N'. Run rows are never deleted. GOVT_RGLTRY_SAMPLE_SELECTIONS
--- rows no longer needed are deleted only by purge (runbook section 12).
+--   GOVT_RGLTRY_SamplingConfig   you    one row per sample: source, scope, size, method, sample table
+--   GOVT_RGLTRY_SamplingRule     you    every rule, one row each:
+--                                       PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET
+--   GOVT_RGLTRY_SamplingRun      engine one row per run attempt: status, counts, errors, the config it used
+--   GOVT_RGLTRY_SamplingRunRule  engine the rule rows each run used (its snapshot)
+--   GOVT_RGLTRY_SampleSelection  engine one row per case considered by a run
+--
+-- Active_Ind = 1 means in use, 0 means ignored: never delete a configuration row.
+-- A rerun of the same sample and Run_Key marks the earlier run's rows
+-- Curr_Ind = 0. Run rows are never deleted. GOVT_RGLTRY_SampleSelection rows no
+-- longer needed are deleted only by purge (runbook section 12).
 -- No statement or comment in this file may contain a semicolon except at the
 -- end of a statement (deploy-schema splits on them).
 -- ============================================================================
 
 
--- 1. GOVT_RGLTRY_SAMPLING_CONFIG - one row per sample --------------------------------
-CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_CONFIG (
-    config_id          INTEGER NOT NULL,
-    act_ind            BYTEINT DEFAULT 1,
-    project_name       VARCHAR(100) NOT NULL,          -- scope key (the Variable's project)
-    process_name       VARCHAR(100) NOT NULL,          -- scope key (the Variable's process_name)
-    sample_name        VARCHAR(100) NOT NULL,          -- shown in run ids and reports
-    universe_table     VARCHAR(200) NOT NULL,          -- database.table or view to sample from, $env allowed
-    key_columns        VARCHAR(500) NOT NULL,          -- comma separated columns identifying one case
-    scope_sql          CLOB,                           -- WHERE condition: this run's rows (default 1=1),
-                                                       -- {name} / $name parameters and $env allowed
-    target_volume      INTEGER NOT NULL DEFAULT 150,   -- sample size
-    sampling_method    VARCHAR(20) DEFAULT 'RANKED',   -- RANKED | RANDOM | SYSTEMATIC
-    priority_rank_sql  CLOB,                           -- optional ORDER BY list applied after the
-                                                       -- PRIORITY rules
-    rounding_mode      VARCHAR(10) DEFAULT 'FLOOR',    -- FLOOR | ROUND | CEIL for each bucket's share
-    diversity_expr     VARCHAR(1000),                  -- optional SQL expression: picks rotate across its
-                                                       -- values (e.g. a code family) within each bucket
-    diversity_cap      INTEGER,                        -- optional: at most this many picks per value
-    shortfall_policy   VARCHAR(10) DEFAULT 'TOPUP',    -- TOPUP: fill a short sample from the rest of the
-                                                       -- candidates by priority | NONE: leave it short
-    keep_excluded      BYTEINT DEFAULT 1,              -- 1 = store excluded rows with their reason too
-    output_db          VARCHAR(128),                   -- optional: database of the sample table, $env allowed
-    output_table       VARCHAR(128),                   -- optional: the sample table (created by another
-                                                       -- process): one row per selected case, every column
-                                                       -- of its source row, the ETL_* audit and SMPL_* run
-                                                       -- columns set by sampling (runbook 4.3), $env allowed
-    schedule_cron      VARCHAR(50),                    -- documentation only: the schedule is in the Variable
-    created_by         VARCHAR(100),
-    last_updated_by    VARCHAR(100),
-    load_datetime      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    last_updated_datetime TIMESTAMP(6)
+-- 1. GOVT_RGLTRY_SamplingConfig - one row per sample ---------------------------
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingConfig (
+  Project_Cd             VARCHAR(30)    NOT NULL,          -- the framework's project
+  Table_Nm               VARCHAR(63)    NOT NULL,          -- the framework's table (e.g. ODAG1)
+  Run_Ty                 VARCHAR(20)    NOT NULL,          -- DLY, WKLY, MNT ... (ComplianceRunType)
+  Smpl_Desc              VARCHAR(200),
+  Src_Schema_Nm          VARCHAR(128)   NOT NULL,          -- database of the source table or view, $env allowed
+  Src_Table_Nm           VARCHAR(128)   NOT NULL,          -- the source table or view, $env allowed
+  Key_Columns_Txt        VARCHAR(1000)  NOT NULL,          -- comma separated columns identifying one case
+  Scope_Sql_Txt          VARCHAR(8000),                    -- WHERE condition: this run's rows (default 1=1),
+                                                           -- {name} / $name parameters and $env allowed
+  Target_Cnt             INTEGER        DEFAULT 150 NOT NULL,   -- sample size
+  Smpl_Method_Cd         VARCHAR(20)    DEFAULT 'RANKED' NOT NULL,  -- RANKED | RANDOM | SYSTEMATIC
+  Priority_Rank_Sql_Txt  VARCHAR(8000),                    -- optional ORDER BY list after the PRIORITY rules
+  Rounding_Cd            VARCHAR(10)    DEFAULT 'FLOOR' NOT NULL,   -- FLOOR | ROUND | CEIL of each bucket's share
+  Diversity_Sql_Txt      VARCHAR(1000),                    -- optional SQL expression: picks rotate across its
+                                                           -- values (e.g. a code family) within each bucket
+  Diversity_Cap_Cnt      INTEGER,                          -- optional: at most this many picks per value
+  Shortfall_Cd           VARCHAR(10)    DEFAULT 'TOPUP' NOT NULL,   -- TOPUP: fill a short sample from the other
+                                                           -- candidates by priority | NONE: leave it short
+  Keep_Excluded_Ind      SMALLINT       DEFAULT 1 NOT NULL,       -- 1 = store excluded rows with their reason too
+  Smpl_Schema_Nm         VARCHAR(128),                     -- optional: database of the sample table, $env allowed
+  Smpl_Table_Nm          VARCHAR(128),                     -- optional: the sample table (created by another
+                                                           -- process): one row per selected case, every column
+                                                           -- of its source row, the ETL_* audit and SMPL_* run
+                                                           -- columns set by sampling (runbook 4.3), $env allowed
+  Active_Ind             SMALLINT       DEFAULT 1 NOT NULL,
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (config_id);
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
 
 
-
--- 2. GOVT_RGLTRY_SAMPLING_RULE - every rule of a sample, one row each ----------------
--- rule_class says what the row is. Columns not used by a class stay NULL
--- (validate reports any that are set).
---
---   PARAM      a run parameter: rule_name = the {token}, rule_sql = a SELECT
---              returning one value (first column, first row). Run first, in
---              seq_no order. A value passed with the run wins.
---   GATE       a readiness check: rule_sql is a SELECT that must return at
---              least one row (e.g. "the batch is closed"). Run after the
---              PARAM rules: no row = GATE_NOT_MET, retried like a technical
---              error. rule_name and description go into the message.
---   Every EXCLUSION / PRIORITY / LEVEL / BUCKET rule_sql is a whole SELECT
---   (any joins) returning the key_columns of the cases it
---   matches (+ one value column for a PRIORITY EXPRESSION or a LEVEL).
---   EXCLUSION  rule_type QUERY (default): the cases it returns are excluded |
---              PRIOR_SELECTION: selected by an earlier run (lookback_days,
---              history_scope). The first match (seq_no) is the reason stored.
---   PRIORITY   rule_type QUERY (default): the cases it returns first |
---              EXPRESSION: by the value it returns (sort_dir) |
---              PRIOR_CANDIDATE: considered earlier, never selected, first |
---              PRIOR_SELECTION: selected earlier, last. Applied in seq_no order.
---   LEVEL      a stratification level: level_order, rule_name = its name,
---              rule_sql = a SELECT of each case's value (the values are the
---              buckets), or NULL for a level of bucket SELECTs (BUCKET rule_sql).
---              parent_path = which parent buckets it splits (* = all).
---              unlisted_policy = values / rows no BUCKET row covers.
---   BUCKET     a bucket of the level with the same level_order: rule_name =
---              the value or the bucket's name (no '/'), rule_sql = its
---              SELECT (bucket levels only, first in seq_no order; NULL = the rest),
---              parent_path = under which parents this row applies, quota_mode,
---              target_fraction, max_count.
-CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RULE (
-    rule_id            INTEGER NOT NULL,               -- unique in the table
-    config_id          INTEGER NOT NULL,
-    act_ind            BYTEINT DEFAULT 1,
-    rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET
-    seq_no             INTEGER DEFAULT 100,            -- order within the class
-    rule_name          VARCHAR(200) NOT NULL,
-    rule_type          VARCHAR(30),                    -- EXCLUSION: QUERY (default) | PRIOR_SELECTION
-                                                       -- PRIORITY: QUERY (default) | EXPRESSION |
-                                                       --   PRIOR_CANDIDATE | PRIOR_SELECTION
-                                                       -- BUCKET: QUERY (default)
-    rule_sql           CLOB,                           -- a SELECT (see above)
-    level_order        INTEGER,                        -- LEVEL / BUCKET: 0 = first split, 1 = within it, ...
-    parent_path        VARCHAR(1000) DEFAULT '*',      -- LEVEL / BUCKET: path pattern of parent buckets,
-                                                       -- e.g. 'Denied' or 'Denied/*' (* and ? wildcards)
-    unlisted_policy    VARCHAR(10),                    -- LEVEL: SHARE (default) = share 1 - SUM(fractions) |
-                                                       -- REMAINDER | SKIP = never selected
-    quota_mode         VARCHAR(10),                    -- BUCKET: FRACTION (default) | ALL | REMAINDER
-    target_fraction    FLOAT,                          -- BUCKET FRACTION: 0 to 1
-    max_count          INTEGER,                        -- BUCKET: optional cap
-    sort_dir           VARCHAR(4),                     -- PRIORITY EXPRESSION: ASC (default) | DESC
-    lookback_days      INTEGER,                        -- PRIOR_*: how far back (sample_cycle)
-    history_scope      VARCHAR(10),                    -- PRIOR_*: CONFIG (default, this sample) | PROJECT
-    description        VARCHAR(1000),
-    created_by         VARCHAR(100),
-    load_datetime      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    last_updated_datetime TIMESTAMP(6)
+-- 2. GOVT_RGLTRY_SamplingRule - every rule, one row each -------------------------
+-- Rule_Class_Cd says what the row is. Columns not used by a class stay NULL
+-- (validate reports any that are set). Table_Nm / Run_Ty '*' = every table /
+-- every run type of the project. When rows of the same class and Rule_Nm
+-- (and Level_Nbr, Parent_Path_Txt) apply to a sample, the most specific wins:
+-- its table and run type, then its table, then its run type, then '*'.
+--   PARAM      a run parameter: Rule_Nm = the {token}, Rule_Sql_Txt = a SELECT
+--              whose first column of the first row is the value (a value
+--              passed with the run wins). No value = PARAM_FAILURE (retried).
+--   GATE       a readiness check: Rule_Sql_Txt = a SELECT that must return a
+--              row before the run may sample, e.g. "the batch is closed".
+--              Runs after the PARAM rules: no row = GATE_NOT_MET, retried like a
+--              technical error. Rule_Nm and Rule_Desc go into the message.
+--   Every EXCLUSION / PRIORITY / LEVEL / BUCKET Rule_Sql_Txt is a whole SELECT
+--   (any joins) returning the Key_Columns_Txt columns of the cases it matches
+--   (+ one value column for a PRIORITY EXPRESSION or a LEVEL).
+--   EXCLUSION  Rule_Ty QUERY (default): the cases it returns are excluded |
+--              PRIOR_SELECTION: selected by an earlier run (Lookback_Days,
+--              History_Scope_Cd SAMPLE | TABLE | PROJECT).
+--              The first matching rule (Seq_Nbr) is the reason stored.
+--   PRIORITY   Rule_Ty QUERY (default): the cases it returns first |
+--              EXPRESSION: ordered by the value it returns (Sort_Dir_Cd) |
+--              PRIOR_CANDIDATE: unselected in an earlier run first |
+--              PRIOR_SELECTION: selected in an earlier run last.
+--              Criterion 1 (Seq_Nbr) first, then 2 ...
+--   LEVEL      a stratification level (Level_Nbr 0, 1 ...): Rule_Sql_Txt =
+--              a SELECT of the key columns and each case's value (NULL: the
+--              level's buckets have their own SELECTs). Parent_Path_Txt = under
+--              which parent buckets it splits ('*' everywhere), Unlisted_Cd =
+--              values / rows no BUCKET row covers.
+--   BUCKET     a bucket of the level with the same Level_Nbr: Rule_Nm = the
+--              value or the bucket's name (no '/'), Rule_Sql_Txt = its SELECT
+--              (bucket levels only, first in Seq_Nbr order, NULL = the rest),
+--              Parent_Path_Txt = under which parents this row applies, Quota_Cd,
+--              Target_Fraction_Val, Max_Cnt.
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule (
+  Rule_ID                INTEGER        NOT NULL,          -- unique in the table
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    DEFAULT '*' NOT NULL,     -- a table, or '*' = every table of the project
+  Run_Ty                 VARCHAR(20)    DEFAULT '*' NOT NULL,     -- a run type, or '*' = every run type
+  Rule_Class_Cd          VARCHAR(20)    NOT NULL,          -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET
+  Seq_Nbr                INTEGER        DEFAULT 100 NOT NULL,     -- order within the class (and level)
+  Rule_Nm                VARCHAR(200)   NOT NULL,
+  Rule_Ty                VARCHAR(30),                      -- see above, per class
+  Rule_Sql_Txt           VARCHAR(32000),                   -- a SELECT (see above)
+  Level_Nbr              INTEGER,                          -- LEVEL / BUCKET
+  Parent_Path_Txt        VARCHAR(1000)  DEFAULT '*',       -- LEVEL / BUCKET: parent bucket path pattern
+  Unlisted_Cd            VARCHAR(10),                      -- LEVEL: SHARE (default) | REMAINDER | SKIP
+  Quota_Cd               VARCHAR(10),                      -- BUCKET: FRACTION (default) | ALL | REMAINDER
+  Target_Fraction_Val    FLOAT,                            -- BUCKET FRACTION: 0 to 1 of the parent's target
+  Max_Cnt                INTEGER,                          -- BUCKET: optional cap
+  Sort_Dir_Cd            VARCHAR(4),                       -- PRIORITY EXPRESSION: ASC (default) | DESC
+  Lookback_Days          INTEGER,                          -- PRIOR_SELECTION / PRIOR_CANDIDATE
+  History_Scope_Cd       VARCHAR(10),                      -- SAMPLE (default) | TABLE | PROJECT
+  Rule_Desc              VARCHAR(1000),
+  Active_Ind             SMALLINT       DEFAULT 1 NOT NULL,
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (rule_id);
+UNIQUE PRIMARY INDEX (Rule_ID);
 
 
-
--- 3. GOVT_RGLTRY_SAMPLING_RUN - one row per run attempt ------------------------------
-CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RUN (
-    run_id             VARCHAR(200) NOT NULL,
-    config_id          INTEGER,
-    project_name       VARCHAR(100),
-    process_name       VARCHAR(100),
-    sample_name        VARCHAR(100),
-    run_key            VARCHAR(100),
-    as_of_date         DATE,
-    sampling_method    VARCHAR(20),
-    random_seed        BIGINT,                         -- RANDOM / SYSTEMATIC: rerun with it to reproduce
-    target_volume      INTEGER,
-    run_params_txt     VARCHAR(4000),                  -- the run parameters used, looked-up ones included (JSON)
-    total_in_scope     INTEGER,                        -- rows matching scope_sql
-    total_excluded     INTEGER,                        -- of those, left out by exclusions
-    total_candidates   INTEGER,
-    total_selected     INTEGER,
-    shortfall          INTEGER,                        -- target_volume - total_selected
-    status             VARCHAR(20),                    -- RUNNING | COMPLETED | ERROR | FINAL (finalised:
-                                                       -- a rerun of its run_key needs a force reason)
-    error_type         VARCHAR(50),                    -- CONFIG_ERROR | PARAM_FAILURE | PULL_FAILURE |
-                                                       -- QUERY_RULE_FAILURE |
-                                                       -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
-                                                       -- ABANDONED (closed by mark-failed) |
-                                                       -- FINALIZED (its run_key's sample is final) |
-                                                       -- GATE_NOT_MET (a GATE rule returned no row: retried) |
-                                                       -- GATE_FAILURE (a GATE rule's SQL failed)
-    error_message      VARCHAR(2000),
-    error_detail       CLOB,                           -- traceback (technical errors)
-    run_report         CLOB,                           -- JSON: count per exclusion rule, candidates / target /
-                                                       -- selected per bucket, the config and rule rows used
-    config_hash        VARCHAR(64),                    -- SHA-256 of the config and rule rows used: equal
-                                                       -- hashes = same rules
-    override_reason    VARCHAR(1000),                  -- why this run replaced a FINAL run (force)
-    finalized_by       VARCHAR(100),
-    finalized_at       TIMESTAMP(6),
-    etl_is_curr_ind    CHAR(1) DEFAULT 'N',            -- Y = the run whose sample is current for its
-                                                       -- (config_id, run_key)
-    triggered_by       VARCHAR(100),                   -- airflow-scheduled, airflow-manual-<user>, local-<user>
-    started_at         TIMESTAMP(6),
-    ended_at           TIMESTAMP(6),
-    load_datetime      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    last_updated_datetime TIMESTAMP(6)
+-- 3. GOVT_RGLTRY_SamplingRun - one row per run attempt (engine) ------------------
+-- Carries the configuration the run used (its config columns); its rules are in
+-- GOVT_RGLTRY_SamplingRunRule.
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRun (
+  Smpl_Run_ID            VARCHAR(250)   NOT NULL,          -- generated by the engine
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Run_Key                VARCHAR(250)   NOT NULL,          -- the cycle (e.g. the batch id)
+  As_Of_Dt_Key           DATE           NOT NULL,          -- the run's business date
+  Run_Stat               VARCHAR(20)    NOT NULL,          -- RUNNING | COMPLETED | FINAL | ERROR
+  Curr_Ind               SMALLINT       DEFAULT 0 NOT NULL,       -- 1 = the current sample of its Run_Key
+  Random_Seed_Nbr        BIGINT,
+  Run_Parm_Txt           VARCHAR(4000),                    -- the run's parameters (JSON)
+  In_Scope_Cnt           INTEGER,
+  Excluded_Cnt           INTEGER,
+  Candidate_Cnt          INTEGER,
+  Selected_Cnt           INTEGER,
+  Shortfall_Cnt          INTEGER,
+  Error_Ty               VARCHAR(50),                      -- CONFIG_ERROR | FINALIZED | GATE_NOT_MET | GATE_FAILURE |
+                                                           -- PARAM_FAILURE | PULL_FAILURE | QUERY_RULE_FAILURE |
+                                                           -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
+                                                           -- ABANDONED
+  Error_Txt              VARCHAR(4000),
+  Error_Detail_Txt       VARCHAR(8000),                    -- the end of the traceback
+  Run_Rpt_Txt            VARCHAR(16000),                   -- counts per rule and bucket (JSON)
+  Config_Hash            CHAR(64),                         -- SHA-256 of the config and rule rows used
+  Override_Rsn_Txt       VARCHAR(1000),                    -- why a FINAL sample was replaced
+  Finalized_By           VARCHAR(100),
+  Finalized_Dtts         TIMESTAMP(6),
+  Triggered_By           VARCHAR(100),
+  Start_Dtts             TIMESTAMP(6),
+  End_Dtts               TIMESTAMP(6),
+  -- the configuration the run used
+  Src_Schema_Nm          VARCHAR(128),
+  Src_Table_Nm           VARCHAR(128),
+  Key_Columns_Txt        VARCHAR(1000),
+  Scope_Sql_Txt          VARCHAR(8000),
+  Target_Cnt             INTEGER,
+  Smpl_Method_Cd         VARCHAR(20),
+  Priority_Rank_Sql_Txt  VARCHAR(8000),
+  Rounding_Cd            VARCHAR(10),
+  Diversity_Sql_Txt      VARCHAR(1000),
+  Diversity_Cap_Cnt      INTEGER,
+  Shortfall_Cd           VARCHAR(10),
+  Keep_Excluded_Ind      SMALLINT,
+  Smpl_Schema_Nm         VARCHAR(128),
+  Smpl_Table_Nm          VARCHAR(128),
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (run_id);
+UNIQUE PRIMARY INDEX (Smpl_Run_ID);
 
 
-
--- 4. GOVT_RGLTRY_SAMPLE_SELECTIONS - every case considered: selected, not, excluded --
-CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLE_SELECTIONS (
-    sample_run_id      VARCHAR(200) NOT NULL,          -- = GOVT_RGLTRY_SAMPLING_RUN.run_id
-    config_id          INTEGER NOT NULL,
-    project_name       VARCHAR(100),
-    process_name       VARCHAR(100),
-    run_key            VARCHAR(100) NOT NULL,
-    sample_cycle       DATE,                           -- the run's as-of (business) date
-    case_key           VARCHAR(500) NOT NULL,          -- col1=val1|col2=val2 of key_columns
-    priority_rank      INTEGER,                        -- 1 = highest priority, NULL when excluded
-    selected_flag      BYTEINT DEFAULT 0,              -- 1 = in the sample
-    selection_order    INTEGER,                        -- selected: 1..n in priority order
-    excluded_flag      BYTEINT DEFAULT 0,              -- 1 = left out by an exclusion rule
-    exclusion_reason   VARCHAR(200),                   -- the first exclusion rule that matched
-    stratum_path       VARCHAR(1000),                  -- the case's bucket at every level, e.g. Denied/Part B
-    selection_status   VARCHAR(20),                    -- SELECTED | REPLACED (taken out of the sample) |
-                                                       -- REPLACEMENT (put in for a REPLACED case) | NULL
-    linked_case_key    VARCHAR(500),                   -- REPLACED: its replacement, REPLACEMENT: the case replaced
-    status_reason      VARCHAR(1000),                  -- why it was replaced
-    status_by          VARCHAR(100),
-    status_at          TIMESTAMP(6),
-    etl_is_curr_ind    CHAR(1) DEFAULT 'Y',            -- Y = current run of its (config_id, run_key)
-    load_datetime      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    last_updated_datetime TIMESTAMP(6)                 -- set when etl_is_curr_ind turns N or the case is replaced
+-- 4. GOVT_RGLTRY_SamplingRunRule - the rule rows each run used (engine) ----------
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRunRule (
+  Smpl_Run_ID            VARCHAR(250)   NOT NULL,
+  Rule_ID                INTEGER        NOT NULL,
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Rule_Class_Cd          VARCHAR(20)    NOT NULL,
+  Seq_Nbr                INTEGER,
+  Rule_Nm                VARCHAR(200)   NOT NULL,
+  Rule_Ty                VARCHAR(30),
+  Rule_Sql_Txt           VARCHAR(32000),
+  Level_Nbr              INTEGER,
+  Parent_Path_Txt        VARCHAR(1000),
+  Unlisted_Cd            VARCHAR(10),
+  Quota_Cd               VARCHAR(10),
+  Target_Fraction_Val    FLOAT,
+  Max_Cnt                INTEGER,
+  Sort_Dir_Cd            VARCHAR(4),
+  Lookback_Days          INTEGER,
+  History_Scope_Cd       VARCHAR(10),
+  Rule_Desc              VARCHAR(1000),
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-PRIMARY INDEX (sample_run_id);
+PRIMARY INDEX (Smpl_Run_ID);
 
+
+-- 5. GOVT_RGLTRY_SampleSelection - one row per case considered (engine) ----------
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SampleSelection (
+  Smpl_Run_ID            VARCHAR(250)   NOT NULL,
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Run_Key                VARCHAR(250)   NOT NULL,
+  Smpl_Cycle_Dt_Key      DATE           NOT NULL,          -- the run's As_Of_Dt_Key
+  Case_Key               VARCHAR(1000)  NOT NULL,          -- 'col1=val1|col2=val2' of the key columns
+  Priority_Rank_Nbr      INTEGER,                          -- the case's place in priority order
+  Selected_Ind           SMALLINT       DEFAULT 0 NOT NULL,
+  Selection_Order_Nbr    INTEGER,
+  Excluded_Ind           SMALLINT       DEFAULT 0 NOT NULL,
+  Exclusion_Rsn_Txt      VARCHAR(200),                     -- the EXCLUSION rule's Rule_Nm
+  Stratum_Path_Txt       VARCHAR(1000),                    -- the bucket path, e.g. Denied/Part B
+  Selection_Stat         VARCHAR(20),                      -- SELECTED | REPLACED | REPLACEMENT
+  Linked_Case_Key        VARCHAR(1000),                    -- the case it replaced / was replaced by
+  Stat_Rsn_Txt           VARCHAR(1000),
+  Stat_By                VARCHAR(100),
+  Stat_Dtts              TIMESTAMP(6),
+  Curr_Ind               SMALLINT       DEFAULT 1 NOT NULL,
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
+)
+PRIMARY INDEX (Smpl_Run_ID);

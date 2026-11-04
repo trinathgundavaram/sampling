@@ -23,7 +23,7 @@ _IDENT = re.compile(r"^[A-Za-z_$#][A-Za-z0-9_$#]{0,127}$")
 
 
 class ConfigError(ValueError):
-    """A configuration problem (Variable, settings or GOVT_RGLTRY_SAMPL* rows): retrying does not help."""
+    """A configuration problem (Variable, settings or GOVT_RGLTRY_Sampl* rows): retrying does not help."""
 
 
 def _flag(value: Any, default: bool) -> bool:

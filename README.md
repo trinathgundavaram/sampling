@@ -10,12 +10,15 @@ versions sharing the same engine code:
 
 What a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
 buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
-(no repeats, carry-over) and code variety; the selected cases' source rows go to a sample table per config. No field name or value is in the code.
+(no repeats, carry-over) and code variety; the selected cases' source rows go to a sample table per sample. No field name or value is in the code.
+A sample is one **project + table + run type** (DLY, WKLY, MNT …), as the framework scopes its batches; a rule row
+may name one table and run type or `*` for all of them (the most specific row wins), so run types share rules or
+have their own.
 Every exclusion, priority and bucket rule is a whole `SELECT` (any joins) returning the keys of the cases it
 matches. For tables holding several loads, batches or SCD2 versions, a run can be given
 `extra_filters`: a SQL condition ANDed to the scope.
 
-Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
+Every run keeps the configuration and the rules it used (with a hash), in plain columns (no CLOB). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.
 Configured SQL is checked to only read; everything is driven by the metadata tables (no configuration files);
 old candidate rows are purged on a retention period that keeps every sample.
@@ -23,7 +26,7 @@ old candidate rows are purged on a retention period that keeps every sample.
 ```
 airflow/                 DAG file + sampling/ package: the engine (engine.py, db.py, settings.py) and dags.py
 local/                   run_sampling.py, dev.env.example (imports the engine from airflow/sampling)
-sql/                     schema.sql (4 tables), schema_drop.sql (DDL only)
+sql/                     schema.sql (5 GOVT_RGLTRY_Sampl* tables), schema_drop.sql (DDL only)
 airflow_resources/       docs, the example Variable, worker requirements
 tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests need apache-airflow 3
 ```

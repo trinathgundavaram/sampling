@@ -1,13 +1,13 @@
 """Teradata layer: the connection wrapper, transactions, {key} / $key parameters, run ids.
 
-One Teradata connection serves everything a run touches: the GOVT_RGLTRY_SAMPL* metadata tables (in
-Settings.meta_db) and the universe table a config samples from (fully qualified in the config row).
+One Teradata connection serves everything a run touches: the GOVT_RGLTRY_Sampl* metadata tables (in
+Settings.meta_db), the source table a sample reads (Src_Schema_Nm.Src_Table_Nm) and its sample table.
 
 The connection comes from the TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH environment
 variables - set by the Airflow bridge from the Teradata Connection, or locally from dev.env. Nothing else here
 knows where they came from.
 
-Logging: SQL text and row counts only, never bind values or fetched row data (the universe can hold member and
+Logging: SQL text and row counts only, never bind values or fetched row data (the source can hold member and
 case identifiers).
 """
 from __future__ import annotations
@@ -213,7 +213,7 @@ class Connection:
 
 
 # ---------------------------------------------------------------------------
-# {key} / $key run parameters in scope_sql and the rules' SQL
+# {key} / $key run parameters in Scope_Sql_Txt and the rules' SQL
 # ---------------------------------------------------------------------------
 # Both spellings, freely mixed. "$key" ends at a word boundary, so "$year" in "$year_end" is not consumed.
 _TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)\b")
@@ -260,13 +260,13 @@ def build_run_key(*parts, delimiter: str = "_") -> str:
 def generate_run_id(*label_parts, timestamp: Optional[datetime] = None) -> str:
     """'<labels joined by ::>::<YYYYMMDDTHHMMSS.ffffff>::<6 hex>' - sortable, readable, collision-free.
 
-    e.g. UMCM.UMCM_WEEKLY_SAMPLE::2026-10-30::attempt-2::airflow-scheduled::20261030T080000.183045::f9e8d7
+    e.g. UMCM.ODAG1.WKLY::2026-10-30::attempt-2::airflow-scheduled::20261030T080000.183045::f9e8d7
     """
     ts = (timestamp or datetime.now()).strftime("%Y%m%dT%H%M%S.%f")
     labels = [str(p) for p in label_parts if p not in (None, "")]
     run_id = "::".join([*labels, ts, secrets.token_hex(3)])
-    if len(run_id) > 200:
-        log.warning("run id is %d characters, over the VARCHAR(200) columns that hold it: %s", len(run_id), labels)
+    if len(run_id) > 250:
+        log.warning("run id is %d characters, over the VARCHAR(250) columns that hold it: %s", len(run_id), labels)
     return run_id
 
 

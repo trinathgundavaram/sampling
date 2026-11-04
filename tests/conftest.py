@@ -111,9 +111,8 @@ def create_tables(db):
     for stmt in load_cli().split_statements(text):
         stmt = re.sub(r"CREATE MULTISET TABLE", "CREATE TABLE", stmt)
         stmt = re.sub(r"\)\s*(UNIQUE\s+)?PRIMARY INDEX \([^)]*\)\s*$", ")", stmt, flags=re.S)
-        stmt = re.sub(r"BIGINT GENERATED ALWAYS AS IDENTITY \([^)]*\)", "BIGINT", stmt)
-        stmt = (stmt.replace("BYTEINT", "TINYINT").replace("CLOB", "VARCHAR")
-                .replace("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP").replace("TIMESTAMP(6)", "TIMESTAMP"))
+        stmt = (stmt.replace("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP").replace("TIMESTAMP(6)", "TIMESTAMP")
+                .replace("DEFAULT USER", "DEFAULT 'tester'"))
         stmt = re.sub(r"\bFLOAT\b", "DOUBLE", stmt)
         stmt = re.sub(r"--[^\n]*", "", stmt)
         db.execute(stmt)
@@ -136,81 +135,99 @@ def settings():
     return Settings(meta_db=META_DB, environment="DEV", access_lock=False, chunk_rows=7)
 
 
-def insert_config(db, config_id=1, sampling_method="RANKED", priority_rank_sql="revision DESC", target_volume=150,
-                  rounding_mode="FLOOR", universe_table="case_universe", key_columns="case_id",
-                  exclusion_sql="auto_closed = 1", scope_sql="pull_date = '{batch_id}'", project_name="UMCM",
-                  process_name="WEEKLY", sample_name="weekly_sample", act_ind=1, **more):
-    """One GOVT_RGLTRY_SAMPLING_CONFIG row; exclusion_sql (a condition, the fixtures' shorthand) becomes an EXCLUSION rule
-    named EXCLUDED (rule_id 9000 + config_id)."""
+PROJECT, RUN_TY = "UMCM", "WKLY"
+
+
+def key(n=1, project=PROJECT, run_ty=RUN_TY) -> tuple:
+    """The sample the tests call config n: (project, table T<n>, run type)."""
+    return (project, f"T{n}", run_ty)
+
+
+def _config_key(db, config_id) -> tuple:
+    """(project, table, run type) of config n's row (the defaults when it has none yet)."""
+    row = db.execute("SELECT Project_Cd, Table_Nm, Run_Ty FROM GOVT_RGLTRY_SamplingConfig WHERE UPPER(Table_Nm) = ?",
+                     [f"T{config_id}"]).fetchone()
+    return tuple(row) if row else key(config_id)
+
+
+def insert_config(db, config_id=1, smpl_method_cd="RANKED", priority_rank_sql_txt="revision DESC", target_cnt=150,
+                  rounding_cd="FLOOR", src_table_nm="case_source", key_columns="case_id",
+                  exclusion_sql="auto_closed = 1", scope_sql_txt="pull_date = '{batch_id}'", project_cd=PROJECT,
+                  run_ty=RUN_TY, table_nm=None, src_schema_nm=META_DB, active_ind=1, **more):
+    """One GOVT_RGLTRY_SamplingConfig row: the sample (project_cd, T<config_id>, run_ty). exclusion_sql (a
+    condition, the fixtures' shorthand) becomes an EXCLUSION rule named EXCLUDED (rule_id 9000 + config_id)."""
     db.execute("""
-        INSERT INTO GOVT_RGLTRY_SAMPLING_CONFIG (config_id, act_ind, project_name, process_name, sample_name,
-            universe_table, key_columns, scope_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode)
+        INSERT INTO GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty, Active_Ind, Src_Schema_Nm, Src_Table_Nm,
+            Key_Columns_Txt, Scope_Sql_Txt, Target_Cnt, Smpl_Method_Cd, Priority_Rank_Sql_Txt, Rounding_Cd)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-               [config_id, act_ind, project_name, process_name, sample_name, universe_table, key_columns,
-                scope_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode])
+               [project_cd, table_nm or f"T{config_id}", run_ty, active_ind, src_schema_nm, src_table_nm,
+                key_columns, scope_sql_txt, target_cnt, smpl_method_cd, priority_rank_sql_txt, rounding_cd])
     set_config(db, config_id, **more)
     if exclusion_sql:
-        insert_rule(db, "EXCLUSION", 9000 + config_id, "EXCLUDED", config_id, seq_no=0, rule_sql=exclusion_sql)
+        insert_rule(db, "EXCLUSION", 9000 + config_id, "EXCLUDED", config_id, seq_nbr=0, rule_sql_txt=exclusion_sql)
 
 
 _SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)
 
 
 def as_select(db, config_id, text, value=False):
-    """A condition (or, value=True, an expression) on the config's universe table as the SELECT a rule holds:
+    """A condition (or, value=True, an expression) on the config's source table as the SELECT a rule holds:
     the key columns of the rows where it is true (or each row's key columns and value)."""
-    table, keys = db.execute("SELECT universe_table, key_columns FROM GOVT_RGLTRY_SAMPLING_CONFIG WHERE config_id = ?",
-                             [config_id]).fetchone()
+    schema, table, keys = db.execute("SELECT Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt FROM "
+                                     "GOVT_RGLTRY_SamplingConfig WHERE UPPER(Table_Nm) = ?", [f"T{config_id}"]).fetchone()
     if value:
-        return f"SELECT {keys}, {text} AS v FROM {table}"
-    return f"SELECT {keys} FROM {table} WHERE {text}"
+        return f"SELECT {keys}, {text} AS v FROM {schema}.{table}"
+    return f"SELECT {keys} FROM {schema}.{table} WHERE {text}"
 
 
-def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act_ind=1, raw_sql=False, **cols):
-    """One GOVT_RGLTRY_SAMPLING_RULE row; cols = any of its other columns. A selection rule given a condition or an
-    expression (the short form the tests write) is stored as the SELECT the engine needs (as_select), unless
-    raw_sql."""
-    kind = str(cols.get("rule_type") or "").upper()
-    sql = cols.get("rule_sql")
-    if not raw_sql and rule_class in ("EXCLUSION", "PRIORITY", "LEVEL", "BUCKET") and sql \
+def insert_rule(db, rule_class_cd, rule_id, rule_nm, config_id=1, seq_nbr=100, active_ind=1, raw_sql=False, **cols):
+    """One GOVT_RGLTRY_SamplingRule row of config n's sample (cols: any other column; table_nm / run_ty '*' to
+    share it). A selection rule given a condition or an expression (the short form the tests write) is stored as
+    the SELECT the engine needs (as_select), unless raw_sql."""
+    kind = str(cols.get("rule_ty") or "").upper()
+    sql = cols.get("rule_sql_txt")
+    if not raw_sql and rule_class_cd in ("EXCLUSION", "PRIORITY", "LEVEL", "BUCKET") and sql \
             and not _SELECT.match(sql) and "TODO" not in sql:
-        cols["rule_sql"] = as_select(db, config_id, sql,
-                                     value=rule_class == "LEVEL" or (rule_class == "PRIORITY" and kind == "EXPRESSION"))
+        cols["rule_sql_txt"] = as_select(db, config_id, sql, value=rule_class_cd == "LEVEL"
+                                         or (rule_class_cd == "PRIORITY" and kind == "EXPRESSION"))
         if kind in ("SQL", "CONDITION"):
-            cols["rule_type"] = "QUERY"
-    row = {"rule_id": rule_id, "config_id": config_id, "act_ind": act_ind, "rule_class": rule_class,
-           "seq_no": seq_no, "rule_name": rule_name, **cols}
-    db.execute(f"INSERT INTO GOVT_RGLTRY_SAMPLING_RULE ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            cols["rule_ty"] = "QUERY"
+    project, table, run_ty = _config_key(db, config_id)
+    row = {"rule_id": rule_id, "project_cd": project, "table_nm": table, "run_ty": run_ty, "active_ind": active_ind,
+           "rule_class_cd": rule_class_cd, "seq_nbr": seq_nbr, "rule_nm": rule_nm, **cols}
+    if row.get("parent_path_txt") is None:
+        row["parent_path_txt"] = "*"
+    db.execute(f"INSERT INTO GOVT_RGLTRY_SamplingRule ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                list(row.values()))
 
 
-def insert_strata(db, strata_id, config_id, level_order, name, expr, mix: dict, applies_to="*",
-                  unlisted_policy="SHARE"):
+def insert_strata(db, strata_id, config_id, level_nbr, name, expr, mix: dict, applies_to="*",
+                  unlisted_cd="SHARE"):
     """One LEVEL rule (rule_id 1000 * strata_id) and its BUCKET rules; mix = {bucket_name: fraction}
     (FRACTION buckets) or {bucket_name: dict of bucket columns}."""
-    insert_rule(db, "LEVEL", 1000 * strata_id, name, config_id, seq_no=1, rule_sql=expr, level_order=level_order,
-                parent_path=applies_to, unlisted_policy=unlisted_policy)
+    insert_rule(db, "LEVEL", 1000 * strata_id, name, config_id, seq_nbr=1, rule_sql_txt=expr, level_nbr=level_nbr,
+                parent_path_txt=applies_to, unlisted_cd=unlisted_cd)
     for i, (bucket, spec) in enumerate(mix.items()):
-        insert_bucket(db, 1000 * strata_id + i + 1, level_order, bucket, config_id=config_id, seq_no=i + 1,
-                      **(spec if isinstance(spec, dict) else {"target_fraction": spec}))
+        insert_bucket(db, 1000 * strata_id + i + 1, level_nbr, bucket, config_id=config_id, seq_nbr=i + 1,
+                      **(spec if isinstance(spec, dict) else {"target_fraction_val": spec}))
 
 
-def insert_bucket(db, rule_id, level_order, bucket_name, config_id=1, parent_path="*", seq_no=100, rule_sql=None,
-                  quota_mode="FRACTION", target_fraction=None, max_count=None, act_ind=1):
-    if rule_sql and rule_sql.strip() == "1=1":
-        rule_sql = None   # every case: the bucket without rule_sql takes the rest
-    insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_no, act_ind, rule_sql=rule_sql,
-                level_order=level_order, parent_path=parent_path, quota_mode=quota_mode,
-                target_fraction=target_fraction, max_count=max_count)
+def insert_bucket(db, rule_id, level_nbr, bucket_name, config_id=1, parent_path_txt="*", seq_nbr=100,
+                  rule_sql_txt=None, quota_cd="FRACTION", target_fraction_val=None, max_cnt=None, active_ind=1):
+    if rule_sql_txt and rule_sql_txt.strip() == "1=1":
+        rule_sql_txt = None   # every case: the bucket without rule_sql_txt takes the rest
+    insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_nbr, active_ind, rule_sql_txt=rule_sql_txt,
+                level_nbr=level_nbr, parent_path_txt=parent_path_txt, quota_cd=quota_cd,
+                target_fraction_val=target_fraction_val, max_cnt=max_cnt)
 
 
 def set_config(db, config_id=1, **cols):
     for name, value in cols.items():
-        db.execute(f"UPDATE GOVT_RGLTRY_SAMPLING_CONFIG SET {name} = ? WHERE config_id = ?", [value, config_id])
+        db.execute(f"UPDATE GOVT_RGLTRY_SamplingConfig SET {name} = ? WHERE UPPER(Table_Nm) = ?", [value, f"T{config_id}"])
 
 
-def build_universe(db, n=1000, table="case_universe"):
-    """The fixture universe of the DQ repo's frozen UM regression test (random.seed(42))."""
+def build_source(db, n=1000, table="case_source"):
+    """The fixture source table of the DQ repo's frozen UM regression test (random.seed(42))."""
     db.execute(f"CREATE TABLE {table} (case_id VARCHAR, category VARCHAR, area VARCHAR, revision INTEGER, "
                f"pull_date DATE, auto_closed INTEGER)")
     categories = ["Denied"] * 80 + ["Withdrawn"] * 10 + ["Dismissed"] * 2 + ["Approved"] * 8
