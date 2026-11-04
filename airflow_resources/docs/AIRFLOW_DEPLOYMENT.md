@@ -312,7 +312,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (127 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (133 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

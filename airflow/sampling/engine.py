@@ -16,6 +16,8 @@ its batches:
                           SELECTs), optionally only under some parent buckets (Parent_Path_Txt)
         BUCKET            a bucket of a level: a PCT of the parent's target, a CNT of cases, ALL there is, or
                           the REMAINDER the others leave; a different mix per parent bucket (Parent_Path_Txt)
+        CAP               a limit across the whole sample (or the buckets under Parent_Path_Txt): at most
+                          Max_Val of the cases its SELECT returns (QUERY), or per value it returns (PER_VALUE)
 
     Every SQL column is a whole SELECT, joins and all. Scope_Sql_Txt returns the source rows of the run (at least
     the key columns; the target table gets the rows it returns), Diversity_Sql_Txt the key columns and one value.
@@ -44,7 +46,9 @@ One run = one sample:
     select per leaf           RANKED: in priority order | RANDOM: seeded shuffle | SYSTEMATIC: seeded start,
                               every k-th; rotating across the Diversity_Sql_Txt values (at most Diversity_Cap_Val
                               per value: a CNT, or a PCT of the bucket's target)
-    top up                    Shortfall_Cd TOPUP: from the rest of the candidates, in priority order
+    caps                      CAP rules, across the buckets: the lowest in priority order over a cap give way to
+                              the next candidate of their own bucket within every cap (none: the sample is short)
+    top up                    Shortfall_Cd TOPUP: from the rest of the candidates, in priority order, within the caps
     target table              Tgt_Schema_Nm.Tgt_Table_Nm (created by another process): the selected cases'
                               source rows, every column, with the ETL_* audit and SMPL_* run columns set by sampling
     persist (one transaction) selections (+ excluded rows) with their bucket path, target table rows; earlier runs
@@ -94,6 +98,8 @@ QUERY = "QUERY"   # rule_ty: rule_sql_txt is a SELECT returning the key_columns 
 EXCLUSION_TYPES = (QUERY, "PRIOR_SELECTION")
 PRIORITY_TYPES = (QUERY, "EXPRESSION", "PRIOR_CANDIDATE", "PRIOR_SELECTION")
 BUCKET_TYPES = (QUERY,)
+PER_VALUE = "PER_VALUE"   # a CAP whose SELECT returns a value per case: the limit holds per value
+CAP_TYPES = (QUERY, PER_VALUE)
 _CONDITION_TYPES = ("SQL", "CONDITION")   # the former condition form: reported, with how to rewrite it
 _REWRITE = "a condition is not a rule: write rule_sql_txt as a SELECT returning the key_columns (rule_ty QUERY)"
 HISTORY_TYPES = ("PRIOR_CANDIDATE", "PRIOR_SELECTION")
@@ -110,7 +116,7 @@ SAMPLE_RUN_COLS = ("smpl_run_id", "smpl_run_key", "smpl_run_ty", "smpl_cycle_dt"
                    "smpl_stratum_path")
 SAMPLE_REQUIRED = ("smpl_run_key", "etl_is_curr_ind")
 OUTPUT_KEY_CHUNK = 50
-RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET")
+RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "CAP")
 # the audit columns of every table (left out of a run's snapshot and its hash)
 _AUDIT_COLUMNS = ("load_dtts", "loaduser_id", "lastupdt_dtts", "lastupdt_id")
 # the key of a sample, and the rule columns copied into GOVT_RGLTRY_SamplingRunRule
@@ -136,7 +142,8 @@ _USED = {"PARAM": {"rule_sql_txt"},
          "PRIORITY": {"rule_ty", "rule_sql_txt", "sort_dir_cd", "lookback_days", "history_scope_cd"},
          "LEVEL": {"rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd"},
          "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "quota_val", "max_ty",
-                    "max_val"}}
+                    "max_val"},
+         "CAP": {"rule_ty", "rule_sql_txt", "parent_path_txt", "max_ty", "max_val"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 # Configured SQL only reads: a statement word anywhere (outside quotes) is refused. Rows run under the service
 # account, so this guards against a pasted script or a slip, not against someone who may write the rows anyway.
@@ -195,6 +202,7 @@ class Sample:
     exclusions: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
     levels: list = field(default_factory=list)       # LEVEL rows, each with "buckets": [its BUCKET rows]
+    caps: list = field(default_factory=list)         # CAP rows
     stray: list = field(default_factory=list)        # rows of an unknown class, or buckets of no level
     snapshot: dict = field(default_factory=dict)     # {"config": row, "rules": [rows]} as loaded
     config_hash: str = ""
@@ -284,7 +292,7 @@ def build_sample(config: dict, rules: list) -> Sample:
         r["rule_class_cd"] = _up(r.get("rule_class_cd"))
         by_class.get(r["rule_class_cd"], sample.stray).append(r)
     sample.params, sample.gates, sample.exclusions = by_class["PARAM"], by_class["GATE"], by_class["EXCLUSION"]
-    sample.priorities = by_class["PRIORITY"]
+    sample.priorities, sample.caps = by_class["PRIORITY"], by_class["CAP"]
     levels = sorted(by_class["LEVEL"], key=lambda r: (r.get("level_nbr") is None, r.get("level_nbr") or 0,
                                                       r["rule_id"]))
     for level in levels:
@@ -388,6 +396,13 @@ def config_problems(sample: Sample) -> list:
         problems.append(f"LEVEL rules repeat a level_nbr: {orders}")
     for lvl in sample.levels:
         problems += _level_problems(lvl)
+    for cap in sample.caps:
+        name, kind = cap.get("rule_nm"), _up(cap.get("rule_ty"), QUERY)
+        if kind not in CAP_TYPES:
+            problems.append(f"CAP rule {name}: rule_ty must be one of {', '.join(CAP_TYPES)}")
+        if not _text(cap):
+            problems.append(f"CAP rule {name}: rule_sql_txt is empty (a SELECT of the cases it limits)")
+        problems += [f"CAP rule {name}: {p}" for p in _amount_problems(cap, "max_ty", "max_val", required=True)]
 
     db, table = _text(c, "tgt_schema_nm"), _text(c, "tgt_table_nm")
     if bool(db) != bool(table):
@@ -529,21 +544,22 @@ def _is_query(rule: dict) -> bool:
     cls = _up(rule.get("rule_class_cd"))
     if cls in ("EXCLUSION", "PRIORITY"):
         return _up(rule.get("rule_ty"), QUERY) in (QUERY, "EXPRESSION")
-    return cls in ("LEVEL", "BUCKET") and bool(_text(rule))
+    return cls in ("LEVEL", "BUCKET", "CAP") and bool(_text(rule))
 
 
 def _is_value(rule: dict) -> bool:
     """A SELECT returning a value per case besides the key columns: a PRIORITY EXPRESSION, a LEVEL by value,
-    Diversity_Sql_Txt."""
-    cls = _up(rule.get("rule_class_cd"))
-    return cls in ("LEVEL", "DIVERSITY") or (cls == "PRIORITY" and _up(rule.get("rule_ty")) == "EXPRESSION")
+    a CAP PER_VALUE, Diversity_Sql_Txt."""
+    cls, kind = _up(rule.get("rule_class_cd")), _up(rule.get("rule_ty"))
+    return cls in ("LEVEL", "DIVERSITY") or (cls == "PRIORITY" and kind == "EXPRESSION") \
+        or (cls == "CAP" and kind == PER_VALUE)
 
 
 def _rules_of(sample: Sample, cls: str) -> list:
     if cls == "BUCKET":
         return [b for lvl in sample.levels for b in lvl["buckets"]]
     return {"PARAM": sample.params, "GATE": sample.gates, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
-            "LEVEL": sample.levels}[cls]
+            "LEVEL": sample.levels, "CAP": sample.caps}[cls]
 
 
 def _history_problems(what: str, row: dict) -> list:
@@ -668,10 +684,12 @@ def target_table_columns(conn: Connection, queries: dict, sample: Sample) -> lis
 
 
 def query_rules(sample: Sample) -> list:
-    """Every rule with a SELECT of cases: exclusions, priorities, levels by value, buckets of condition levels."""
+    """Every rule with a SELECT of cases: exclusions, priorities, levels by value, buckets of condition levels,
+    caps."""
     return [r for r in (*sample.exclusions, *sample.priorities,
                         *(lvl for lvl in sample.levels if lvl["value_level"]),
-                        *(b for lvl in sample.levels if not lvl["value_level"] for b in lvl["buckets"]))
+                        *(b for lvl in sample.levels if not lvl["value_level"] for b in lvl["buckets"]),
+                        *sample.caps)
             if _is_query(r)]
 
 
@@ -942,6 +960,17 @@ class Stratifier:
                 out.append(r)
         return out
 
+    def unselect(self, path: str) -> None:
+        """One case of the leaf `path` came out (a cap) with nothing in its place: the counts of the leaf and its
+        parents follow."""
+        parts = path.split("/")
+        for i in range(1, len(parts) + 1):
+            node = self.nodes.get("/".join(parts[:i]))
+            if node:
+                node["selected"] -= 1
+        if path in self.leaves and self.leaves[path] is not self.nodes.get(path):
+            self.leaves[path]["selected"] -= 1
+
     def _group(self, level: dict, path: str) -> dict:
         """The level's bucket rows for this parent: the most specific matching parent_path_txt wins."""
         by_pattern = {}
@@ -1058,6 +1087,89 @@ class Stratifier:
         return picked
 
 
+def _under(path: str, pattern) -> bool:
+    """A case of the leaf `path` is under `pattern` when the path or one of its parents matches it ('*' = all)."""
+    parts = str(path or "ALL").split("/")
+    return any(_matches("/".join(parts[:i]), pattern) for i in range(1, len(parts) + 1))
+
+
+class Caps:
+    """The CAP rules of a run: what each selected case counts toward, and whether one more still fits."""
+
+    def __init__(self, sample: Sample, target: int, rounding_cd: str):
+        self.rules = []
+        for c in sample.caps:
+            limit = amount(c, "max_ty", "max_val", target, rounding_cd)
+            self.rules.append((c, limit, _col(c), _up(c.get("rule_ty"), QUERY) == PER_VALUE))
+        self.counts = [{} for _ in self.rules]
+        self.report = {str(c["rule_nm"]): {"limit": limit, "over": 0, "replaced": 0} for c, limit, _, _ in self.rules}
+
+    def groups(self, row: dict) -> list:
+        """(cap index, group) of every cap the case counts toward: the cases a QUERY cap returns, or the value a
+        PER_VALUE cap returns (a case it does not return, or NULL, is not limited), under its Parent_Path_Txt."""
+        out = []
+        for i, (cap, _, col, per_value) in enumerate(self.rules):
+            if not _under(row.get("_path"), cap.get("parent_path_txt")):
+                continue
+            value = row.get(col)
+            if per_value and value is not None:
+                out.append((i, _norm(value)))
+            elif not per_value and value == 1:
+                out.append((i, ""))
+        return out
+
+    def blocking(self, row: dict) -> Optional[str]:
+        """The first cap that one more such case would exceed, or None (it fits)."""
+        for i, group in self.groups(row):
+            if self.counts[i].get(group, 0) >= self.rules[i][1]:
+                return str(self.rules[i][0]["rule_nm"])
+        return None
+
+    def take(self, row: dict) -> None:
+        for i, group in self.groups(row):
+            self.counts[i][group] = self.counts[i].get(group, 0) + 1
+
+
+def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) -> list:
+    """The chosen cases within every cap: in priority order a case that would exceed a cap comes out, and the next
+    candidate of its own bucket that fits every cap goes in (RANKED / SYSTEMATIC: in priority order, RANDOM: a draw
+    seeded by the run's seed and the bucket). None left: the sample is that much short (noted)."""
+    if not caps.rules:
+        return chosen
+    kept, over = [], []
+    for row in sorted(chosen, key=lambda r: r["_order"]):
+        name = caps.blocking(row)
+        if name:
+            caps.report[name]["over"] += 1
+            over.append((row, name))
+        else:
+            caps.take(row)
+            kept.append(row)
+    if not over:
+        return kept
+    used = {r["_key"] for r in chosen}
+    pools = {}
+    for row in candidates:
+        if row["_key"] not in used:
+            pools.setdefault(row.get("_path"), []).append(row)
+    if strat.method == "RANDOM":
+        for path, pool in pools.items():
+            strat.rng(f"CAP|{path}").shuffle(pool)
+    for row, name in over:
+        pool = pools.get(row.get("_path"), [])
+        new = next((c for c in pool if caps.blocking(c) is None), None)
+        if new:
+            pool.remove(new)
+            caps.take(new)
+            kept.append(new)
+            caps.report[name]["replaced"] += 1
+        else:
+            strat.unselect(row.get("_path"))
+            strat.notes.append(f"{row.get('_path')}: {row['_key']} is over the cap {name} and its bucket has no "
+                               f"other candidate within the caps")
+    return sorted(kept, key=lambda r: r["_order"])
+
+
 # ---------------------------------------------------------------------------
 # The run row, persistence
 # ---------------------------------------------------------------------------
@@ -1104,6 +1216,8 @@ def run_report(summary: dict) -> str:
     report = {"exclusions": summary.get("exclusions"), "buckets": summary.get("buckets")}
     if summary.get("notes"):
         report["notes"] = summary["notes"]
+    if summary.get("caps"):
+        report["caps"] = summary["caps"]
     text = json.dumps(report, default=str)
     if len(text) > RUN_REPORT_MAX:
         text = json.dumps({"exclusions": summary.get("exclusions"), "buckets": "too many to store: see the "
@@ -1368,11 +1482,19 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         target = resolve_target(config, len(candidates), rounding)
         summary["target_cnt"] = target
         strat = Stratifier(sample, run_seed, rounding)
-        chosen = strat.run(candidates, target)
+        caps = Caps(sample, target, rounding)
+        chosen = apply_caps(caps, strat, candidates, strat.run(candidates, target))
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
             taken = {r["_key"] for r in chosen}
             rest = [r for r in candidates if r["_key"] not in taken]
-            chosen += strat.top_up(rest, target - len(chosen), chosen)
+            extra = []
+            for r in strat.top_up(rest, len(rest), chosen):
+                if len(extra) >= target - len(chosen):
+                    break
+                if caps.blocking(r) is None:
+                    caps.take(r)
+                    extra.append(r)
+            chosen += extra
         chosen = sorted(chosen[:target], key=lambda r: r["_order"])
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
@@ -1380,7 +1502,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         return fail("technical", "SELECT_FAILURE", e, traceback.format_exc())
     summary.update(in_scope=in_scope, excluded=in_scope - len(candidates), candidates=len(candidates),
                    selected=len(chosen), shortfall=max(0, target - len(chosen)), exclusions=counts,
-                   by_stratum=strat.leaves, buckets=strat.nodes, notes=strat.notes)
+                   by_stratum=strat.leaves, buckets=strat.nodes, notes=strat.notes, caps=caps.report)
     for note in strat.notes:
         log.warning("%s: %s", label, note)
 

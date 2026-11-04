@@ -106,12 +106,19 @@ UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
 --              (bucket levels only, first in Seq_Nbr order, NULL = the rest),
 --              Parent_Path_Txt = under which parents this row applies, Quota_Cd
 --              + Quota_Val, Max_Ty + Max_Val.
+--   CAP        a limit across the whole sample, not one bucket at a time:
+--              Rule_Sql_Txt = a SELECT of the cases it limits (Rule_Ty QUERY,
+--              default: at most Max_Val of them) or of the key columns and a
+--              value (PER_VALUE: at most Max_Val per value, e.g. per CPT code).
+--              Parent_Path_Txt = only the buckets under it ('*' the whole
+--              sample). Max_Ty + Max_Val, PCT = % of the sample's target. A case
+--              over a cap gives way to the next candidate of its own bucket.
 CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule (
   Rule_ID                INTEGER        NOT NULL,          -- unique in the table
   Project_Cd             VARCHAR(30)    NOT NULL,
   Table_Nm               VARCHAR(63)    DEFAULT '*' NOT NULL,     -- a table, or '*' = every table of the project
   Run_Ty                 VARCHAR(20)    DEFAULT '*' NOT NULL,     -- a run type, or '*' = every run type
-  Rule_Class_Cd          VARCHAR(20)    NOT NULL,          -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET
+  Rule_Class_Cd          VARCHAR(20)    NOT NULL,          -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | CAP
   Seq_Nbr                INTEGER        DEFAULT 100 NOT NULL,     -- order within the class (and level)
   Rule_Nm                VARCHAR(200)   NOT NULL,
   Rule_Ty                VARCHAR(30),                      -- see above, per class
@@ -123,7 +130,7 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRule (
   Quota_Val              DECIMAL(18,4),                    -- BUCKET PCT: 0 to 100 % of the parent's target |
                                                            -- CNT: that many cases
   Max_Ty                 VARCHAR(3),                       -- BUCKET: optional cap, CNT | PCT (of the bucket's
-                                                           -- candidates)
+                                                           -- candidates) | CAP: CNT | PCT (of the target)
   Max_Val                DECIMAL(18,4),                    -- the cap: 20 (CNT) or 50 = 50 % (PCT)
   Sort_Dir_Cd            VARCHAR(4),                       -- PRIORITY EXPRESSION: ASC (default) | DESC
   Lookback_Days          INTEGER,                          -- PRIOR_SELECTION / PRIOR_CANDIDATE

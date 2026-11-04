@@ -69,7 +69,8 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 6a. Order | PRIORITY rule 1, then 2, … then the key columns | PRIORITY rules | |
 | 7. Stratify | Level by level, each parent's target is split between its buckets (CNT, then PCT, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
 | 8. Select | Per leaf bucket: RANKED (first in order), RANDOM (seeded shuffle) or SYSTEMATIC (every k-th); rotating across `Diversity_Sql_Txt` values | `Smpl_Method_Cd`, `Diversity_Sql_Txt`, `Diversity_Cap_Ty` / `_Val` | `SELECT_FAILURE` |
-| 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap still holds) | `Shortfall_Cd` | |
+| 8a. Caps | Across the buckets: a case over a CAP rule (3 of one CPT code, 10 OON denials …) gives way to the next candidate of its own bucket within every cap; none left = the sample is short | CAP rules | |
+| 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap and the CAP rules still hold) | `Shortfall_Cd` | |
 | 10. Target table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-target-table)) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
 | 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts (`Run_Rpt_Txt`) | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
 | Later | `finalize` makes the sample `FINAL`; `replace` swaps a case (see [10.8](#108-finalise-a-sample), [10.9](#109-replace-a-case)) | – | – |
@@ -88,7 +89,7 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 | Table | Role | Who writes |
 |---|---|---|
 | `GOVT_RGLTRY_SamplingConfig` | One row per sample (project + table + run type) | you |
-| `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET; of one sample, or shared (`*`) | you |
+| `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, CAP; of one sample, or shared (`*`) | you |
 | `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, counts per rule and bucket, the configuration it used | engine |
 | `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
@@ -281,6 +282,25 @@ How a parent's target T is split:
 
 A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at most.
 
+**CAP** – a limit across the whole sample, where a bucket's `Max_Val` or the diversity cap only limit one bucket at
+a time. `Rule_Sql_Txt` is a `SELECT`: `Rule_Ty` `QUERY` (default) returns the key columns of the cases it limits (at
+most `Max_Val` of them: "at most 10 out-of-network"), `PER_VALUE` the key columns and a value (at most `Max_Val` per
+value: "at most 3 of one CPT code"; a case it does not return, or NULL, is not limited). `Parent_Path_Txt`: only the
+cases of the buckets under it (`Denied` = the denials, `*` default = the whole sample). `Max_Ty` + `Max_Val` (required):
+`CNT` a number, `PCT` a percentage of the sample's target. After the buckets have selected, the cases are taken in
+priority order; one that would exceed a cap gives way to the next candidate of its own bucket that fits every cap
+(RANKED / SYSTEMATIC: in priority order, RANDOM: a draw seeded by the run's seed), so the mix holds. When its bucket
+has none, the sample is that much short (`notes` in the run report) and `TOPUP` fills it from the other candidates
+within the caps. The run report's `caps` gives each rule's `limit`, how many cases were `over` it and how many were
+`replaced`. Example – at most 10 out-of-network denials:
+
+```sql
+INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Parent_Path_Txt, Max_Ty, Max_Val, Rule_Sql_Txt)
+VALUES (260, 'UMCM', 'ODAG1', 'WKLY', 'CAP', 2, 'OON_DENIALS', 'Denied', 'CNT', 10,
+        'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1
+         WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND SVC_PROV_TY = ''<non-par>''');
+```
+
 ### 4.3 The target table
 
 Each sample may name its own target table: `Tgt_Schema_Nm` and `Tgt_Table_Nm` (both, or neither; each a plain
@@ -354,7 +374,8 @@ and counts per bucket, are a `GROUP BY` on it.
 ### 6.2 Rule classes and their values
 | Column | Values |
 |---|---|
-| `GOVT_RGLTRY_SamplingRule.Rule_Class_Cd` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET` |
+| `GOVT_RGLTRY_SamplingRule.Rule_Class_Cd` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `CAP` |
+| `Rule_Ty` (CAP) | `QUERY` (default), `PER_VALUE` |
 | `Table_Nm`, `Run_Ty` (rule) | a table / run type, or `*` = all of them |
 | `Rule_Ty` (EXCLUSION) | `QUERY` (default), `PRIOR_SELECTION` |
 | `Rule_Ty` (PRIORITY) | `QUERY` (default), `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |
@@ -426,7 +447,8 @@ section D.
 | Functional areas only within denials | LEVEL 1 `Parent_Path_Txt` `Denied`, its BUCKETs `Parent_Path_Txt` `Denied` |
 | Areas defined by several columns or other tables | LEVEL 1 with `Rule_Sql_Txt` NULL, one BUCKET per area with its `SELECT` (any joins) in `Rule_Sql_Txt`, a last BUCKET without `Rule_Sql_Txt` for the rest |
 | Equal portions | BUCKETs `REMAINDER` (or no BUCKET rows: unlisted `SHARE`) |
-| No more than 3 of one code | `Diversity_Sql_Txt` `SELECT <keys>, <code> FROM <source>`, `Diversity_Cap_Ty` `CNT`, `Diversity_Cap_Val` 3 |
+| No more than 3 of one code in the sample | CAP `PER_VALUE`, `SELECT <keys>, <code> FROM <source>`, `Max_Ty` `CNT`, `Max_Val` 3 (`Diversity_Sql_Txt` also rotates the codes within each bucket) |
+| At most 10 out-of-network denials | CAP `QUERY`, `SELECT <keys> FROM <source> WHERE <OON>`, `Parent_Path_Txt` `Denied`, `Max_Val` 10 |
 | 5 % of the week's cases, at least 30, at most 200 | `Target_Ty` `PCT`, `Target_Val` 5, `Min_Target_Cnt` 30, `Max_Target_Cnt` 200 |
 | Always 10 inpatient cases, the rest by mix | BUCKET Inpatient `Quota_Cd` `CNT`, `Quota_Val` 10; the others PCT / REMAINDER |
 | Exactly 150 or flag it | `Shortfall_Cd` `NONE`, Variable `fail_on_shortfall` true |
@@ -559,7 +581,7 @@ time), with the same `Selection_Order_Nbr`; the target table gets its source row
 `GOVT_RGLTRY_SamplingRunRule` rows), not today's. When the bucket has no candidate left, `--any-bucket` takes the
 next one overall (the mix then differs from the quotas: the reason records why). Allowed on a `FINAL` sample. A
 replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycles. Not checked by a replacement:
-the diversity cap (`Diversity_Cap_Val`).
+the diversity cap (`Diversity_Cap_Val`) and the CAP rules (the auditors choose the case).
 
 ## 11. First run on DEV (checklist)
 
