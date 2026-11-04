@@ -96,7 +96,7 @@ Host, login and password become `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PA
 | Extra (optional) | `{"logmech": "LDAP"}` (default LDAP) |
 
 The account needs, on the metadata database: SELECT / INSERT / UPDATE (no CREATE; DELETE only for the retention
-task); on each source table (or view): SELECT; on each sample table: SELECT / INSERT / UPDATE.
+task); on each source table (or view): SELECT; on each target table: SELECT / INSERT / UPDATE.
 
 ### Airflow Variable (`govt_rgltry_umcm_sampling_config_var`)
 
@@ -149,7 +149,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
 | `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
 | `retention_days` | Adds `purge_selections` after the runs: deletes the `GOVT_RGLTRY_SampleSelection` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `Lookback_Days`, else that sample is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
-| `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, sample table and rules hash. Counts and names only, never case data |
+| `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, target table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `table`, `run_type`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
 | `trigger_keys` | Optional list of the keys a trigger may set (default: all of `project`, `table`, `run_type`, `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level`). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
@@ -282,7 +282,7 @@ schedule is Central time too. Column defaults (`CURRENT_TIMESTAMP`, and `USER` f
 
 ## Environment in names (`$env`)
 
-`Src_Schema_Nm`, `Smpl_Schema_Nm`, `Scope_Sql_Txt` and every rule's SQL can carry `$env` so one set of configuration
+`Src_Schema_Nm`, `Tgt_Schema_Nm`, `Scope_Sql_Txt` and every rule's SQL can carry `$env` so one set of configuration
 rows works in every environment (the framework convention): `UMCM_$ENV_T` is `UMCM_DEV_T` in DEV, `UMCM_QA_T` in QA
 and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 `$ENV` -> `DEV`); `env_value` overrides the replacement for one environment.
@@ -303,7 +303,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
   run used is on its run row and its rules in `GOVT_RGLTRY_SamplingRunRule`.
 - Reads use `LOCKING ROW FOR ACCESS` (no read lock on the source or the metadata tables; switch off with
   `access_lock: false`).
-- A run's writes (every candidate, the sample table rows, retiring the earlier run, closing the run row) are **one
+- A run's writes (every candidate, the target table rows, retiring the earlier run, closing the run row) are **one
   transaction**: a failure leaves nothing half written, only the run row with status ERROR.
 - Bucket values compare like Teradata does: trailing blanks ignored, not case specific (`'DENIED  '` is in the
   `Denied` bucket).

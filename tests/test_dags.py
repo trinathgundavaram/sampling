@@ -132,7 +132,7 @@ def test_sample_ready_email_and_its_summary(variable):
     class TI:
         def xcom_pull(self, task_ids):
             return {"runs": [{"project_cd": "UMCM", "table_nm": "S<1>", "run_ty": "WKLY", "run_key": "B42", "status": "COMPLETED", "selected": 150,
-                              "target_cnt": 150, "shortfall": 0, "smpl_table_nm": "DB.OUT",
+                              "target_cnt": 150, "shortfall": 0, "tgt_table_nm": "DB.OUT",
                               "config_hash": "abcdef0123456789"}]}
     text = dags.sample_summary(TI(), ["run_sampling"])
     assert "UMCM.S&lt;1&gt;.WKLY" in text and "<td>B42</td>" in text and "abcdef012345<" in text and "DB.OUT" in text

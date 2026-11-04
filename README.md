@@ -10,7 +10,7 @@ versions sharing the same engine code:
 
 What a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
 buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
-(no repeats, carry-over) and code variety; the selected cases' source rows go to a sample table per sample. No field name or value is in the code.
+(no repeats, carry-over) and code variety; the selected cases' source rows go to a target table per sample. No field name or value is in the code.
 A sample is one **project + table + run type** (DLY, WKLY, MNT …), as the framework scopes its batches; a rule row
 may name one table and run type or `*` for all of them (the most specific row wins), so run types share rules or
 have their own.

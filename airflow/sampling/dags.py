@@ -402,16 +402,16 @@ def sample_summary(ti, task_ids: list) -> str:
         runs += report.get("runs", []) if isinstance(report, dict) else []
     if not runs:
         return "<p>No sample was made.</p>"
-    head = ("Sample", "Run key", "As of", "Status", "Selected", "Target", "Short", "Sample table", "Rules (hash)")
+    head = ("Sample", "Run key", "As of", "Status", "Selected", "Target", "Short", "Target table", "Rules (hash)")
     cells = [[_sample(r), r.get("run_key"), r.get("as_of_date"), r.get("status"),
-              r.get("selected"), r.get("target_cnt"), r.get("shortfall"), r.get("smpl_table_nm") or "",
+              r.get("selected"), r.get("target_cnt"), r.get("shortfall"), r.get("tgt_table_nm") or "",
               str(r.get("config_hash") or "")[:12]] for r in runs]
     rows = "".join("<tr>" + "".join(f"<td>{html.escape(str(c if c is not None else ''))}</td>" for c in row)
                    + "</tr>" for row in cells)
     return ("<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\"><tr>"
             + "".join(f"<th>{h}</th>" for h in head) + f"</tr>{rows}</table>"
             + "<p>The selected cases are in GOVT_RGLTRY_SampleSelection (Selected_Ind = 1, Curr_Ind = 1) "
-              "and in the sample table.</p>")
+              "and in the target table.</p>")
 
 
 def _failure_alert_ticket(assignment_group: str):

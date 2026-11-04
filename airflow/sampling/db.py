@@ -1,7 +1,7 @@
 """Teradata layer: the connection wrapper, transactions, {key} / $key parameters, run ids.
 
 One Teradata connection serves everything a run touches: the GOVT_RGLTRY_Sampl* metadata tables (in
-Settings.meta_db), the source table a sample reads (Src_Schema_Nm.Src_Table_Nm) and its sample table.
+Settings.meta_db), the source table a sample reads (Src_Schema_Nm.Src_Table_Nm) and its target table.
 
 The connection comes from the TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH environment
 variables - set by the Airflow bridge from the Teradata Connection, or locally from dev.env. Nothing else here

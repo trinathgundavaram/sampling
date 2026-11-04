@@ -33,7 +33,7 @@ from what was loaded, with:
 - **priority**: which cases go first within a group (revisions first, then inpatient, then expedited ...);
   cases left over from last cycle first;
 - **variety**: not ten cases of the same code when other codes exist;
-- **a sample table**: the selected cases' source rows, every column, in a table of each sample's own.
+- **a target table**: the selected cases' source rows, every column, in a table of each sample's own.
 
 A **sample** is one **project + table + run type** (`Project_Cd`, `Table_Nm`, `Run_Ty`: `UMCM` / `ODAG1` /
 `WKLY`), as the GOVT_RGLTRY framework scopes its batches. A project may sample several tables, and a table may be
@@ -69,8 +69,8 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 7. Stratify | Level by level, each parent's target is split between its buckets (FRACTION, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
 | 8. Select | Per leaf bucket: RANKED (first in order), RANDOM (seeded shuffle) or SYSTEMATIC (every k-th); rotating across `Diversity_Sql_Txt` values | `Smpl_Method_Cd`, `Diversity_Sql_Txt`, `Diversity_Cap_Cnt` | `SELECT_FAILURE` |
 | 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap still holds) | `Shortfall_Cd` | |
-| 10. Sample table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-sample-table)) | `Smpl_Schema_Nm`, `Smpl_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
-| 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the sample table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts (`Run_Rpt_Txt`) | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
+| 10. Target table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-target-table)) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
+| 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts (`Run_Rpt_Txt`) | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
 | Later | `finalize` makes the sample `FINAL`; `replace` swaps a case (see [10.8](#108-finalise-a-sample), [10.9](#109-replace-a-case)) | – | – |
 
 A failure closes the run row as `ERROR` with `Error_Ty`, `Error_Txt` and (technical errors) the end of the
@@ -91,7 +91,7 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 | `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, counts per rule and bucket, the configuration it used | engine |
 | `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
-| *`Smpl_Schema_Nm`.`Smpl_Table_Nm`* | The sample table: the selected cases' source rows (optional, one per sample, created by another process, [4.3](#43-the-sample-table)) | engine |
+| *`Tgt_Schema_Nm`.`Tgt_Table_Nm`* | The target table: the selected cases' source rows (optional, one per sample, created by another process, [4.3](#43-the-target-table)) | engine |
 
 ```
 GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty)
@@ -99,7 +99,7 @@ GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty)
        LEVEL rows (Level_Nbr) ← BUCKET rows (same Level_Nbr)
 
 GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule and GOVT_RGLTRY_SampleSelection
-                                    = SMPL_RUN_ID of the sample table
+                                    = SMPL_RUN_ID of the target table
 ```
 
 ## 4. Configuration tables (you fill these)
@@ -108,7 +108,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 
 - **Never delete a row**: set `Active_Ind = 0` (1 = in use). `Rule_ID` is yours to choose: unique in the whole
   table (e.g. 1–99 for one sample, 101–199 for the next).
-- **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the sample table's columns are
+- **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the target table's columns are
   matched without regard to case (`umcm` = `UMCM`).
 - **SQL text**: every rule's `Rule_Sql_Txt` (PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET) is a whole `SELECT`
   (4.2), and the config's `Scope_Sql_Txt` a condition on the source row. Quotes are doubled inside an `INSERT`
@@ -149,7 +149,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 | `Diversity_Cap_Cnt` | Optional: at most this many picks per `Diversity_Sql_Txt` value in the whole sample |
 | `Shortfall_Cd` | `TOPUP` (default) / `NONE` |
 | `Keep_Excluded_Ind` | 1 (default) = store excluded rows with their reason too |
-| `Smpl_Schema_Nm`, `Smpl_Table_Nm` | Optional: the sample table's database and name (both or neither), `$env` allowed, [4.3](#43-the-sample-table) |
+| `Tgt_Schema_Nm`, `Tgt_Table_Nm` | Optional: the target table's database and name (both or neither), `$env` allowed, [4.3](#43-the-target-table) |
 | `Active_Ind` | 1 = in use |
 
 The schedule is not a column: it is the Airflow Variable's (`schedule_interval`, per `runs` entry for timed runs).
@@ -193,7 +193,7 @@ Run_Ty = '{run_ty}' AND <closed>`.
 case, the run can be given a SQL condition (the Variable, a `runs` entry, a trigger, or `--filter "SQL"` locally),
 e.g. `BTCH_ID = 'B42' AND ETL_IS_CURR_IND = 'Y'`, or an SCD2 version valid on the
 run date: `DATE '{as_of_date}' BETWEEN EFF_DT AND END_DT`. Each layer's (and each `--filter`'s) condition is ANDed
-to `Scope_Sql_Txt`, so the pull and the sample table read the same rows; it is kept in `Run_Parm_Txt`,
+to `Scope_Sql_Txt`, so the pull and the target table read the same rows; it is kept in `Run_Parm_Txt`,
 so a later case replacement reads it too. It is checked like any configured SQL (only reading, no `;`, no `--`).
 When the filters leave two rows with the same key columns, the run stops with "key_columns_txt do not identify a
 case uniquely": add the filter that picks one version. (A rule's own `SELECT` reads its tables itself: give a value
@@ -268,13 +268,13 @@ How a parent's target T is split:
 
 A level's fractions under one `Parent_Path_Txt` add up to 1 at most.
 
-### 4.3 The sample table
+### 4.3 The target table
 
-Each sample may name its own sample table: `Smpl_Schema_Nm` and `Smpl_Table_Nm` (both, or neither; each a plain
+Each sample may name its own target table: `Tgt_Schema_Nm` and `Tgt_Table_Nm` (both, or neither; each a plain
 name, `$env` allowed: `UMCM_$ENV_T` + `ODAG1_WKLY_SAMPLE`). The table is **created by another process**; the engine
 never creates or alters it, it reads its columns and inserts rows. One row per selected case:
 
-| Columns of the sample table | Value |
+| Columns of the target table | Value |
 |---|---|
 | any column the source (`Src_Schema_Nm`.`Src_Table_Nm`) has | copied from the case's source row, read under the run's scope and `extra_filters` |
 | `ETL_IS_CURR_IND` (**required**) | `'Y'`; `'N'` once a rerun or a replacement retires the row |
@@ -301,7 +301,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt`, `Error_Detail_Txt`, `Run_Rpt_Txt`, `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Smpl_Table_Nm`) |
+| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt`, `Error_Detail_Txt`, `Run_Rpt_Txt`, `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
@@ -414,7 +414,7 @@ section D.
 | Equal portions | BUCKETs `REMAINDER` (or no BUCKET rows: unlisted `SHARE`) |
 | No more than 3 of one code | `Diversity_Sql_Txt` the code, `Diversity_Cap_Cnt` 3 |
 | Exactly 150 or flag it | `Shortfall_Cd` `NONE`, Variable `fail_on_shortfall` true |
-| A table of the selected cases for the auditors | `Smpl_Schema_Nm` + `Smpl_Table_Nm` (4.3) |
+| A table of the selected cases for the auditors | `Tgt_Schema_Nm` + `Tgt_Table_Nm` (4.3) |
 
 ## 8. Airflow: Connection, Variable, triggers
 
@@ -428,7 +428,7 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
 - **Started by the framework**: add this DAG to a framework step Variable's `trigger_dags`; here
   `trigger_keys` `["as_of"]` and `trigger_run_params` for the values the rules use (AIRFLOW_DEPLOYMENT.md,
   "Started by the GOVT_RGLTRY framework").
-- **Auditors** get `sample_ready_email` (counts, run key, sample table, rules hash) with `notify_recipients`.
+- **Auditors** get `sample_ready_email` (counts, run key, target table, rules hash) with `notify_recipients`.
 - **Triggering** (UI "Trigger DAG w/ config", CLI, REST, or an upstream DAG): `project`, `table`, `run_type`,
   `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level` (`run` on a timed DAG) – limited by the Variable's
   `trigger_keys` when set. The database, the Connection and the environment are never taken from a trigger.
@@ -454,7 +454,7 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | `show-config <sample>` | The config and the rules it uses, by class, and its problems (JSON) | – |
 | `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
 | `finalize <sample> --run-key K [--by U]` | Makes the current sample of the cycle `FINAL` | run row |
-| `replace <sample> --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, sample table |
+| `replace <sample> --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, target table |
 | `runs [<scope>] [--run-key K] [--status S]` | Recent run rows (with `Config_Hash`, `Finalized_By`, `Override_Rsn_Txt`) | – |
 | `errors [<scope>]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
@@ -517,7 +517,7 @@ The worker was killed mid-run (nothing of the run was written: the writes are on
 
 ### 10.6 Redo a cycle
 Run again with the same `run_key` (and `--seed` from the run row to reproduce a RANDOM draw). The earlier run
-turns `Curr_Ind = 0` everywhere, and `ETL_IS_CURR_IND = 'N'`, `ETL_IS_DEL_IND = 'Y'` in the sample table.
+turns `Curr_Ind = 0` everywhere, and `ETL_IS_CURR_IND = 'N'`, `ETL_IS_DEL_IND = 'Y'` in the target table.
 
 ### 10.7 Change a mix, a rule, a priority
 New rule rows, or `Active_Ind = 0` on the old ones, then
@@ -538,7 +538,7 @@ possible from the command line, never from a DAG trigger.
 A selected case cannot be reviewed (no record, duplicate …):
 `replace --project P --table T --run-type R --run-key K --case-key "<Case_Key>" --reason "<why>"`. The next
 candidate of the same bucket in priority order goes in (RANDOM: a draw seeded by the run's seed, the same every
-time), with the same `Selection_Order_Nbr`; the sample table gets its source row and the old row is retired
+time), with the same `Selection_Order_Nbr`; the target table gets its source row and the old row is retired
 (`ETL_IS_CURR_IND = 'N'`), evaluated with the configuration and rules of that run (its run row and its
 `GOVT_RGLTRY_SamplingRunRule` rows), not today's. When the bucket has no candidate left, `--any-bucket` takes the
 next one overall (the mix then differs from the quotas: the reason records why). Allowed on a `FINAL` sample. A
@@ -548,12 +548,12 @@ replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycl
 ## 11. First run on DEV (checklist)
 
 1. `deploy-schema --dry-run`, then `deploy-schema` (DBA rights on `meta_db`).
-2. Have each sample table created (4.3: the source's columns plus the `ETL_*` / `SMPL_*` ones).
+2. Have each target table created (4.3: the source's columns plus the `ETL_*` / `SMPL_*` ones).
 3. Enter the configuration rows (OPEN_ITEMS.md section D, once its TODOs are answered; `Active_Ind = 1`).
 4. `validate --project UMCM --table ODAG1 --run-type WKLY --check-sql`.
 5. `run --project UMCM --table ODAG1 --run-type WKLY --dry-run`: check the report's `exclusions`, `buckets` and
    `by_stratum`.
-6. The same without `--dry-run`; check 10.1 – 10.3 and the sample table.
+6. The same without `--dry-run`; check 10.1 – 10.3 and the target table.
 7. Deploy the DAG, set the Connection and the Variable, trigger with `dry_run`, then for real.
 8. Try `finalize`, a rerun (expect `FINALIZED`) and `replace` on a DEV cycle, so the team knows them before audit.
 
@@ -571,7 +571,7 @@ sample of the scope, for runs whose as-of date (`As_Of_Dt_Key`) is more than D d
 
 The selected, `REPLACED` and `REPLACEMENT` rows of current runs stay, so the sample of every cycle, the cases
 taken out and why stay readable, and no-repeat rules keep working. The run rows (with each run's rules, counts per
-bucket and hash) are never deleted. Not touched: the sample tables.
+bucket and hash) are never deleted. Not touched: the target tables.
 
 D must be at least the longest `Lookback_Days` of the active history rules that may read the sample's rows (the
 `SAMPLE`-scope rules of its table and run type, the `TABLE`-scope rules of its table, the `PROJECT`-scope rules of

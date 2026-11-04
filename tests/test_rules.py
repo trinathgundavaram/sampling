@@ -115,7 +115,7 @@ def test_d_diversity_rotates_and_cap_holds_through_top_up(raw, conn, settings):
     assert out["selected"] == 6 and out["shortfall"] == 3
 
 
-# ── E: the sample table: the selected cases' source rows ──────────────────
+# ── E: the target table: the selected cases' source rows ──────────────────
 
 SAMPLE_COLS = ("etl_is_curr_ind VARCHAR, etl_is_del_ind VARCHAR, etl_load_dt_tm TIMESTAMP, "
                "etl_last_updt_dt_tm TIMESTAMP, smpl_run_id VARCHAR, smpl_run_key VARCHAR, smpl_cycle_dt DATE, "
@@ -128,14 +128,14 @@ def _source(db, rows):
                "etl_load_dt_tm TIMESTAMP, etl_last_updt_dt_tm TIMESTAMP)")
     db.executemany("INSERT INTO src VALUES (?, ?, ?, 'N', TIMESTAMP '2020-01-01 00:00:00', NULL)", rows)
     insert_config(db, src_table_nm="src", exclusion_sql=None, scope_sql_txt="etl_is_curr_ind = 'Y'", target_cnt=4,
-                  priority_rank_sql_txt="case_id", smpl_schema_nm="main", smpl_table_nm="smpl_t")
+                  priority_rank_sql_txt="case_id", tgt_schema_nm="main", tgt_table_nm="smpl_t")
 
 
-def test_e_the_sample_table_gets_every_source_column(raw, conn, settings):
+def test_e_the_target_table_gets_every_source_column(raw, conn, settings):
     _source(raw.db, [(f"d{i:03d}", f"K{i}", "Y") for i in range(10)])
     raw.db.execute(f"CREATE TABLE smpl_t (case_id VARCHAR, code VARCHAR, {SAMPLE_COLS})")
     first = _run(conn, settings, run_key="W1")
-    assert first["status"] == "COMPLETED" and first["smpl_table_nm"] == "main.smpl_t", first
+    assert first["status"] == "COMPLETED" and first["tgt_table_nm"] == "main.smpl_t", first
     rows = _rows(raw, "SELECT smpl_order_nbr, case_id, code, smpl_run_key, smpl_stratum_path, etl_is_curr_ind, "
                       "etl_is_del_ind, YEAR(etl_load_dt_tm) > 2020, smpl_run_id = (SELECT Smpl_Run_ID FROM "
                       "GOVT_RGLTRY_SamplingRun), smpl_run_ty FROM smpl_t ORDER BY 1")
@@ -149,7 +149,7 @@ def test_e_the_sample_table_gets_every_source_column(raw, conn, settings):
                       "ORDER BY 1") == [("W1", 4), ("W2", 4)]
 
 
-def test_e_the_sample_table_columns_are_checked(raw, conn, settings):
+def test_e_the_target_table_columns_are_checked(raw, conn, settings):
     _source(raw.db, [("d000", "K", "Y")])
     raw.db.execute("CREATE TABLE smpl_t (code VARCHAR, notes VARCHAR, etl_is_curr_ind VARCHAR)")
     out = _run(conn, settings)
@@ -167,15 +167,15 @@ def test_e_one_source_row_per_selected_case(raw, conn, settings):
     assert out["error_type"] == "CONFIG_ERROR" and "do not identify a case uniquely" in out["error"]
 
 
-def test_e_sample_table_names_and_old_output_rules(raw, conn, settings):
+def test_e_target_table_names_and_old_output_rules(raw, conn, settings):
     _cases_table(raw.db, _cases("d", 3, "D"))
-    _config(raw.db, 2, smpl_table_nm="smpl_t")
+    _config(raw.db, 2, tgt_table_nm="smpl_t")
     insert_rule(raw.db, "OUTPUT", 1, "case_id", rule_sql_txt="case_id")
     problems = config_problems(load_config(conn, settings, key(1)))
-    assert "smpl_schema_nm and smpl_table_nm go together: set both (the sample table) or neither" in problems
+    assert "tgt_schema_nm and tgt_table_nm go together: set both (the target table) or neither" in problems
     assert any("OUTPUT rules are no longer used" in p for p in problems)
-    set_config(raw.db, smpl_schema_nm="main.x")
-    assert any("smpl_schema_nm 'main.x' must be a plain name" in p for p in config_problems(load_config(conn, settings, key(1))))
+    set_config(raw.db, tgt_schema_nm="main.x")
+    assert any("tgt_schema_nm 'main.x' must be a plain name" in p for p in config_problems(load_config(conn, settings, key(1))))
 
 
 # ── F: history: dedupe and carry-over ─────────────────────────────────────
@@ -345,12 +345,12 @@ def test_run_types_of_a_table_keep_their_own_samples_and_history(raw, conn, sett
 
 
 def test_names_and_columns_in_any_case(raw, conn, settings):
-    """Config values, key columns and sample-table columns are matched without regard to case."""
+    """Config values, key columns and target-table columns are matched without regard to case."""
     raw.db.execute('CREATE TABLE "Src_Mixed" ("CASE_ID" VARCHAR, "Code" VARCHAR, "ETL_IS_CURR_IND" VARCHAR)')
     raw.db.executemany('INSERT INTO "Src_Mixed" VALUES (?, ?, ?)', [(f"m{i}", "K", "Y") for i in range(5)])
     insert_config(raw.db, src_schema_nm="MAIN", src_table_nm="src_mixed", key_columns="Case_Id", exclusion_sql=None,
                   scope_sql_txt="etl_is_curr_ind = 'Y'", target_cnt=2, priority_rank_sql_txt="case_id",
-                  project_cd="umcm", run_ty="wkly", table_nm="t1", smpl_schema_nm="Main", smpl_table_nm="SMPL_MIXED")
+                  project_cd="umcm", run_ty="wkly", table_nm="t1", tgt_schema_nm="Main", tgt_table_nm="SMPL_MIXED")
     raw.db.execute('CREATE TABLE smpl_mixed ("case_id" VARCHAR, "CODE" VARCHAR, "Etl_Is_Curr_Ind" VARCHAR, '
                    '"Smpl_Run_Key" VARCHAR, "SMPL_ORDER_NBR" INTEGER)')
     insert_rule(raw.db, "EXCLUSION", 1, "none", table_nm="*", run_ty="*", project_cd="UmCm",

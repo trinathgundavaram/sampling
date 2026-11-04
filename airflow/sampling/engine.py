@@ -4,7 +4,7 @@ Everything a sample selects is configuration rows holding SQL - no field name or
 (sql/schema.sql describes every table). A sample is one Project_Cd + Table_Nm + Run_Ty, as the framework scopes
 its batches:
 
-    GOVT_RGLTRY_SamplingConfig    source table, scope, key columns, size, method, diversity, sample table
+    GOVT_RGLTRY_SamplingConfig    source table, scope, key columns, size, method, diversity, target table
     GOVT_RGLTRY_SamplingRule      one row per rule, Rule_Class_Cd saying what it is; Table_Nm / Run_Ty '*' = every
                                   table / run type of the project (the most specific row of a rule wins):
         PARAM             a run parameter looked up by SQL ({batch_id} = the latest batch, ...)
@@ -37,9 +37,9 @@ One run = one sample:
     select per leaf           RANKED: in priority order | RANDOM: seeded shuffle | SYSTEMATIC: seeded start,
                               every k-th; rotating across Diversity_Sql_Txt values (Diversity_Cap_Cnt per value)
     top up                    Shortfall_Cd TOPUP: from the rest of the candidates, in priority order
-    sample table              Smpl_Schema_Nm.Smpl_Table_Nm (created by another process): the selected cases'
+    target table              Tgt_Schema_Nm.Tgt_Table_Nm (created by another process): the selected cases'
                               source rows, every column, with the ETL_* audit and SMPL_* run columns set by sampling
-    persist (one transaction) selections (+ excluded rows) with their bucket path, sample table rows; earlier runs
+    persist (one transaction) selections (+ excluded rows) with their bucket path, target table rows; earlier runs
                               of the same sample and Run_Key -> Curr_Ind = 0; run row -> COMPLETED with the counts
                               per rule and bucket (Run_Rpt_Txt)
     on failure                run row -> ERROR with Error_Ty, message and traceback (nothing half written)
@@ -53,7 +53,7 @@ Audit defensibility:
                               run_key is refused (FINALIZED) unless given a force_reason, which is recorded
     replace a case            replace_case(): a selected case comes out (REPLACED, with the reason and who) and
                               the next candidate of the same bucket goes in (REPLACEMENT), in priority order
-                              (RANDOM: a seeded draw); the sample table follows
+                              (RANDOM: a seeded draw); the target table follows
 
 Reproducible: one seed per run (on the run row); every leaf draws from its own generator seeded with
 (seed, bucket path), so a draw never depends on the order buckets are visited.
@@ -92,7 +92,7 @@ HISTORY_SCOPES = ("SAMPLE", "TABLE", "PROJECT")
 SHORTFALL_POLICIES = ("TOPUP", "NONE")
 OTHER_BUCKET = "OTHER"
 NULL_BUCKET = "NULL"
-# The sample table (Smpl_Schema_Nm.Smpl_Table_Nm, created by another process) gets every column of the selected
+# The target table (Tgt_Schema_Nm.Tgt_Table_Nm, created by another process) gets every column of the selected
 # cases' source rows, except these, which sampling sets itself even when the source has them: the framework's audit
 # columns, and the run's columns. It needs at least SAMPLE_REQUIRED (a rerun or a replacement retires by them).
 # Column names are matched in any case.
@@ -114,7 +114,7 @@ _SNAPSHOT_RULE_COLUMNS = ("rule_id", "project_cd", "table_nm", "run_ty", "rule_c
 # the config columns a run row carries (the configuration the run used)
 _RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scope_sql_txt", "target_cnt",
                        "smpl_method_cd", "priority_rank_sql_txt", "rounding_cd", "diversity_sql_txt",
-                       "diversity_cap_cnt", "shortfall_cd", "keep_excluded_ind", "smpl_schema_nm", "smpl_table_nm")
+                       "diversity_cap_cnt", "shortfall_cd", "keep_excluded_ind", "tgt_schema_nm", "tgt_table_nm")
 RUN_REPORT_MAX = 16000      # Run_Rpt_Txt
 ERROR_DETAIL_MAX = 8000     # Error_Detail_Txt (the end of the traceback is kept)
 # the optional GOVT_RGLTRY_SamplingRule columns each class reads (any other one set is reported)
@@ -323,8 +323,8 @@ def config_problems(sample: Sample) -> list:
         if r["rule_class_cd"] == "BUCKET":
             problems.append(f"rule {r['rule_id']}: BUCKET of level_nbr {r.get('level_nbr')}, which has no LEVEL")
         elif r["rule_class_cd"] == "OUTPUT":
-            problems.append(f"rule {r['rule_id']}: OUTPUT rules are no longer used: the sample table "
-                            f"(smpl_schema_nm.smpl_table_nm) gets every column of the source row; set active_ind = 0")
+            problems.append(f"rule {r['rule_id']}: OUTPUT rules are no longer used: the target table "
+                            f"(tgt_schema_nm.tgt_table_nm) gets every column of the source row; set active_ind = 0")
         else:
             problems.append(f"rule {r['rule_id']}: rule_class_cd {r['rule_class_cd']!r} is not one of "
                             f"{', '.join(RULE_CLASSES)}")
@@ -381,10 +381,10 @@ def config_problems(sample: Sample) -> list:
     for lvl in sample.levels:
         problems += _level_problems(lvl)
 
-    db, table = _text(c, "smpl_schema_nm"), _text(c, "smpl_table_nm")
+    db, table = _text(c, "tgt_schema_nm"), _text(c, "tgt_table_nm")
     if bool(db) != bool(table):
-        problems.append("smpl_schema_nm and smpl_table_nm go together: set both (the sample table) or neither")
-    for col, name in (("smpl_schema_nm", db), ("smpl_table_nm", table)):
+        problems.append("tgt_schema_nm and tgt_table_nm go together: set both (the target table) or neither")
+    for col, name in (("tgt_schema_nm", db), ("tgt_table_nm", table)):
         if name and not _IDENT.match(name):
             problems.append(f"{col} {name!r} must be a plain name ($env allowed), the database and the table apart")
     return problems + _sql_problems(sample)
@@ -520,9 +520,9 @@ def _col(rule: dict) -> str:
 
 
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
-    """{source, scope, pull, key_queries, output (or None), smpl_table_nm}: the SQL of a run, $env and
+    """{source, scope, pull, key_queries, output (or None), tgt_table_nm}: the SQL of a run, $env and
     parameters resolved; the run's extra_filters (params[EXTRA_FILTERS], SQL) are ANDed to the scope, so the pull
-    and the sample table's rows read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull.
+    and the target table's rows read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull.
     output: every column of the source rows in scope (the selected cases' keys are ANDed to it)."""
     def sql(text, identifier=False):
         return substitute_params(s.resolve_env(str(text or "").strip(), identifier=identifier), params)
@@ -547,17 +547,17 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     key_queries = [(r, sql(r["rule_sql_txt"])) for r in query_rules(sample)]
     out = {"source": source, "scope": scope, "key_queries": key_queries,
            "pull": f"SELECT {', '.join(columns)} FROM {source} WHERE ({scope})", "output": None}
-    if _text(c, "smpl_table_nm"):
-        out["smpl_table_nm"] = f"{sql(c.get('smpl_schema_nm'), identifier=True)}.{sql(c['smpl_table_nm'], identifier=True)}"
+    if _text(c, "tgt_table_nm"):
+        out["tgt_table_nm"] = f"{sql(c.get('tgt_schema_nm'), identifier=True)}.{sql(c['tgt_table_nm'], identifier=True)}"
         out["output"] = f"SELECT * FROM {source} WHERE ({scope})"
     return out
 
 
-def sample_table_columns(conn: Connection, queries: dict, sample: Sample) -> list:
-    """The sample table's columns, checked against the source: each is set by sampling (SAMPLE_AUDIT_COLS,
+def target_table_columns(conn: Connection, queries: dict, sample: Sample) -> list:
+    """The target table's columns, checked against the source: each is set by sampling (SAMPLE_AUDIT_COLS,
     SAMPLE_RUN_COLS) or copied from the source column of the same name (in any case). ConfigError when the table lacks
     SAMPLE_REQUIRED or a key column, or has a column that is neither."""
-    table = queries["smpl_table_nm"]
+    table = queries["tgt_table_nm"]
     columns = conn.columns(f"SELECT * FROM {table} WHERE 1=0")
     source = {c.lower() for c in conn.columns(f"SELECT * FROM {queries['source']} WHERE 1=0")}
     have = {c.lower() for c in columns}
@@ -567,7 +567,7 @@ def sample_table_columns(conn: Connection, queries: dict, sample: Sample) -> lis
     if other:
         problems.append(f"has columns that are neither in the source nor set by sampling: {', '.join(other)}")
     if problems:
-        raise ConfigError(f"sample table {table}: " + "; ".join(problems))
+        raise ConfigError(f"target table {table}: " + "; ".join(problems))
     return columns
 
 
@@ -1045,12 +1045,12 @@ def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) 
             out[case_key(r, keys)] = r
     missing = [r["_key"] for r in chosen if r["_key"] not in out]
     if missing:
-        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the sample table, e.g. {missing[0]}")
+        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the target table, e.g. {missing[0]}")
     return out
 
 
 def _retire_output(conn, queries, run_key, now, where: str = "", params: Sequence = ()):
-    """Mark the current sample table rows of run_key (and of where) retired, as the framework does: ETL_IS_CURR_IND
+    """Mark the current target table rows of run_key (and of where) retired, as the framework does: ETL_IS_CURR_IND
     'N', ETL_IS_DEL_IND 'Y', ETL_LAST_UPDT_DT_TM now (each when the table has it)."""
     have = {c.lower(): c for c in queries["output_columns"]}
     sets, values = [f"{have['etl_is_curr_ind']} = 'N'"], []
@@ -1059,7 +1059,7 @@ def _retire_output(conn, queries, run_key, now, where: str = "", params: Sequenc
     if "etl_last_updt_dt_tm" in have:
         sets.append(f"{have['etl_last_updt_dt_tm']} = ?")
         values.append(now)
-    conn.execute(f"UPDATE {queries['smpl_table_nm']} SET {', '.join(sets)} "
+    conn.execute(f"UPDATE {queries['tgt_table_nm']} SET {', '.join(sets)} "
                  f"WHERE {have['smpl_run_key']} = ? AND {have['etl_is_curr_ind']} = 'Y'"
                  f"{' AND ' + where if where else ''}", [*values, run_key, *params])
 
@@ -1074,7 +1074,7 @@ def _write_output(conn, s, queries, run_id, run_key, run_type, as_of, output: di
                "smpl_run_id": run_id, "smpl_run_key": run_key, "smpl_run_ty": run_type, "smpl_cycle_dt": as_of,
                "smpl_order_nbr": order, "smpl_stratum_path": path}
         return [own[c.lower()] if c.lower() in own else output[key].get(c.lower()) for c in columns]
-    conn.executemany(f"INSERT INTO {queries['smpl_table_nm']} ({', '.join(columns)}) "
+    conn.executemany(f"INSERT INTO {queries['tgt_table_nm']} ({', '.join(columns)}) "
                      f"VALUES ({', '.join(['?'] * len(columns))})",
                      [row(*case) for case in cases], s.chunk_rows)
 
@@ -1215,7 +1215,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         return fail("config", "CONFIG_ERROR", "; ".join(problems))
     try:
         queries = build_queries(sample, s, params)
-        summary["smpl_table_nm"] = queries.get("smpl_table_nm")
+        summary["tgt_table_nm"] = queries.get("tgt_table_nm")
         gate_queries(sample, s, params)
     except (ValueError, KeyError) as e:
         return fail("config", "CONFIG_ERROR", e)
@@ -1276,7 +1276,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     output = None
     if queries["output"]:
         try:
-            queries["output_columns"] = sample_table_columns(conn, queries, sample)
+            queries["output_columns"] = target_table_columns(conn, queries, sample)
             output = fetch_output(conn, queries, sample, chosen)
         except ConfigError as e:
             return fail("config", "CONFIG_ERROR", e)
@@ -1348,7 +1348,7 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
                  any_bucket: bool = False) -> dict:
     """Take one selected case out of the current sample of (sample, run_key) and put the next candidate in:
     the same bucket (any_bucket: anywhere), never selected or replaced before, in priority order (RANDOM: a
-    draw seeded by the run's seed). Allowed on a FINAL sample. The sample table follows. One transaction."""
+    draw seeded by the run's seed). Allowed on a FINAL sample. The target table follows. One transaction."""
     if not str(reason or "").strip():
         raise ConfigError("a reason is required to replace a case")
     key = sample_key(key)
@@ -1376,11 +1376,11 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
         new = pool[0]
 
     output = queries = sample = None
-    if _text(run, "smpl_table_nm"):
+    if _text(run, "tgt_table_nm"):
         sample = run_sample(conn, s, run)   # the config and rules that made this sample
         params = json.loads(run.get("run_parm_txt") or "{}")
         queries = build_queries(sample, s, params)
-        queries["output_columns"] = sample_table_columns(conn, queries, sample)
+        queries["output_columns"] = target_table_columns(conn, queries, sample)
         row = {**parse_case_key(new["case_key"], sample.keys), "_key": new["case_key"]}
         output = fetch_output(conn, queries, sample, [row])
 
@@ -1459,8 +1459,8 @@ def validate(conn: Connection, s: Settings, project: Optional[str] = None, table
              run_type: Optional[str] = None, run_params: Optional[dict] = None,
              check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[str] = None) -> dict:
     """Check the samples of a scope. With check_sql, also run the parameter lookups, EXPLAIN the pull, the rules'
-    and the sample table's SQL (proves tables, columns and expressions exist; reads no source rows), and check
-    the sample table's columns against the source (sample_table_columns)."""
+    and the target table's SQL (proves tables, columns and expressions exist; reads no source rows), and check
+    the target table's columns against the source (target_table_columns)."""
     out = []
     for key in discover_configs(conn, s, project, table, run_type):
         entry = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2]}
@@ -1482,7 +1482,7 @@ def validate(conn: Connection, s: Settings, project: Optional[str] = None, table
                     if queries.get(name):
                         conn.query("EXPLAIN " + queries[name] + (" AND 1=0" if name == "output" else ""))
                 if queries.get("output"):
-                    sample_table_columns(conn, queries, sample)
+                    target_table_columns(conn, queries, sample)
                 for _, text in [*gate_queries(sample, s, params), *queries["key_queries"]]:
                     conn.query("EXPLAIN " + text)
             except Exception as e:  # noqa: BLE001

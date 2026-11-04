@@ -130,8 +130,8 @@ def test_replace_when_the_bucket_is_used_up(raw, conn, settings):
     assert out["replacement"] == "case_id=d04" and out["stratum_path"] == "Denied"
 
 
-def test_replace_updates_the_sample_table(raw, conn, settings):
-    _sample(raw.db, smpl_schema_nm="main", smpl_table_nm="smpl_t")
+def test_replace_updates_the_target_table(raw, conn, settings):
+    _sample(raw.db, tgt_schema_nm="main", tgt_table_nm="smpl_t")
     raw.db.execute("CREATE TABLE smpl_t (case_id VARCHAR, disp VARCHAR, code VARCHAR, etl_is_curr_ind VARCHAR, "
                    "etl_is_del_ind VARCHAR, smpl_run_key VARCHAR, smpl_order_nbr INTEGER, smpl_stratum_path VARCHAR)")
     _run(conn, settings)

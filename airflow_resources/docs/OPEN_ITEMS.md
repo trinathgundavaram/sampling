@@ -16,7 +16,7 @@ any answer: they become rows.
 | Q7 | The out-of-network share and how OON is identified | a bucket or priority |
 | Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) **Decided 2026-10-30:** `TOPUP`, `fail_on_shortfall` false (the shortfall is recorded, the run succeeds). The functional-area-within-denials part stays with Q2. | LEVEL `Parent_Path_Txt`, `Shortfall_Cd`, `fail_on_shortfall` |
 | Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation **Later:** no code-variety rule for now (`Diversity_Sql_Txt` NULL). | `Diversity_Sql_Txt`, `Diversity_Cap_Cnt` |
-| Q10 | The sample table's database and name (created by another process with the source's columns plus the sampling columns) | `Smpl_Schema_Nm`, `Smpl_Table_Nm` |
+| Q10 | The target table's database and name (created by another process with the source's columns plus the sampling columns) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` |
 | Q11 | Scheduled (which day and time, Central), or started by a framework step (which one: EXPORT_LOAD, BATCH_CLOSE …)? Which framework table and status say a batch is ready to sample? How late can it be (retries × delay)? **Decided 2026-10-30:** started by hand (`schedule_interval` null); GATE `BATCH_CLOSED` refuses a batch with a source still open. | Variable `schedule_interval` / framework `trigger_dags`, `trigger_keys`, a GATE rule, `retries`, `retry_delay_minutes` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? **Decided 2026-10-30:** EXCLUSION `PRIOR_SELECTION` 90 days and PRIORITY `PRIOR_CANDIDATE` 14 days (first), this sample only (`History_Scope_Cd` `SAMPLE`). | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
 | Q13 | Who receives the "sample ready" email | Variable `notify_recipients` |
@@ -55,7 +55,7 @@ their TODOs are answered, then `Active_Ind = 1` and `validate --project UMCM --t
 **Config:** `Project_Cd` `UMCM`, `Table_Nm` `ODAG1`, `Run_Ty` `WKLY`, `Src_Schema_Nm` `EXPORT_FEED_$ENV_T`,
 `Src_Table_Nm` `SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1`, `Key_Columns_Txt` `AUTHZN_ID, SRC_DATA_KEY`,
 `Scope_Sql_Txt` `<CURRENT>`, `Target_Cnt` 150, `RANKED`, `FLOOR`, no diversity (Q9), `TOPUP`, `Keep_Excluded_Ind`
-1, `Smpl_Schema_Nm` / `Smpl_Table_Nm` TODO(Q10) (the sample table, runbook 4.3).
+1, `Tgt_Schema_Nm` / `Tgt_Table_Nm` TODO(Q10) (the target table, runbook 4.3).
 
 The PARAM and GATE rows use the sample's own `{project_cd}`, `{table_nm}` and `{run_ty}`, so with `Table_Nm` /
 `Run_Ty` `*` they serve every table and run type of the project (a monthly ODAG1 sample finds its `MNT` batch with

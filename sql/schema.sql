@@ -12,7 +12,7 @@
 -- Run_Ty are its own or '*' (every table / every run type); for the same rule
 -- the most specific row wins.
 --
---   GOVT_RGLTRY_SamplingConfig   you    one row per sample: source, scope, size, method, sample table
+--   GOVT_RGLTRY_SamplingConfig   you    one row per sample: source, scope, size, method, target table
 --   GOVT_RGLTRY_SamplingRule     you    every rule, one row each:
 --                                       PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET
 --   GOVT_RGLTRY_SamplingRun      engine one row per run attempt: status, counts, errors, the config it used
@@ -49,8 +49,9 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingConfig (
   Shortfall_Cd           VARCHAR(10)    DEFAULT 'TOPUP' NOT NULL,   -- TOPUP: fill a short sample from the other
                                                            -- candidates by priority | NONE: leave it short
   Keep_Excluded_Ind      SMALLINT       DEFAULT 1 NOT NULL,       -- 1 = store excluded rows with their reason too
-  Smpl_Schema_Nm         VARCHAR(128),                     -- optional: database of the sample table, $env allowed
-  Smpl_Table_Nm          VARCHAR(128),                     -- optional: the sample table (created by another
+  Tgt_Schema_Nm          VARCHAR(128),                     -- optional, with Tgt_Table_Nm (both or neither):
+                                                           -- database of the target table, $env allowed
+  Tgt_Table_Nm           VARCHAR(128),                     -- the target table (created by another
                                                            -- process): one row per selected case, every column
                                                            -- of its source row, the ETL_* audit and SMPL_* run
                                                            -- columns set by sampling (runbook 4.3), $env allowed
@@ -173,8 +174,8 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRun (
   Diversity_Cap_Cnt      INTEGER,
   Shortfall_Cd           VARCHAR(10),
   Keep_Excluded_Ind      SMALLINT,
-  Smpl_Schema_Nm         VARCHAR(128),
-  Smpl_Table_Nm          VARCHAR(128),
+  Tgt_Schema_Nm          VARCHAR(128),
+  Tgt_Table_Nm           VARCHAR(128),
   Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
   LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
