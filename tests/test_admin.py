@@ -52,10 +52,10 @@ def test_param_and_gate_sql_must_be_a_select():
 
 def test_a_run_refuses_writing_sql(raw, conn, settings):
     _sample(raw.db)
-    insert_rule(raw.db, "EXCLUSION", 11, "bad", rule_sql="disp = 'x'; DELETE FROM gre_sampling_run")
+    insert_rule(raw.db, "EXCLUSION", 11, "bad", rule_sql="disp = 'x'; DELETE FROM GOVT_RGLTRY_SAMPLING_RUN")
     out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
     assert out["error_type"] == "CONFIG_ERROR" and "';' is not allowed" in out["error"]
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections") == [(0,)]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS") == [(0,)]
 
 
 # the ODAG1 PARAM and GATE rules (OPEN_ITEMS.md, section D)
@@ -79,7 +79,7 @@ def test_the_odag1_batch_lookup_reads_and_follows_the_environment():
 # ── retention ──────────────────────────────────────────────────────────────
 
 def _counts(raw):
-    return dict(_rows(raw, "SELECT run_key || ':' || etl_is_curr_ind, COUNT(*) FROM gre_sample_selections "
+    return dict(_rows(raw, "SELECT run_key || ':' || etl_is_curr_ind, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS "
                            "GROUP BY 1"))
 
 
@@ -98,7 +98,7 @@ def test_purge_keeps_what_is_still_needed(raw, conn, settings):
     assert _counts(raw)["OLD:N"] == 15                                                       # counted only
     purge_selections(conn, settings, 30, config_id=1, as_of=AS_OF, apply=True)
     assert _counts(raw) == {"OLD:Y": 4, "FIN:Y": 15, "NEW:Y": 15}           # selected kept, FINAL and new untouched
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sampling_run") == [(4,)]                     # run rows never go
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLING_RUN") == [(4,)]                     # run rows never go
 
 
 def test_purge_respects_the_history_rules(raw, conn, settings):

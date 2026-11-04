@@ -12,6 +12,6 @@
   "retries": 1,
   "execution_timeout_minutes": 120,
   "fail_on_shortfall": false,
-  "tags": ["Compliance", "Sampling", "UMCM"],
+  "tags": ["GOVT_RGLTRY", "Sampling", "UMCM"],
   "trigger_dags": []
 }

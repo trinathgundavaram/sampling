@@ -1,4 +1,4 @@
-"""extra_filters: a SQL condition given at run time, ANDed to the scope (as the GRE's extra_filters), for tables
+"""extra_filters: a SQL condition given at run time, ANDed to the scope, for tables
 that hold several loads, batches or SCD2 versions of a case."""
 import json
 from datetime import date
@@ -25,7 +25,7 @@ def _data(raw):
     # the level's SELECT reads one version of each case of the run's batch
     insert_rule(db, "LEVEL", 1000, "disp", seq_no=1, level_order=0, parent_path="*",
                 rule_sql="SELECT case_id, disp FROM h WHERE btch_id = '{batch}' AND curr_ind = 'Y'")
-    db.execute("INSERT INTO gre_sampling_rule (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, "
+    db.execute("INSERT INTO GOVT_RGLTRY_SAMPLING_RULE (rule_id, config_id, act_ind, rule_class, seq_no, rule_name, "
                "level_order, parent_path, quota_mode, target_fraction) "
                "VALUES (1001, 1, 1, 'BUCKET', 1, 'Denied', 0, '*', 'FRACTION', 1.0)")
 
@@ -41,7 +41,7 @@ def test_a_filter_picks_the_load_and_the_current_version(raw, conn, settings):
     assert out["in_scope"] == 10 and out["selected"] == 4
     assert out["params"]["extra_filters"] == CURRENT_B2
     # kept with the run's parameters: a case replacement rebuilds its SQL from them
-    assert json.loads(_rows(raw, "SELECT run_params_txt FROM gre_sampling_run")[0][0])["extra_filters"] == CURRENT_B2
+    assert json.loads(_rows(raw, "SELECT run_params_txt FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])["extra_filters"] == CURRENT_B2
 
 
 def test_a_filter_may_use_run_parameters(raw, conn, settings):
@@ -56,21 +56,21 @@ def test_without_filters_the_duplicate_versions_are_refused(raw, conn, settings)
 
 
 def test_filters_add_to_scope_sql(raw, conn, settings):
-    raw.db.execute("UPDATE gre_sampling_config SET scope_sql = 'case_id < ''c05''' WHERE config_id = 1")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_CONFIG SET scope_sql = 'case_id < ''c05''' WHERE config_id = 1")
     out = run_sampling(conn, settings, 1, run_key="B1", as_of=AS_OF, run_params={"batch": "B1"},
                        extra_filters="btch_id = 'B1'")
     assert out["in_scope"] == 5 and out["selected"] == 4
 
 
 @pytest.mark.parametrize("bad, found", [
-    ("btch_id = 'B1'; DELETE FROM gre_sampling_run", "';' is not allowed"),
+    ("btch_id = 'B1'; DELETE FROM GOVT_RGLTRY_SAMPLING_RUN", "';' is not allowed"),
     ("btch_id = 'B1' -- the rest", "'--' comments"),
     ("btch_id IN (SELECT 1", "parentheses"),
 ])
 def test_a_filter_must_only_read(raw, conn, settings, bad, found):
     out = run_sampling(conn, settings, 1, run_key="B1", as_of=AS_OF, run_params={"batch": "B1"}, extra_filters=bad)
     assert out["error_type"] == "CONFIG_ERROR" and found in out["error"]
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections") == [(0,)]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS") == [(0,)]
 
 
 def test_validate_checks_the_filters(raw, conn, settings):

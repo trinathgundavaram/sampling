@@ -6,23 +6,23 @@
 --   python local/run_sampling.py deploy-schema
 -- do it. The engine never creates or alters tables.
 --
---   gre_sampling_config     you    one row per sample: universe, scope, size, method, output
---   gre_sampling_rule       you    every rule of a sample, one row each (like gre_rules):
---                                  PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, OUTPUT
---   gre_sampling_run        engine one row per run attempt: status, totals, errors, report
---   gre_sample_selections   engine one row per case considered by a run
+--   GOVT_RGLTRY_SAMPLING_CONFIG     you    one row per sample: universe, scope, size, method, sample table
+--   GOVT_RGLTRY_SAMPLING_RULE       you    every rule of a sample, one row each:
+--                                  PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET
+--   GOVT_RGLTRY_SAMPLING_RUN        engine one row per run attempt: status, totals, errors, report
+--   GOVT_RGLTRY_SAMPLE_SELECTIONS   engine one row per case considered by a run
 --
 -- act_ind = 1 means in use, 0 means ignored: never delete a configuration row.
 -- A rerun of the same (config_id, run_key) marks the earlier run's rows
--- etl_is_curr_ind = 'N'. Run rows are never deleted. gre_sample_selections
+-- etl_is_curr_ind = 'N'. Run rows are never deleted. GOVT_RGLTRY_SAMPLE_SELECTIONS
 -- rows no longer needed are deleted only by purge (runbook section 12).
 -- No statement or comment in this file may contain a semicolon except at the
 -- end of a statement (deploy-schema splits on them).
 -- ============================================================================
 
 
--- 1. gre_sampling_config - one row per sample --------------------------------
-CREATE MULTISET TABLE {{META_DB}}.gre_sampling_config (
+-- 1. GOVT_RGLTRY_SAMPLING_CONFIG - one row per sample --------------------------------
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_CONFIG (
     config_id          INTEGER NOT NULL,
     act_ind            BYTEINT DEFAULT 1,
     project_name       VARCHAR(100) NOT NULL,          -- scope key (the Variable's project)
@@ -43,8 +43,11 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_config (
     shortfall_policy   VARCHAR(10) DEFAULT 'TOPUP',    -- TOPUP: fill a short sample from the rest of the
                                                        -- candidates by priority | NONE: leave it short
     keep_excluded      BYTEINT DEFAULT 1,              -- 1 = store excluded rows with their reason too
-    output_table       VARCHAR(200),                   -- optional database.table of the output snapshot
-                                                       -- (OUTPUT rules), $env allowed
+    output_db          VARCHAR(128),                   -- optional: database of the sample table, $env allowed
+    output_table       VARCHAR(128),                   -- optional: the sample table (created by another
+                                                       -- process): one row per selected case, every column
+                                                       -- of its source row, the ETL_* audit and SMPL_* run
+                                                       -- columns set by sampling (runbook 4.3), $env allowed
     schedule_cron      VARCHAR(50),                    -- documentation only: the schedule is in the Variable
     created_by         VARCHAR(100),
     last_updated_by    VARCHAR(100),
@@ -53,10 +56,9 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_config (
 )
 UNIQUE PRIMARY INDEX (config_id);
 
-CREATE INDEX gre_sampling_config_scope_ix (project_name, process_name) ON {{META_DB}}.gre_sampling_config;
 
 
--- 2. gre_sampling_rule - every rule of a sample, one row each ----------------
+-- 2. GOVT_RGLTRY_SAMPLING_RULE - every rule of a sample, one row each ----------------
 -- rule_class says what the row is. Columns not used by a class stay NULL
 -- (validate reports any that are set).
 --
@@ -68,7 +70,7 @@ CREATE INDEX gre_sampling_config_scope_ix (project_name, process_name) ON {{META
 --              PARAM rules: no row = GATE_NOT_MET, retried like a technical
 --              error. rule_name and description go into the message.
 --   Every EXCLUSION / PRIORITY / LEVEL / BUCKET rule_sql is a whole SELECT
---   (any joins, as a GRE rule) returning the key_columns of the cases it
+--   (any joins) returning the key_columns of the cases it
 --   matches (+ one value column for a PRIORITY EXPRESSION or a LEVEL).
 --   EXCLUSION  rule_type QUERY (default): the cases it returns are excluded |
 --              PRIOR_SELECTION: selected by an earlier run (lookback_days,
@@ -87,20 +89,18 @@ CREATE INDEX gre_sampling_config_scope_ix (project_name, process_name) ON {{META
 --              SELECT (bucket levels only, first in seq_no order; NULL = the rest),
 --              parent_path = under which parents this row applies, quota_mode,
 --              target_fraction, max_count.
---   OUTPUT     a column of the output snapshot: rule_name = the column,
---              rule_sql = its expression on the universe row.
-CREATE MULTISET TABLE {{META_DB}}.gre_sampling_rule (
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RULE (
     rule_id            INTEGER NOT NULL,               -- unique in the table
     config_id          INTEGER NOT NULL,
     act_ind            BYTEINT DEFAULT 1,
-    rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET | OUTPUT
+    rule_class         VARCHAR(20) NOT NULL,           -- PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET
     seq_no             INTEGER DEFAULT 100,            -- order within the class
     rule_name          VARCHAR(200) NOT NULL,
     rule_type          VARCHAR(30),                    -- EXCLUSION: QUERY (default) | PRIOR_SELECTION
                                                        -- PRIORITY: QUERY (default) | EXPRESSION |
                                                        --   PRIOR_CANDIDATE | PRIOR_SELECTION
                                                        -- BUCKET: QUERY (default)
-    rule_sql           CLOB,                           -- a SELECT (see above); OUTPUT: a column expression
+    rule_sql           CLOB,                           -- a SELECT (see above)
     level_order        INTEGER,                        -- LEVEL / BUCKET: 0 = first split, 1 = within it, ...
     parent_path        VARCHAR(1000) DEFAULT '*',      -- LEVEL / BUCKET: path pattern of parent buckets,
                                                        -- e.g. 'Denied' or 'Denied/*' (* and ? wildcards)
@@ -119,11 +119,10 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_rule (
 )
 UNIQUE PRIMARY INDEX (rule_id);
 
-CREATE INDEX gre_sampling_rule_config_ix (config_id, rule_class) ON {{META_DB}}.gre_sampling_rule;
 
 
--- 3. gre_sampling_run - one row per run attempt ------------------------------
-CREATE MULTISET TABLE {{META_DB}}.gre_sampling_run (
+-- 3. GOVT_RGLTRY_SAMPLING_RUN - one row per run attempt ------------------------------
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLING_RUN (
     run_id             VARCHAR(200) NOT NULL,
     config_id          INTEGER,
     project_name       VARCHAR(100),
@@ -168,13 +167,11 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sampling_run (
 )
 UNIQUE PRIMARY INDEX (run_id);
 
-CREATE INDEX gre_sampling_run_key_ix (config_id, run_key) ON {{META_DB}}.gre_sampling_run;
-CREATE INDEX gre_sampling_run_status_ix (status) ON {{META_DB}}.gre_sampling_run;
 
 
--- 4. gre_sample_selections - every case considered: selected, not, excluded --
-CREATE MULTISET TABLE {{META_DB}}.gre_sample_selections (
-    sample_run_id      VARCHAR(200) NOT NULL,          -- = gre_sampling_run.run_id
+-- 4. GOVT_RGLTRY_SAMPLE_SELECTIONS - every case considered: selected, not, excluded --
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SAMPLE_SELECTIONS (
+    sample_run_id      VARCHAR(200) NOT NULL,          -- = GOVT_RGLTRY_SAMPLING_RUN.run_id
     config_id          INTEGER NOT NULL,
     project_name       VARCHAR(100),
     process_name       VARCHAR(100),
@@ -199,5 +196,3 @@ CREATE MULTISET TABLE {{META_DB}}.gre_sample_selections (
 )
 PRIMARY INDEX (sample_run_id);
 
-CREATE INDEX gre_sample_selections_curr_ix (config_id, run_key, etl_is_curr_ind) ON {{META_DB}}.gre_sample_selections;
-CREATE INDEX gre_sample_selections_hist_ix (project_name, sample_cycle, selected_flag) ON {{META_DB}}.gre_sample_selections;

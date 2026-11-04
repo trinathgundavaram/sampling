@@ -8,8 +8,8 @@ if _DAG_DIR not in sys.path:
 
 from sampling.dags import build_sampling_dag  # noqa: E402
 
-dag_id = "CMS_COMPLIANCE_UMCM_SAMPLING"
-variable_key = "cms_compliance_umcm_sampling_config_var"
+dag_id = "GOVT_RGLTRY_UMCM_SAMPLING"
+variable_key = "govt_rgltry_umcm_sampling_config_var"
 
 dag = build_sampling_dag(dag_id, variable_key)
 globals()[dag_id] = dag

@@ -1,6 +1,6 @@
 """Teradata layer: the connection wrapper, transactions, {key} / $key parameters, run ids.
 
-One Teradata connection serves everything a run touches: the gre_sampling_* metadata tables (in
+One Teradata connection serves everything a run touches: the GOVT_RGLTRY_SAMPL* metadata tables (in
 Settings.meta_db) and the universe table a config samples from (fully qualified in the config row).
 
 The connection comes from the TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH environment
@@ -93,6 +93,19 @@ class Connection:
             rows = [dict(zip(names, map(_clean, r))) for r in cur.fetchall()]
             log.debug("query: %d row(s)", len(rows))
             return rows
+        finally:
+            cur.close()
+
+    def columns(self, sql: str) -> list:
+        """The column names (as the database spells them) of a SELECT's result; run it with WHERE 1=0."""
+        text = self._text(sql)
+        log.debug("columns: %s", _one_line(text))
+        cur = self._raw.cursor()
+        try:
+            cur.execute(text)
+            names = [c[0] for c in cur.description or ()]
+            cur.fetchall()
+            return names
         finally:
             cur.close()
 

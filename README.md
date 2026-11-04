@@ -3,17 +3,17 @@
 A configuration-driven sampling engine, rewritten from `DQ_COMPLETE_REPO/sampling` for **Teradata**, in two
 versions sharing the same engine code:
 
-- **`airflow/`** – the DAG `CMS_COMPLIANCE_UMCM_SAMPLING` (Airflow 3.3), in the style of the compliance
+- **`airflow/`** – the DAG `GOVT_RGLTRY_UMCM_SAMPLING` (Airflow 3.3), in the style of the GOVT_RGLTRY
   framework's Airflow package: one DAG file, one `<name>_config_var` Variable, the Teradata login from an Airflow
-  Connection read as the GRE framework's DAG reads it (`BaseHook.get_connection`, the Variable's `connection_id`).
+  Connection read with `BaseHook.get_connection` (the Variable's `connection_id`).
 - **`local/`** – a command line (`python run_sampling.py …`) reading the login from `dev.env`.
 
-Like the GRE rules engine, what a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
+What a sample selects is **rows holding SQL**: exclusions, priorities, levels and their
 buckets (fractions, all there is, the remainder, per parent), run parameters looked up by SQL, history rules
-(no repeats, carry-over), code variety, and an output snapshot. No field name or value is in the code.
+(no repeats, carry-over) and code variety; the selected cases' source rows go to a sample table per config. No field name or value is in the code.
 Every exclusion, priority and bucket rule is a whole `SELECT` (any joins) returning the keys of the cases it
-matches, as a GRE rule. For tables holding several loads, batches or SCD2 versions, a run can be given
-`extra_filters`: a SQL condition ANDed to the scope, as with the GRE.
+matches. For tables holding several loads, batches or SCD2 versions, a run can be given
+`extra_filters`: a SQL condition ANDed to the scope.
 
 Every run keeps the rules it used (with a hash). A sample can be finalised (a rerun then needs a recorded reason),
 and a case the auditors cannot review can be replaced by the next candidate of its group, with the reason kept.
@@ -23,7 +23,7 @@ old candidate rows are purged on a retention period that keeps every sample.
 ```
 airflow/                 DAG file + sampling/ package: the engine (engine.py, db.py, settings.py) and dags.py
 local/                   run_sampling.py, dev.env.example (imports the engine from airflow/sampling)
-sql/                     schema.sql (4 tables), schema_drop.sql, output_table_template.sql (DDL only, as GRE's)
+sql/                     schema.sql (4 tables), schema_drop.sql (DDL only)
 airflow_resources/       docs, the example Variable, worker requirements
 tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests need apache-airflow 3
 ```

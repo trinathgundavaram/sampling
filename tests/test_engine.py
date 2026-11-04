@@ -77,18 +77,18 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     build_universe(raw.db)
     um_config(raw.db)
     out = _run(conn, settings, triggered_by="tester")
-    sel = _rows(raw, "SELECT COUNT(*), SUM(selected_flag), MIN(run_key), MIN(sample_cycle) FROM gre_sample_selections")
+    sel = _rows(raw, "SELECT COUNT(*), SUM(selected_flag), MIN(run_key), MIN(sample_cycle) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")
     assert sel[0] == (1000, 150, "2026-08-01", AS_OF)        # the 20 excluded kept too (keep_excluded)
-    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM gre_sample_selections WHERE excluded_flag = 1 "
+    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE excluded_flag = 1 "
                       "GROUP BY 1") == [("EXCLUDED", 20)]
     run = _rows(raw, "SELECT status, total_in_scope, total_excluded, total_candidates, total_selected, shortfall, "
-                     "triggered_by, run_id, etl_is_curr_ind, error_type FROM gre_sampling_run")
+                     "triggered_by, run_id, etl_is_curr_ind, error_type FROM GOVT_RGLTRY_SAMPLING_RUN")
     assert run == [("COMPLETED", 1000, 20, 980, 150, 0, "tester", out["sample_run_id"], "Y", None)]
-    report = json.loads(_rows(raw, "SELECT run_report FROM gre_sampling_run")[0][0])
+    report = json.loads(_rows(raw, "SELECT run_report FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])
     assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
     assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
     assert out["sample_run_id"].startswith("UMCM.weekly_sample::2026-08-01::attempt-1::tester::")
-    paths = _rows(raw, "SELECT DISTINCT stratum_path FROM gre_sample_selections WHERE selected_flag = 1")
+    paths = _rows(raw, "SELECT DISTINCT stratum_path FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1")
     assert {p[0] for p in paths} <= set(FROZEN_BY_STRATUM)
 
 
@@ -98,9 +98,9 @@ def test_rerun_retires_the_earlier_run_of_the_same_run_key(raw, conn, settings):
     first = _run(conn, settings)
     second = _run(conn, settings)
     assert "::attempt-2::" in second["sample_run_id"] and second["retired_runs"] == 1
-    curr = _rows(raw, "SELECT sample_run_id, etl_is_curr_ind, COUNT(*) FROM gre_sample_selections GROUP BY 1, 2")
+    curr = _rows(raw, "SELECT sample_run_id, etl_is_curr_ind, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS GROUP BY 1, 2")
     assert {(r[0], r[1]) for r in curr} == {(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")}
-    assert _rows(raw, "SELECT run_id, etl_is_curr_ind FROM gre_sampling_run ORDER BY started_at") == \
+    assert _rows(raw, "SELECT run_id, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN ORDER BY started_at") == \
         [(first["sample_run_id"], "N"), (second["sample_run_id"], "Y")]
     other = _run(conn, settings, run_key="OTHER")
     assert other["retired_runs"] == 0
@@ -111,11 +111,11 @@ def test_random_reproducible_with_stored_seed(raw, conn, settings):
     um_config(raw.db, sampling_method="RANDOM", priority_rank_sql=None)
     first = _run(conn, settings)
     assert first["seed"] is not None
-    stored = _rows(raw, "SELECT random_seed FROM gre_sampling_run")[0][0]
+    stored = _rows(raw, "SELECT random_seed FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0]
     again = _run(conn, settings, seed=stored, run_key="replay")
 
     def picked(run_id):
-        return {r[0] for r in _rows(raw, f"SELECT case_key FROM gre_sample_selections WHERE selected_flag = 1 AND "
+        return {r[0] for r in _rows(raw, f"SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 AND "
                                          f"sample_run_id = '{run_id}'")}
     assert picked(first["sample_run_id"]) == picked(again["sample_run_id"])
 
@@ -125,7 +125,7 @@ def test_systematic_needs_priority_and_records_config_error(raw, conn, settings)
     um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_kind"] == "config" and "priority_rank_sql" in out["error"]
-    assert _rows(raw, "SELECT status, error_type, etl_is_curr_ind FROM gre_sampling_run") == \
+    assert _rows(raw, "SELECT status, error_type, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN") == \
         [("ERROR", "CONFIG_ERROR", "N")]
 
 
@@ -155,18 +155,18 @@ def test_pull_failure_rolls_nothing_in_and_logs(raw, conn, settings):
     raw.fail_on = "FROM case_universe WHERE (pull_date = '2026-08-01')"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PULL_FAILURE" and out["error_kind"] == "technical"
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")[0][0] == 0
 
 
 def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
     build_universe(raw.db)
     um_config(raw.db)
-    raw.fail_on = "UPDATE main.gre_sample_selections"
+    raw.fail_on = "UPDATE main.GOVT_RGLTRY_SAMPLE_SELECTIONS"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PERSIST_FAILURE"
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0   # rolled back
-    assert _rows(raw, "SELECT status, error_type FROM gre_sampling_run") == [("ERROR", "PERSIST_FAILURE")]
-    assert "Traceback" in _rows(raw, "SELECT error_detail FROM gre_sampling_run")[0][0]
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")[0][0] == 0   # rolled back
+    assert _rows(raw, "SELECT status, error_type FROM GOVT_RGLTRY_SAMPLING_RUN") == [("ERROR", "PERSIST_FAILURE")]
+    assert "Traceback" in _rows(raw, "SELECT error_detail FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0]
 
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
@@ -174,7 +174,7 @@ def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
     um_config(raw.db, sampling_method="SYSTEMATIC", priority_rank_sql=None)
     _run(conn, settings)
     _run(conn, settings)
-    assert _rows(raw, "SELECT COUNT(*), MIN(status), MAX(status) FROM gre_sampling_run")[0] == (2, "ERROR", "ERROR")
+    assert _rows(raw, "SELECT COUNT(*), MIN(status), MAX(status) FROM GOVT_RGLTRY_SAMPLING_RUN")[0] == (2, "ERROR", "ERROR")
 
 
 def test_unresolved_token_is_a_config_error(raw, conn, settings):
@@ -203,7 +203,7 @@ def test_dry_run_writes_nothing(raw, conn, settings):
     um_config(raw.db)
     out = _run(conn, settings, dry_run=True)
     assert out["selected"] == 150 and out["sample_run_id"] is None
-    for table in ("gre_sampling_run", "gre_sample_selections"):
+    for table in ("GOVT_RGLTRY_SAMPLING_RUN", "GOVT_RGLTRY_SAMPLE_SELECTIONS"):
         assert _rows(raw, f"SELECT COUNT(*) FROM {table}")[0][0] == 0
 
 
@@ -238,7 +238,7 @@ def test_queries_resolve_env_and_tie_break_on_keys():
     assert q["pull"] == "SELECT a, b, ROW_NUMBER() OVER (ORDER BY x DESC, a, b) AS smp_base_rank " \
                         "FROM UMCM_T.u WHERE (db = '')"
     assert "count" not in q
-    assert Settings(meta_db="M", environment="DEV").resolve_env("CMS_$ENV_STG") == "CMS_DEV_STG"
+    assert Settings(meta_db="M", environment="DEV").resolve_env("UMCM_$ENV_STG") == "UMCM_DEV_STG"
 
 
 def test_params_and_ids():

@@ -1,10 +1,10 @@
 # Stratified Sampling: Airflow + Teradata
 
 A config-driven stratified sampling engine that runs from an Airflow DAG with its metadata tables and its
-universe tables in **Teradata**. It follows the layout and connection style of the CMS Compliance Framework's
+universe tables in **Teradata**. It follows the layout and connection style of the GOVT_RGLTRY framework's
 Airflow package (`framework/airflow`, branch `feature/framework-package`): one DAG file, one DAG id, one
-`<name>_config_var` Variable, the Teradata login from the Airflow Connection named in its `connection_id`, read as the
-GRE framework's `gre_rules_task` reads it.
+`<name>_config_var` Variable, the Teradata login from the Airflow Connection named in its `connection_id`, read with
+`BaseHook.get_connection`.
 
 The engine itself (`sampling/engine.py`, `db.py`, `settings.py`) exists once, in `airflow/sampling`: the local
 version (`local/`, see [Local version](#local-version-command-line)) imports it from there. Only `dags.py` imports
@@ -12,7 +12,7 @@ Airflow; a test checks that the local command line starts in a Python without Ai
 
 ```
 airflow/                                    copied into the DAGs folder
-  cms_compliance_umcm_sampling.py           the DAG file: dag_id + Variable name only
+  govt_rgltry_umcm_sampling.py           the DAG file: dag_id + Variable name only
   sampling/
     dags.py        the DAG (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connection ->
                    the engine (the only Airflow-aware module)
@@ -31,7 +31,6 @@ airflow_resources/                          (not deployed with the DAGs)
 sql/                                        shared by both versions
   schema.sql                                Teradata DDL ({{META_DB}} template), 4 tables
   schema_drop.sql                           drops them (fresh redeploy only)
-  output_table_template.sql                 DDL template of a config's output snapshot table
 
 local/                                      the local version (command line, dev.env); uses airflow/sampling
 ```
@@ -43,9 +42,9 @@ local/                                      the local version (command line, dev
 
    | DAG id | Variable | DAG file |
    |---|---|---|
-   | `CMS_COMPLIANCE_UMCM_SAMPLING` | `cms_compliance_umcm_sampling_config_var` | `cms_compliance_umcm_sampling.py` |
+   | `GOVT_RGLTRY_UMCM_SAMPLING` | `govt_rgltry_umcm_sampling_config_var` | `govt_rgltry_umcm_sampling.py` |
 
-2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. As in the GRE framework, the
+2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. The
    bridge reads it with `BaseHook.get_connection` and exports it as `TERADATA_HOST` / `TERADATA_USER` /
    `TERADATA_PASSWORD` / `TERADATA_LOGMECH`; the engine opens one Teradata
    session and uses it for the metadata tables and for the universe tables (which are fully qualified in the
@@ -63,7 +62,7 @@ version).
 
 ## Deploying
 
-1. Copy `cms_compliance_umcm_sampling.py` and the `sampling/` folder (with its `.airflowignore`) into the DAGs
+1. Copy `govt_rgltry_umcm_sampling.py` and the `sampling/` folder (with its `.airflowignore`) into the DAGs
    folder, side by side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK `airflow.sdk`,
    the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), validated on **3.3.0**. The email tasks
@@ -71,7 +70,7 @@ version).
 3. Create the tables once, in the metadata database, from `sql/schema.sql` (replace `{{META_DB}}`), e.g. from a
    machine with the local version: `python local/run_sampling.py deploy-schema`. The engine never creates or alters
    tables.
-4. Enter the configuration rows (`gre_sampling_config`, `gre_sampling_rule`; there are no seed files: the rows are
+4. Enter the configuration rows (`GOVT_RGLTRY_SAMPLING_CONFIG`, `GOVT_RGLTRY_SAMPLING_RULE`; there are no seed files: the rows are
    entered in the tables, see the runbook sections 4 and 7, and for ODAG1 OPEN_ITEMS.md section D), then run
    `python local/run_sampling.py validate --project UMCM --check-sql`.
 5. Create the Connection and the Variable (below; ready-made for DEV in `airflow_resources/examples/umcm_dev`).
@@ -83,9 +82,8 @@ one DAG through `process_name` or `runs` (below).
 
 ### Airflow Connection
 
-**Teradata** - read as the GRE framework's DAG reads it: the Connection named by the Variable's `connection_id`
-(falls back to the framework's `td_conn_var`, then `gre_teradata`, GRE's default), so the Connection GRE uses works
-here. `connection_type`, when given, must be `teradata` (the only one: the engine reads and writes Teradata).
+**Teradata** - read with `BaseHook.get_connection`: the Connection named by the Variable's `connection_id`
+(falls back to the framework's `td_conn_var`, then `govt_rgltry_teradata`). `connection_type`, when given, must be `teradata` (the only one: the engine reads and writes Teradata).
 Host, login and password become `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD`; extra `logmech` becomes
 `TERADATA_LOGMECH` (else that variable, else LDAP). The password is never logged.
 
@@ -98,7 +96,7 @@ Host, login and password become `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PA
 The account needs, on the metadata database: SELECT / INSERT / UPDATE (no CREATE, no DELETE); on each universe
 table (or view): SELECT.
 
-### Airflow Variable (`cms_compliance_umcm_sampling_config_var`)
+### Airflow Variable (`govt_rgltry_umcm_sampling_config_var`)
 
 A JSON object; keys are not case sensitive. Example (`airflow_resources/examples/umcm_dev`):
 
@@ -117,22 +115,22 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
   "retries": 1,
   "execution_timeout_minutes": 120,
   "fail_on_shortfall": false,
-  "tags": ["Compliance", "Sampling", "UMCM"],
+  "tags": ["GOVT_RGLTRY", "Sampling", "UMCM"],
   "trigger_dags": []
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `connection_id` | Airflow Connection of Teradata (GRE's key). Falls back to `td_conn_var`, then `gre_teradata` |
-| `connection_type` | Optional; `teradata` (GRE's key; any other value is refused) |
-| `meta_db` | **Required.** Teradata database holding the `gre_sampling_*` tables. May carry `$env` (`HSABC_$ENV`: `HSABC_DEV` in DEV, `HSABC` in UAT / PROD) |
+| `connection_id` | Airflow Connection of Teradata. Falls back to `td_conn_var`, then `govt_rgltry_teradata` |
+| `connection_type` | Optional; `teradata` (any other value is refused) |
+| `meta_db` | **Required.** Teradata database holding the `GOVT_RGLTRY_SAMPL*` tables. May carry `$env` (`HSABC_$ENV`: `HSABC_DEV` in DEV, `HSABC` in UAT / PROD) |
 | `load_env` | DEV / QA / INT / UAT / PROD: replaces `$env` in every configured table name and SQL text (default DEV). `environment` is accepted too |
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
-| `config_id` / `project` / `process_name` | **The scope** (at least one): one config, or every active config of the project and / or process. Matched against `gre_sampling_config` |
+| `config_id` / `project` / `process_name` | **The scope** (at least one): one config, or every active config of the project and / or process. Matched against `GOVT_RGLTRY_SAMPLING_CONFIG` |
 | `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
 | `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name. `{run_key}` and `{as_of_date}` are always available |
-| `extra_filters` | Optional SQL condition on the universe table (or a list of them), ANDed to `scope_sql` for the run (as the GRE's `extra_filters`): which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
+| `extra_filters` | Optional SQL condition on the universe table (or a list of them), ANDed to `scope_sql` for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `sample_cycle` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
 | `runs` | Optional list of scopes, one task each, e.g. `[{"name": "weekly", "process_name": "UMCM_WEEKLY_SAMPLE"}, {"config_id": 7, "run_params": {...}}]`. An entry that names a scope key replaces the Variable's scope; its other keys are layered over the Variable |
@@ -147,8 +145,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
 | `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
-| `retention_days` | Adds `purge_selections` after the runs: deletes the `gre_sample_selections` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `lookback_days`, else that config is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
-| `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, output table and rules hash. Counts and names only, never case data |
+| `retention_days` | Adds `purge_selections` after the runs: deletes the `GOVT_RGLTRY_SAMPLE_SELECTIONS` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `lookback_days`, else that config is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
+| `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, sample table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `process_name`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
 | `trigger_keys` | Optional list of the keys a trigger may set (default: all of `config_id`, `project`, `process_name`, `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level`). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
@@ -169,13 +167,13 @@ environment) is ignored with a warning - set it in the Variable. Examples:
 {"config_id": "1", "run_key": "2026-10-30", "seed": "1234567890123"}
 ```
 
-### Started by the compliance framework
+### Started by the GOVT_RGLTRY framework
 
 A framework step DAG starts the DAGs in its own Variable's `trigger_dags` when it succeeds, passing `project`,
 `table_group`, `table`, `run_type`, `source` and `as_of`, and waits for them to finish (it fails if the triggered
 DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no code changes on either side:
 
-1. In the framework step's Variable, add `CMS_COMPLIANCE_UMCM_SAMPLING` to `trigger_dags`.
+1. In the framework step's Variable, add `GOVT_RGLTRY_UMCM_SAMPLING` to `trigger_dags`.
 2. In this DAG's Variable: `"schedule_interval": null`, `"trigger_keys": ["as_of"]` (the framework's `project` is
    its own, not this DAG's scope), and `"trigger_run_params": [...]` for any of its values the rules use.
 3. Give the sample a PARAM rule for the batch (e.g. the latest `BTCH_ID` of the universe) and `"run_key":
@@ -197,7 +195,7 @@ DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no cod
   the reason when run.
 - Every task has `on_failure_callback`: a failed task opens a ServiceNow incident through
   `snow.snow_integrations.create_incident(context, assignment_group)`; without the `snow` package a warning is
-  logged instead (same as the compliance framework).
+  logged instead (same as the GOVT_RGLTRY framework).
 
 ## What the log shows
 
@@ -258,13 +256,13 @@ Exit codes: 0 = done, 1 = done with problems (a sample failed or fell short, val
 ## Time zone
 
 The as-of date, the run ids and every timestamp the engine writes (`started_at`, `ended_at`, `load_datetime` of
-selections, `last_updated_datetime`) are Central time (`America/Chicago`), as in the compliance framework. The
+selections, `last_updated_datetime`) are Central time (`America/Chicago`), as in the GOVT_RGLTRY framework. The
 schedule is Central time too. Column defaults (`CURRENT_TIMESTAMP`) are the Teradata system's time.
 
 ## Environment in names (`$env`)
 
 `universe_table`, `scope_sql` and every rule's SQL can carry `$env` so one set of configuration rows works in every
-environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM_DEV_T.um_universe` in DEV,
+environment (the framework convention): `UMCM_$ENV_T.um_universe` is `UMCM_DEV_T.um_universe` in DEV,
 `UMCM_QA_T...` in QA and `UMCM_T.um_universe` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 `$ENV` -> `DEV`); `env_value` overrides the replacement for one environment.
 
@@ -275,13 +273,13 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 - A cycle whose sample was finalised (`finalize`, local version) is never replaced by the DAG: the task fails as
   `FINALIZED` without retry, and the final sample stays current. Replacing it needs `--force-reason` from the
   command line; there is no trigger key for it.
-- `etl_is_curr_ind` on `gre_sampling_run` and `gre_sample_selections` marks the current sample of each
+- `etl_is_curr_ind` on `GOVT_RGLTRY_SAMPLING_RUN` and `GOVT_RGLTRY_SAMPLE_SELECTIONS` marks the current sample of each
   `(config_id, run_key)`. Errors are on the run row (`error_type`, `error_message`, `error_detail`), and the counts per
   exclusion rule and bucket are its `run_report` (JSON in a CLOB: read it with Teradata's JSON functions, e.g.
   `NEW JSON(run_report).JSONExtractValue('$.buckets.Denied.selected')`).
 - Reads use `LOCKING ROW FOR ACCESS` (no read lock on the universe or the metadata tables; switch off with
   `access_lock: false`).
-- A run's writes (every candidate, the output snapshot, retiring the earlier run, closing the run row) are **one
+- A run's writes (every candidate, the sample table rows, retiring the earlier run, closing the run row) are **one
   transaction**: a failure leaves nothing half written, only the run row with status ERROR.
 - Bucket values compare like Teradata does: trailing blanks ignored, not case specific (`'DENIED  '` is in the
   `Denied` bucket).
@@ -290,7 +288,7 @@ environment (the GRE / framework convention): `UMCM_$ENV_T.um_universe` is `UMCM
 
 ## Validation status
 
-- The engine passes its test suite (107 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (109 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

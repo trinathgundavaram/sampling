@@ -1,4 +1,4 @@
-"""rule_type QUERY: a whole SELECT (joins and all, as a GRE rule) returning the key_columns of the matching cases,
+"""rule_type QUERY: a whole SELECT (joins and all) returning the key_columns of the matching cases,
 for EXCLUSION, PRIORITY and BUCKET rules whose test needs another table or several of them."""
 from datetime import date
 
@@ -32,12 +32,12 @@ def _data(raw):
 def _bh_level(db, bh_sql=BH_QUERY, fraction=0.21):
     insert_rule(db, "LEVEL", 10, "program", seq_no=1, level_order=0, parent_path="*", unlisted_policy="SKIP")
     insert_bucket(db, 11, 0, "Behavioral Health", seq_no=1, rule_sql=bh_sql, target_fraction=fraction)
-    db.execute("UPDATE gre_sampling_rule SET rule_type = 'QUERY' WHERE rule_id = 11")
+    db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET rule_type = 'QUERY' WHERE rule_id = 11")
     insert_bucket(db, 12, 0, "Other", seq_no=2, rule_sql="1=1", quota_mode="REMAINDER")
 
 
 def _bh_count(raw, run_id=None):
-    return raw.db.execute("SELECT COUNT(*) FROM gre_sample_selections WHERE selected_flag = 1 "
+    return raw.db.execute("SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 "
                           "AND stratum_path = 'Behavioral Health'").fetchone()[0]
 
 
@@ -48,14 +48,14 @@ def test_a_21_percent_bucket_from_a_join(raw, conn, settings):
     assert out["selected"] == 100 and _bh_count(raw) == 21
     assert out["rule_queries"] == {"Behavioral Health": 40}
     # the BH cases picked are BH ones
-    picked = {r[0] for r in raw.db.execute("SELECT case_key FROM gre_sample_selections WHERE selected_flag = 1 "
+    picked = {r[0] for r in raw.db.execute("SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 "
                                            "AND stratum_path = 'Behavioral Health'").fetchall()}
     assert all(int(k.split("=c")[1]) % 5 == 0 for k in picked)
 
 
 def test_only_the_pulled_cases_count(raw, conn, settings):
     """A QUERY returning cases outside the scope adds nothing: the scope stays the config's."""
-    raw.db.execute("UPDATE gre_sampling_config SET scope_sql = 'case_id < ''c050''' WHERE config_id = 1")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_CONFIG SET scope_sql = 'case_id < ''c050''' WHERE config_id = 1")
     _bh_level(raw.db, fraction=0.5)
     out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
     assert out["in_scope"] == 50 and _bh_count(raw) == 10          # 10 BH cases among c000..c049
@@ -69,7 +69,7 @@ def test_exclusion_and_priority_queries(raw, conn, settings):
     assert out["status"] == "COMPLETED" and out["exclusions"] == {"BH_EXCLUDED": 40} and out["candidates"] == 160
     disp = dict(raw.db.execute("SELECT case_id, disp FROM cases").fetchall())
     chosen = [r[0].split("=")[1] for r in raw.db.execute(
-        "SELECT case_key FROM gre_sample_selections WHERE selected_flag = 1 ORDER BY selection_order").fetchall()]
+        "SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 ORDER BY selection_order").fetchall()]
     # the 80 non-BH denials first, then 20 approvals
     assert [disp[c] for c in chosen] == ["Denied"] * 80 + ["Approved"] * 20
 
@@ -94,7 +94,7 @@ def test_a_query_must_be_a_select_that_only_reads(raw, conn, settings):
 
 def test_the_rest_bucket_must_be_last(raw, conn, settings):
     _bh_level(raw.db)
-    raw.db.execute("UPDATE gre_sampling_rule SET seq_no = 0 WHERE rule_id = 12")    # 'Other' (no rule_sql) first
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET seq_no = 0 WHERE rule_id = 12")    # 'Other' (no rule_sql) first
     problems = config_problems(load_config(conn, settings, 1))
     assert any("a bucket without rule_sql takes every case left" in p for p in problems)
 
@@ -104,7 +104,7 @@ def test_a_value_select_needs_one_value_per_case(raw, conn, settings):
                 rule_sql="SELECT case_id, disp, proc_cd FROM cases")
     out = run_sampling(conn, settings, 1, run_key="K1", as_of=AS_OF)
     assert out["error_type"] == "CONFIG_ERROR" and "needs one: the value" in out["error"]
-    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = 'SELECT c.case_id, c.disp FROM cases c "
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET rule_sql = 'SELECT c.case_id, c.disp FROM cases c "
                    "JOIN (SELECT 1 AS n UNION ALL SELECT 2) t ON 1=1' WHERE rule_id = 10")
     out = run_sampling(conn, settings, 1, run_key="K2", as_of=AS_OF)
     assert out["error_type"] == "CONFIG_ERROR" and "more than once" in out["error"]
@@ -113,7 +113,7 @@ def test_a_value_select_needs_one_value_per_case(raw, conn, settings):
 def test_query_only_on_condition_levels(raw, conn, settings):
     insert_rule(raw.db, "LEVEL", 10, "disp", seq_no=1, rule_sql="disp", level_order=0, parent_path="*")
     insert_bucket(raw.db, 11, 0, "Denied", target_fraction=0.5)
-    raw.db.execute("UPDATE gre_sampling_rule SET rule_type = 'QUERY' WHERE rule_id = 11")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET rule_type = 'QUERY' WHERE rule_id = 11")
     insert_rule(raw.db, "PRIORITY", 30, "P", rule_type="NOPE", rule_sql="x")
     problems = config_problems(load_config(conn, settings, 1))
     assert any("only used on a level without its own SELECT" in p for p in problems)
@@ -123,6 +123,6 @@ def test_query_only_on_condition_levels(raw, conn, settings):
 def test_validate_runs_the_queries(raw, conn, settings):
     _bh_level(raw.db)
     assert validate(conn, settings, config_id=1, check_sql=True)["result"] == "VALID"
-    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = 'SELECT case_id FROM no_such_table' WHERE rule_id = 11")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET rule_sql = 'SELECT case_id FROM no_such_table' WHERE rule_id = 11")
     bad = validate(conn, settings, config_id=1, check_sql=True)
     assert "SQL check failed" in bad["configs"][0]["problems"][0]

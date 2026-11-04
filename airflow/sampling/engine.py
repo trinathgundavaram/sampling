@@ -1,10 +1,10 @@
 """The sampling engine: config-driven stratified sampling on Teradata (no Airflow imports).
 
-Like the GRE rules engine, everything a sample selects is configuration rows holding SQL - no field name or
+Everything a sample selects is configuration rows holding SQL - no field name or
 value is known to this code (sql/schema.sql describes every table):
 
-    gre_sampling_config   universe, scope_sql, key columns, size, method, diversity, output table
-    gre_sampling_rule     one row per rule, rule_class saying what it is:
+    GOVT_RGLTRY_SAMPLING_CONFIG   universe, scope_sql, key columns, size, method, diversity, sample table
+    GOVT_RGLTRY_SAMPLING_RULE     one row per rule, rule_class saying what it is:
         PARAM             a run parameter looked up by SQL ({batch_id} = the latest batch, ...)
         GATE              a readiness check: a SELECT that must return a row, or the run waits (is retried)
         EXCLUSION         an exclusion rule (a SELECT of the cases to leave out, or "selected by an earlier run")
@@ -15,16 +15,15 @@ value is known to this code (sql/schema.sql describes every table):
         BUCKET            a bucket of a level: FRACTION of the parent's target, ALL there is, or the REMAINDER
                           the others leave; a different mix per parent bucket (parent_path)
 
-    Every selection criterion is a whole SELECT, joins and all, as a GRE rule, returning the key_columns of the
+    Every selection criterion is a whole SELECT, joins and all, returning the key_columns of the
     cases it matches (EXCLUSION, PRIORITY, BUCKET), plus one value column where a value is needed (a PRIORITY
     EXPRESSION, a LEVEL by value). Each runs on its own after the pull, so it may read any table; only the
     pulled cases count. A BUCKET with no rule_sql takes the cases no earlier bucket took.
-        OUTPUT            a column of the output snapshot of the selected cases
 
-One run = one gre_sampling_config row:
+One run = one GOVT_RGLTRY_SAMPLING_CONFIG row:
 
     look up parameters        PARAM rules
-    run row (RUNNING)         gre_sampling_run
+    run row (RUNNING)         GOVT_RGLTRY_SAMPLING_RUN
     gates                     every GATE rule must return a row (e.g. "the batch is closed"), else GATE_NOT_MET
     pull                      one SELECT of the scope (scope_sql AND the run's extra_filters): the key columns
     rule queries              each rule's SELECT; the pulled cases it returns are marked (or given its value)
@@ -35,8 +34,9 @@ One run = one gre_sampling_config row:
     select per leaf           RANKED: in priority order | RANDOM: seeded shuffle | SYSTEMATIC: seeded start,
                               every k-th; rotating across diversity_expr values (diversity_cap per value)
     top up                    shortfall_policy TOPUP: from the rest of the candidates, in priority order
-    output snapshot           output_table: the selected cases' OUTPUT values
-    persist (one transaction) selections (+ excluded rows) with their bucket path, output snapshot; earlier runs
+    sample table              output_db.output_table (created by another process): the selected cases' source
+                              rows, every column, with the ETL_* audit and SMPL_* run columns set by sampling
+    persist (one transaction) selections (+ excluded rows) with their bucket path, sample table rows; earlier runs
                               of the same (config_id, run_key) -> etl_is_curr_ind = 'N'; run row -> COMPLETED with
                               the counts per rule and bucket (run_report)
     on failure                run row -> ERROR with error_type, message and traceback (nothing half written)
@@ -49,7 +49,7 @@ Audit defensibility:
                               run_key is refused (FINALIZED) unless given a force_reason, which is recorded
     replace a case            replace_case(): a selected case comes out (REPLACED, with the reason and who) and
                               the next candidate of the same bucket goes in (REPLACEMENT), in priority order
-                              (RANDOM: a seeded draw); the output snapshot follows
+                              (RANDOM: a seeded draw); the sample table follows
 
 Reproducible: one seed per run (on the run row); every leaf draws from its own generator seeded with
 (seed, bucket path), so a draw never depends on the order buckets are visited.
@@ -66,7 +66,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from fnmatch import fnmatchcase
-from typing import Optional
+from typing import Optional, Sequence
 
 from sampling.db import Connection, error_text, generate_run_id, substitute_params
 from sampling.settings import ConfigError, Settings
@@ -88,11 +88,15 @@ HISTORY_SCOPES = ("CONFIG", "PROJECT")
 SHORTFALL_POLICIES = ("TOPUP", "NONE")
 OTHER_BUCKET = "OTHER"
 NULL_BUCKET = "NULL"
-OUTPUT_META_COLS = ("sample_run_id", "config_id", "run_key", "sample_cycle", "case_key", "selection_order",
-                    "priority_rank", "stratum_path", "etl_is_curr_ind", "load_datetime")
+# The sample table (output_db.output_table, created by another process) gets every column of the selected cases'
+# source rows, except these, which sampling sets itself even when the source has them: the framework's audit
+# columns, and the run's columns. It needs at least SAMPLE_REQUIRED (a rerun or a replacement retires by them).
+SAMPLE_AUDIT_COLS = ("etl_is_curr_ind", "etl_is_del_ind", "etl_load_dt_tm", "etl_last_updt_dt_tm")
+SAMPLE_RUN_COLS = ("smpl_run_id", "smpl_run_key", "smpl_cycle_dt", "smpl_order_nbr", "smpl_stratum_path")
+SAMPLE_REQUIRED = ("smpl_run_key", "etl_is_curr_ind")
 OUTPUT_KEY_CHUNK = 50
-RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "OUTPUT")
-# the optional gre_sampling_rule columns each class reads (any other one set is reported)
+RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET")
+# the optional GOVT_RGLTRY_SAMPLING_RULE columns each class reads (any other one set is reported)
 _AUDIT_COLUMNS = ("load_datetime", "last_updated_datetime", "created_by", "last_updated_by")
 _RULE_COLUMNS = ("rule_type", "rule_sql", "level_order", "parent_path", "unlisted_policy", "quota_mode",
                  "target_fraction", "max_count", "sort_dir", "lookback_days", "history_scope")
@@ -102,8 +106,7 @@ _USED = {"PARAM": {"rule_sql"},
          "PRIORITY": {"rule_type", "rule_sql", "sort_dir", "lookback_days", "history_scope"},
          "LEVEL": {"rule_sql", "level_order", "parent_path", "unlisted_policy"},
          "BUCKET": {"rule_type", "rule_sql", "level_order", "parent_path", "quota_mode", "target_fraction",
-                    "max_count"},
-         "OUTPUT": {"rule_sql"}}
+                    "max_count"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 # Configured SQL only reads: a statement word anywhere (outside quotes) is refused. Rows run under the service
 # account, so this guards against a pasted script or a slip, not against someone who may write the rows anyway.
@@ -152,14 +155,13 @@ def _specificity(pattern: str) -> tuple:
 
 @dataclass
 class Sample:
-    """One gre_sampling_config row and its gre_sampling_rule rows, by class, each list in its order."""
+    """One GOVT_RGLTRY_SAMPLING_CONFIG row and its GOVT_RGLTRY_SAMPLING_RULE rows, by class, each list in its order."""
     config: dict
     params: list = field(default_factory=list)
     gates: list = field(default_factory=list)
     exclusions: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
     levels: list = field(default_factory=list)       # LEVEL rows, each with "buckets": [its BUCKET rows]
-    output_cols: list = field(default_factory=list)
     stray: list = field(default_factory=list)        # rows of an unknown class, or buckets of no level
     snapshot: dict = field(default_factory=dict)     # {"config": row, "rules": [rows]} as loaded
     config_hash: str = ""
@@ -186,12 +188,12 @@ def _text(row: dict, col: str = "rule_sql") -> str:
 
 
 def load_config(conn: Connection, s: Settings, config_id) -> Sample:
-    """The active gre_sampling_config row of config_id with its active gre_sampling_rule rows."""
+    """The active GOVT_RGLTRY_SAMPLING_CONFIG row of config_id with its active GOVT_RGLTRY_SAMPLING_RULE rows."""
     db = s.meta_db
-    rows = conn.query(f"SELECT * FROM {db}.gre_sampling_config WHERE config_id = ? AND act_ind = 1", [config_id])
+    rows = conn.query(f"SELECT * FROM {db}.GOVT_RGLTRY_SAMPLING_CONFIG WHERE config_id = ? AND act_ind = 1", [config_id])
     if not rows:
-        raise ConfigError(f"no active gre_sampling_config row for config_id={config_id}")
-    rules = conn.query(f"SELECT * FROM {db}.gre_sampling_rule WHERE config_id = ? AND act_ind = 1", [config_id])
+        raise ConfigError(f"no active GOVT_RGLTRY_SAMPLING_CONFIG row for config_id={config_id}")
+    rules = conn.query(f"SELECT * FROM {db}.GOVT_RGLTRY_SAMPLING_RULE WHERE config_id = ? AND act_ind = 1", [config_id])
     return build_sample(rows[0], rules)
 
 
@@ -213,7 +215,7 @@ def build_sample(config: dict, rules: list) -> Sample:
         r["rule_class"] = _up(r.get("rule_class"))
         by_class.get(r["rule_class"], sample.stray).append(r)
     sample.params, sample.gates, sample.exclusions = by_class["PARAM"], by_class["GATE"], by_class["EXCLUSION"]
-    sample.priorities, sample.output_cols = by_class["PRIORITY"], by_class["OUTPUT"]
+    sample.priorities = by_class["PRIORITY"]
     levels = sorted(by_class["LEVEL"], key=lambda r: (r.get("level_order") is None, r.get("level_order") or 0,
                                                       r["rule_id"]))
     for level in levels:
@@ -257,9 +259,14 @@ def config_problems(sample: Sample) -> list:
         problems.append("diversity_expr cannot be combined with SYSTEMATIC (it steps through a fixed order)")
 
     for r in sample.stray:
-        problems.append(f"rule {r['rule_id']}: rule_class {r['rule_class']!r} is not one of "
-                        f"{', '.join(RULE_CLASSES)}" if r["rule_class"] != "BUCKET"
-                        else f"rule {r['rule_id']}: BUCKET of level_order {r.get('level_order')}, which has no LEVEL")
+        if r["rule_class"] == "BUCKET":
+            problems.append(f"rule {r['rule_id']}: BUCKET of level_order {r.get('level_order')}, which has no LEVEL")
+        elif r["rule_class"] == "OUTPUT":
+            problems.append(f"rule {r['rule_id']}: OUTPUT rules are no longer used: the sample table "
+                            f"(output_db.output_table) gets every column of the source row; set act_ind = 0")
+        else:
+            problems.append(f"rule {r['rule_id']}: rule_class {r['rule_class']!r} is not one of "
+                            f"{', '.join(RULE_CLASSES)}")
     for cls in RULE_CLASSES:
         for r in _rules_of(sample, cls):
             for col in _RULE_COLUMNS:
@@ -313,22 +320,12 @@ def config_problems(sample: Sample) -> list:
     for lvl in sample.levels:
         problems += _level_problems(lvl)
 
-    if str(c.get("output_table") or "").strip():
-        if not sample.output_cols:
-            problems.append("output_table needs OUTPUT rules")
-        names = [_up(o.get("rule_name")) for o in sample.output_cols]
-        for o in sample.output_cols:
-            n = str(o.get("rule_name") or "")
-            if not _IDENT.match(n):
-                problems.append(f"OUTPUT rule {n!r}: rule_name must be a plain column name")
-            elif n.lower() in (*OUTPUT_META_COLS, "last_updated_datetime"):
-                problems.append(f"OUTPUT rule {n!r}: a column the engine writes itself")
-            if not _text(o):
-                problems.append(f"OUTPUT rule {n}: rule_sql is empty")
-        if len(names) != len(set(names)):
-            problems.append("OUTPUT rule names repeat")
-    elif sample.output_cols:
-        problems.append("OUTPUT rules need gre_sampling_config.output_table")
+    db, table = _text(c, "output_db"), _text(c, "output_table")
+    if bool(db) != bool(table):
+        problems.append("output_db and output_table go together: set both (the sample table) or neither")
+    for col, name in (("output_db", db), ("output_table", table)):
+        if name and not _IDENT.match(name):
+            problems.append(f"{col} {name!r} must be a plain name ($env allowed), the database and the table apart")
     return problems + _sql_problems(sample)
 
 
@@ -390,7 +387,7 @@ def _rules_of(sample: Sample, cls: str) -> list:
     if cls == "BUCKET":
         return [b for lvl in sample.levels for b in lvl["buckets"]]
     return {"PARAM": sample.params, "GATE": sample.gates, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
-            "LEVEL": sample.levels, "OUTPUT": sample.output_cols}[cls]
+            "LEVEL": sample.levels}[cls]
 
 
 def _history_problems(what: str, row: dict) -> list:
@@ -457,14 +454,15 @@ def _level_problems(lvl: dict) -> list:
 # ---------------------------------------------------------------------------
 
 def _col(rule: dict) -> str:
-    """The pulled column holding a rule's flag or value (rule_id is unique in gre_sampling_rule)."""
+    """The pulled column holding a rule's flag or value (rule_id is unique in GOVT_RGLTRY_SAMPLING_RULE)."""
     return f"smp_r_{rule['rule_id']}"
 
 
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
-    """{universe, scope, pull, key_queries, output (or None)}: the SQL of a run, $env and parameters
-    resolved; the run's extra_filters (params[EXTRA_FILTERS], SQL) are ANDed to the scope, so the count, the pull
-    and the output snapshot all read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull."""
+    """{universe, scope, pull, key_queries, output (or None), output_table}: the SQL of a run, $env and
+    parameters resolved; the run's extra_filters (params[EXTRA_FILTERS], SQL) are ANDed to the scope, so the pull
+    and the sample table's rows read the same rows. key_queries: (rule, SELECT) of every rule, run after the pull.
+    output: every column of the universe rows in scope (the selected cases' keys are ANDed to it)."""
     def sql(text, identifier=False):
         return substitute_params(s.resolve_env(str(text or "").strip(), identifier=identifier), params)
 
@@ -488,12 +486,28 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     key_queries = [(r, sql(r["rule_sql"])) for r in query_rules(sample)]
     out = {"universe": universe, "scope": scope, "key_queries": key_queries,
            "pull": f"SELECT {', '.join(columns)} FROM {universe} WHERE ({scope})", "output": None}
-    if str(c.get("output_table") or "").strip():
-        exprs = [f"{sql(o['rule_sql'])} AS {o['rule_name']}" for o in sample.output_cols]
-        out["output_table"] = sql(c["output_table"], identifier=True)
-        aliases = [f"{k} AS smp_key_{i}" for i, k in enumerate(keys)]
-        out["output"] = f"SELECT {', '.join([*aliases, *exprs])} FROM {universe} WHERE ({scope})"
+    if _text(c, "output_table"):
+        out["output_table"] = f"{sql(c.get('output_db'), identifier=True)}.{sql(c['output_table'], identifier=True)}"
+        out["output"] = f"SELECT * FROM {universe} WHERE ({scope})"
     return out
+
+
+def sample_table_columns(conn: Connection, queries: dict, sample: Sample) -> list:
+    """The sample table's columns, checked against the source: each is set by sampling (SAMPLE_AUDIT_COLS,
+    SAMPLE_RUN_COLS) or copied from the source column of the same name. ConfigError when the table lacks
+    SAMPLE_REQUIRED or a key column, or has a column that is neither."""
+    table = queries["output_table"]
+    columns = conn.columns(f"SELECT * FROM {table} WHERE 1=0")
+    source = {c.lower() for c in conn.columns(f"SELECT * FROM {queries['universe']} WHERE 1=0")}
+    have = {c.lower() for c in columns}
+    problems = [f"needs the column {c.upper()}" for c in SAMPLE_REQUIRED if c not in have]
+    problems += [f"needs the key column {k}" for k in sample.keys if k.lower() not in have]
+    other = [c for c in columns if c.lower() not in (*SAMPLE_AUDIT_COLS, *SAMPLE_RUN_COLS) and c.lower() not in source]
+    if other:
+        problems.append(f"has columns that are neither in the source nor set by sampling: {', '.join(other)}")
+    if problems:
+        raise ConfigError(f"sample table {table}: " + "; ".join(problems))
+    return columns
 
 
 def query_rules(sample: Sample) -> list:
@@ -573,7 +587,7 @@ def unmet_gates(conn: Connection, s: Settings, sample: Sample, params: dict) -> 
 
 
 def case_key(row: dict, keys: list) -> str:
-    """'col1=val1|col2=val2' - the case's identity in gre_sample_selections."""
+    """'col1=val1|col2=val2' - the case's identity in GOVT_RGLTRY_SAMPLE_SELECTIONS."""
     parts = []
     for c in keys:
         k = c.lower()
@@ -602,7 +616,7 @@ def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key:
         params.append(sample.config_id)
     rows = conn.query(f"SELECT case_key, MAX(selected_flag) AS sel, "
                       f"MAX(CASE WHEN selection_status = 'REPLACED' THEN 1 ELSE 0 END) AS replaced "
-                      f"FROM {s.meta_db}.gre_sample_selections WHERE {' AND '.join(where)} GROUP BY case_key", params)
+                      f"FROM {s.meta_db}.GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE {' AND '.join(where)} GROUP BY case_key", params)
     # a REPLACED case was not audited (not "selected"), and was taken out on purpose (no carry-over)
     out = {"selected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 1},
            "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["replaced"] or 0) == 0}}
@@ -877,14 +891,14 @@ class Stratifier:
 # ---------------------------------------------------------------------------
 
 def count_prior_attempts(conn: Connection, s: Settings, config_id, run_key: str) -> int:
-    rows = conn.query(f"SELECT COUNT(*) AS cnt FROM {s.meta_db}.gre_sampling_run "
+    rows = conn.query(f"SELECT COUNT(*) AS cnt FROM {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN "
                       f"WHERE config_id = ? AND run_key = ?", [config_id, run_key])
     return int(rows[0]["cnt"]) if rows else 0
 
 
 def current_run(conn: Connection, s: Settings, config_id, run_key: str) -> Optional[dict]:
     """The run row whose sample is current for (config_id, run_key), or None."""
-    rows = conn.query(f"SELECT * FROM {s.meta_db}.gre_sampling_run "
+    rows = conn.query(f"SELECT * FROM {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN "
                       f"WHERE config_id = ? AND run_key = ? AND etl_is_curr_ind = 'Y'", [config_id, run_key])
     return rows[0] if rows else None
 
@@ -893,7 +907,7 @@ def _start_run(conn, s, run_id, run_key, sample: Sample, seed, target, as_of, pa
                override_reason=None):
     config = sample.config
     conn.execute(f"""
-        INSERT INTO {s.meta_db}.gre_sampling_run (
+        INSERT INTO {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN (
             run_id, config_id, project_name, process_name, sample_name, run_key, as_of_date, sampling_method,
             random_seed, target_volume, run_params_txt, status, etl_is_curr_ind, config_hash, override_reason,
             triggered_by, started_at
@@ -911,7 +925,7 @@ def _finish_run(conn, s, run_id, summary, sample: Sample, error_type=None, messa
         report.update(exclusions=summary.get("exclusions"), buckets=summary.get("buckets"))
     report = json.dumps(report, default=str)
     conn.execute(f"""
-        UPDATE {s.meta_db}.gre_sampling_run
+        UPDATE {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN
         SET status = ?, ended_at = ?, total_in_scope = ?, total_excluded = ?, total_candidates = ?,
             total_selected = ?, shortfall = ?, error_type = ?, error_message = ?, error_detail = ?, run_report = ?,
             etl_is_curr_ind = ?, last_updated_datetime = ?
@@ -921,38 +935,63 @@ def _finish_run(conn, s, run_id, summary, sample: Sample, error_type=None, messa
          (message or None) and message[:2000], detail, report, "N" if error_type else "Y", s.now(), run_id])
 
 
+def _key_condition(keys: list, row: dict, params: list) -> str:
+    """'(k1 = ? AND k2 IS NULL)' for one case (row: its key values by lower-case column), params appended."""
+    parts = []
+    for k in keys:
+        value = row[k.lower()]
+        if value is None:
+            parts.append(f"{k} IS NULL")
+        else:
+            parts.append(f"{k} = ?")
+            params.append(value)
+    return "(" + " AND ".join(parts) + ")"
+
+
 def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) -> dict:
-    """{case_key: {column: value}} of the selected cases, read back from the universe with the output columns."""
+    """{case_key: {column: value}} of the selected cases: their source rows, every column, read back from the
+    universe under the run's scope (one row per case: the pull refuses a scope with a case twice)."""
     keys = sample.keys
     out = {}
     for i in range(0, len(chosen), OUTPUT_KEY_CHUNK):
-        conds, params = [], []
-        for row in chosen[i:i + OUTPUT_KEY_CHUNK]:
-            parts = []
-            for k in keys:
-                value = row[k.lower()]
-                if value is None:
-                    parts.append(f"{k} IS NULL")
-                else:
-                    parts.append(f"{k} = ?")
-                    params.append(value)
-            conds.append("(" + " AND ".join(parts) + ")")
+        params = []
+        conds = [_key_condition(keys, row, params) for row in chosen[i:i + OUTPUT_KEY_CHUNK]]
         for r in conn.query(f"{queries['output']} AND ({' OR '.join(conds)})", params):
-            out[case_key({k.lower(): r[f"smp_key_{j}"] for j, k in enumerate(keys)}, keys)] = r
+            out[case_key(r, keys)] = r
     missing = [r["_key"] for r in chosen if r["_key"] not in out]
     if missing:
-        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the output, e.g. {missing[0]}")
+        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the sample table, e.g. {missing[0]}")
     return out
 
 
-def _write_output(conn, s, queries, sample: Sample, run_id, run_key, as_of, output: dict, cases: list, now):
-    """cases: (case_key, selection_order, priority_rank, stratum_path) of each row to write."""
-    names = [str(o["rule_name"]) for o in sample.output_cols]
-    conn.executemany(
-        f"INSERT INTO {queries['output_table']} ({', '.join([*OUTPUT_META_COLS, *names])}) "
-        f"VALUES ({', '.join(['?'] * (len(OUTPUT_META_COLS) + len(names)))})",
-        [[run_id, sample.config_id, run_key, as_of, key, order, rank, path, "Y", now,
-          *(output[key].get(n.lower()) for n in names)] for key, order, rank, path in cases], s.chunk_rows)
+def _retire_output(conn, queries, run_key, now, where: str = "", params: Sequence = ()):
+    """Mark the current sample table rows of run_key (and of where) retired, as the framework does: ETL_IS_CURR_IND
+    'N', ETL_IS_DEL_IND 'Y', ETL_LAST_UPDT_DT_TM now (each when the table has it)."""
+    have = {c.lower() for c in queries["output_columns"]}
+    sets, values = ["etl_is_curr_ind = 'N'"], []
+    if "etl_is_del_ind" in have:
+        sets.append("etl_is_del_ind = 'Y'")
+    if "etl_last_updt_dt_tm" in have:
+        sets.append("etl_last_updt_dt_tm = ?")
+        values.append(now)
+    conn.execute(f"UPDATE {queries['output_table']} SET {', '.join(sets)} "
+                 f"WHERE smpl_run_key = ? AND etl_is_curr_ind = 'Y'{' AND ' + where if where else ''}",
+                 [*values, run_key, *params])
+
+
+def _write_output(conn, s, queries, run_id, run_key, as_of, output: dict, cases: list, now):
+    """cases: (case_key, selection_order, stratum_path) of each row to write: its source row, with the audit and
+    run columns set by sampling."""
+    columns = queries["output_columns"]
+
+    def row(key, order, path):
+        own = {"etl_is_curr_ind": "Y", "etl_is_del_ind": "N", "etl_load_dt_tm": now, "etl_last_updt_dt_tm": now,
+               "smpl_run_id": run_id, "smpl_run_key": run_key, "smpl_cycle_dt": as_of, "smpl_order_nbr": order,
+               "smpl_stratum_path": path}
+        return [own[c.lower()] if c.lower() in own else output[key].get(c.lower()) for c in columns]
+    conn.executemany(f"INSERT INTO {queries['output_table']} ({', '.join(columns)}) "
+                     f"VALUES ({', '.join(['?'] * len(columns))})",
+                     [row(*case) for case in cases], s.chunk_rows)
 
 
 def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, output,
@@ -970,25 +1009,23 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
         rows += [[run_id, cid, project, process, run_key, as_of, r["_key"], None, 0, None, 1, r["_reason"], None,
                   None, now] for r in excluded]
     conn.executemany(f"""
-        INSERT INTO {s.meta_db}.gre_sample_selections (
+        INSERT INTO {s.meta_db}.GOVT_RGLTRY_SAMPLE_SELECTIONS (
             sample_run_id, config_id, project_name, process_name, run_key, sample_cycle, case_key, priority_rank,
             selected_flag, selection_order, excluded_flag, exclusion_reason, stratum_path, selection_status,
             etl_is_curr_ind, load_datetime
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Y', ?)""", rows, s.chunk_rows)
-    tables = [f"{s.meta_db}.gre_sample_selections"]
     if output is not None:
-        _write_output(conn, s, queries, sample, run_id, run_key, as_of, output,
-                      [(r["_key"], order[r["_key"]], r["_order"] + 1, r.get("_path")) for r in chosen], now)
-        tables.append(queries["output_table"])
+        _retire_output(conn, queries, run_key, now)
+        _write_output(conn, s, queries, run_id, run_key, as_of, output,
+                      [(r["_key"], order[r["_key"]], r.get("_path")) for r in chosen], now)
 
-    for table in tables:
-        conn.execute(f"""
-            UPDATE {table}
-            SET etl_is_curr_ind = 'N', last_updated_datetime = ?
-            WHERE config_id = ? AND run_key = ? AND sample_run_id <> ? AND etl_is_curr_ind = 'Y'""",
-            [now, cid, run_key, run_id])
+    conn.execute(f"""
+        UPDATE {s.meta_db}.GOVT_RGLTRY_SAMPLE_SELECTIONS
+        SET etl_is_curr_ind = 'N', last_updated_datetime = ?
+        WHERE config_id = ? AND run_key = ? AND sample_run_id <> ? AND etl_is_curr_ind = 'Y'""",
+        [now, cid, run_key, run_id])
     return conn.execute(f"""
-        UPDATE {s.meta_db}.gre_sampling_run
+        UPDATE {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN
         SET etl_is_curr_ind = 'N', last_updated_datetime = ?
         WHERE config_id = ? AND run_key = ? AND run_id <> ? AND etl_is_curr_ind = 'Y'""",
         [now, cid, run_key, run_id])
@@ -1014,8 +1051,7 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     dry_run    : do everything but write (no run row).
     force_reason: replace a FINAL sample of this run_key (recorded on the new run row); without it a rerun of a
                  finalised run_key fails as FINALIZED.
-    extra_filters: a SQL condition on the universe table ANDed to scope_sql for this run (as the GRE's
-                 extra_filters): which load, batch or SCD2 version of an incremental table to read, e.g.
+    extra_filters: a SQL condition on the universe table ANDed to scope_sql for this run: which load, batch or SCD2 version of an incremental table to read, e.g.
                  "BTCH_ID = 'B42' AND ETL_IS_CURR_IND = 'Y'". Kept with the run's parameters, so a later case
                  replacement reads the same rows.
     """
@@ -1154,7 +1190,10 @@ def run_sampling(conn: Connection, s: Settings, config_id, run_key: Optional[str
     output = None
     if queries["output"]:
         try:
+            queries["output_columns"] = sample_table_columns(conn, queries, sample)
             output = fetch_output(conn, queries, sample, chosen)
+        except ConfigError as e:
+            return fail("config", "CONFIG_ERROR", e)
         except Exception as e:  # noqa: BLE001
             return fail("technical", "OUTPUT_FAILURE", e, traceback.format_exc())
 
@@ -1187,7 +1226,7 @@ def finalize_run(conn: Connection, s: Settings, config_id, run_key: str, by: str
         raise ConfigError(f"config_id={config_id} has no current sample for run_key {run_key!r}")
     if run["status"] == "FINAL":
         raise ConfigError(f"run {run['run_id']} is already final (by {run.get('finalized_by')})")
-    conn.execute(f"UPDATE {s.meta_db}.gre_sampling_run SET status = 'FINAL', finalized_by = ?, finalized_at = ?, "
+    conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SAMPLING_RUN SET status = 'FINAL', finalized_by = ?, finalized_at = ?, "
                  f"last_updated_datetime = ? WHERE run_id = ? AND status = 'COMPLETED'",
                  [by, s.now(), s.now(), run["run_id"]])
     log.info("run %s (config_id=%s run_key=%s) finalised by %s", run["run_id"], config_id, run_key, by)
@@ -1213,7 +1252,7 @@ def replace_case(conn: Connection, s: Settings, config_id, run_key: str, case_ke
                  any_bucket: bool = False) -> dict:
     """Take one selected case out of the current sample of (config_id, run_key) and put the next candidate in:
     the same bucket (any_bucket: anywhere), never selected or replaced before, in priority order (RANDOM: a
-    draw seeded by the run's seed). Allowed on a FINAL sample. The output snapshot follows. One transaction."""
+    draw seeded by the run's seed). Allowed on a FINAL sample. The sample table follows. One transaction."""
     if not str(reason or "").strip():
         raise ConfigError("a reason is required to replace a case")
     run = current_run(conn, s, config_id, run_key)
@@ -1221,7 +1260,7 @@ def replace_case(conn: Connection, s: Settings, config_id, run_key: str, case_ke
         raise ConfigError(f"config_id={config_id} has no completed current sample for run_key {run_key!r}")
     db, run_id = s.meta_db, run["run_id"]
     rows = conn.query(f"SELECT case_key, selected_flag, selection_order, priority_rank, excluded_flag, stratum_path, "
-                      f"selection_status FROM {db}.gre_sample_selections WHERE sample_run_id = ?", [run_id])
+                      f"selection_status FROM {db}.GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE sample_run_id = ?", [run_id])
     old = next((r for r in rows if r["case_key"] == case_key_text), None)
     if not old or int(old["selected_flag"] or 0) != 1:
         raise ConfigError(f"{case_key_text!r} is not in the current sample of run_key {run_key!r}")
@@ -1241,10 +1280,11 @@ def replace_case(conn: Connection, s: Settings, config_id, run_key: str, case_ke
     output = queries = sample = None
     report = json.loads(run.get("run_report") or "{}")
     snap = report.get("config") or {}
-    if str((snap.get("config") or {}).get("output_table") or "").strip():
+    if _text(snap.get("config") or {}, "output_table"):
         sample = build_sample(snap["config"], snap.get("rules") or [])   # the rules that made this sample
         params = json.loads(run.get("run_params_txt") or "{}")
         queries = build_queries(sample, s, params)
+        queries["output_columns"] = sample_table_columns(conn, queries, sample)
         row = {**parse_case_key(new["case_key"], sample.keys), "_key": new["case_key"]}
         output = fetch_output(conn, queries, sample, [row])
 
@@ -1254,18 +1294,18 @@ def replace_case(conn: Connection, s: Settings, config_id, run_key: str, case_ke
                                                  (new["case_key"], 1, old["selection_order"], "REPLACEMENT",
                                                   old["case_key"])):
             conn.execute(f"""
-                UPDATE {db}.gre_sample_selections
+                UPDATE {db}.GOVT_RGLTRY_SAMPLE_SELECTIONS
                 SET selected_flag = ?, selection_order = ?, selection_status = ?, linked_case_key = ?,
                     status_reason = ?, status_by = ?, status_at = ?, last_updated_datetime = ?
                 WHERE sample_run_id = ? AND case_key = ?""",
                 [flag, order, status, linked, reason[:1000], by, now, now, run_id, key])
         if output is not None:
-            conn.execute(f"UPDATE {queries['output_table']} SET etl_is_curr_ind = 'N', last_updated_datetime = ? "
-                         f"WHERE sample_run_id = ? AND case_key = ? AND etl_is_curr_ind = 'Y'",
-                         [now, run_id, old["case_key"]])
-            _write_output(conn, s, queries, sample, run_id, run_key, run.get("as_of_date"), output,
-                          [(new["case_key"], old["selection_order"], new["priority_rank"], new["stratum_path"])], now)
-        conn.execute(f"UPDATE {db}.gre_sampling_run SET last_updated_datetime = ? WHERE run_id = ?", [now, run_id])
+            where = []
+            _retire_output(conn, queries, run_key, now,
+                           _key_condition(sample.keys, parse_case_key(old["case_key"], sample.keys), where), where)
+            _write_output(conn, s, queries, run_id, run_key, run.get("as_of_date"), output,
+                          [(new["case_key"], old["selection_order"], new["stratum_path"])], now)
+        conn.execute(f"UPDATE {db}.GOVT_RGLTRY_SAMPLING_RUN SET last_updated_datetime = ? WHERE run_id = ?", [now, run_id])
     log.info("run %s: %s replaced by %s (%s) by %s", run_id, old["case_key"], new["case_key"], reason, by)
     return {"run_id": run_id, "replaced": old["case_key"], "replacement": new["case_key"],
             "stratum_path": new["stratum_path"], "selection_order": old["selection_order"], "reason": reason,
@@ -1291,7 +1331,7 @@ def discover_configs(conn: Connection, s: Settings, config_id=None, project: Opt
     if process_name:
         where.append("process_name = ?")
         params.append(process_name)
-    rows = conn.query(f"SELECT config_id FROM {s.meta_db}.gre_sampling_config WHERE {' AND '.join(where)} "
+    rows = conn.query(f"SELECT config_id FROM {s.meta_db}.GOVT_RGLTRY_SAMPLING_CONFIG WHERE {' AND '.join(where)} "
                       f"ORDER BY config_id", params)
     return [r["config_id"] for r in rows]
 
@@ -1304,7 +1344,7 @@ def run_scope(conn: Connection, s: Settings, config_id=None, project: Optional[s
              if v not in (None, "")}
     ids = discover_configs(conn, s, config_id, project, process_name)
     if not ids:
-        raise ConfigError(f"no active gre_sampling_config matches {scope}")
+        raise ConfigError(f"no active GOVT_RGLTRY_SAMPLING_CONFIG matches {scope}")
     runs = []
     for cid in ids:
         try:
@@ -1320,8 +1360,9 @@ def run_scope(conn: Connection, s: Settings, config_id=None, project: Optional[s
 def validate(conn: Connection, s: Settings, config_id=None, project: Optional[str] = None,
              process_name: Optional[str] = None, run_params: Optional[dict] = None,
              check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[str] = None) -> dict:
-    """Check the configs of a scope. With check_sql, also run the parameter lookups and EXPLAIN the pull, count
-    and output SQL (proves tables, columns and expressions exist; reads no universe rows)."""
+    """Check the configs of a scope. With check_sql, also run the parameter lookups, EXPLAIN the pull, the rules'
+    and the sample table's SQL (proves tables, columns and expressions exist; reads no universe rows), and check
+    the sample table's columns against the source (sample_table_columns)."""
     out = []
     for cid in discover_configs(conn, s, config_id, project, process_name):
         try:
@@ -1338,9 +1379,11 @@ def validate(conn: Connection, s: Settings, config_id=None, project: Optional[st
                 if str(extra_filters or "").strip():
                     params[EXTRA_FILTERS] = str(extra_filters).strip()
                 queries = build_queries(sample, s, params)
-                for key in ("pull", "count", "output"):
+                for key in ("pull", "output"):
                     if queries.get(key):
                         conn.query("EXPLAIN " + queries[key] + (" AND 1=0" if key == "output" else ""))
+                if queries.get("output"):
+                    sample_table_columns(conn, queries, sample)
                 for _, text in [*gate_queries(sample, s, params), *queries["key_queries"]]:
                     conn.query("EXPLAIN " + text)
             except Exception as e:  # noqa: BLE001

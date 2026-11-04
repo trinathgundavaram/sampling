@@ -1,8 +1,8 @@
 """Airflow: the sampling DAG, its task, and the bridge from the Variable + Teradata Connection to the engine.
 
 Everything about a DAG comes from its own Airflow Variable (JSON); the DAG file only names the dag_id and the
-Variable. The Teradata login comes from an Airflow Connection, as in the GRE framework's gre_rules_task: the
-Variable's `connection_id` (or the framework's `td_conn_var`; default gre_teradata) is read with
+Variable. The Teradata login comes from an Airflow Connection: the
+Variable's `connection_id` (or the framework's `td_conn_var`; default govt_rgltry_teradata) is read with
 BaseHook.get_connection and exported as TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH for
 sampling.db. No .env file is read on Airflow. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md.
 """
@@ -34,8 +34,8 @@ from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
 logger = logging.getLogger(__name__)
 
-# Airflow Connection id used when neither the task, the Variable's connection_id nor td_conn_var names one (GRE's)
-DEFAULT_CONNECTION_ID = "gre_teradata"
+# Airflow Connection id used when neither the task, the Variable's connection_id nor td_conn_var names one
+DEFAULT_CONNECTION_ID = "govt_rgltry_teradata"
 CONNECTION_TYPE = "teradata"   # the only connection_type: the engine reads and writes Teradata
 TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("config_id", "project", "process_name")
@@ -46,7 +46,7 @@ SETTINGS_KEYS = ("meta_db", "load_env", "environment", "env_value", "timezone", 
 DEFAULT_TIMEOUT = timedelta(hours=2)
 DEFAULT_RETRIES = 1
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
-DEFAULT_TAGS = ["Compliance", "Sampling"]
+DEFAULT_TAGS = ["GOVT_RGLTRY", "Sampling"]
 _TEXT = ["null", "string"]
 
 
@@ -61,8 +61,8 @@ def _set_env(key: str, value) -> None:
 
 
 def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
-    """The Teradata Connection id: the task's argument, then the Variable's connection_id (GRE's key), then
-    td_conn_var (the framework's), then gre_teradata. connection_type, when given, must be teradata."""
+    """The Teradata Connection id: the task's argument, then the Variable's connection_id, then
+    td_conn_var (the framework's), then govt_rgltry_teradata. connection_type, when given, must be teradata."""
     kind = str(config.get("connection_type") or CONNECTION_TYPE).strip().lower()
     if kind != CONNECTION_TYPE:
         raise ConfigError(f"connection_type must be '{CONNECTION_TYPE}', got {config.get('connection_type')!r}")
@@ -71,7 +71,7 @@ def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
 
 def _load_teradata_connection(conn_id: str) -> None:
     """The Airflow Connection's host, login, password and extra `logmech` as the TERADATA_* variables
-    sampling.db.connect_teradata reads, as GRE's _load_teradata_connection does."""
+    sampling.db.connect_teradata reads."""
     conn = BaseHook.get_connection(conn_id)
     if not conn.host or not conn.login or not conn.password:
         raise ConfigError(f"Airflow Connection '{conn_id}' needs host, login and password")
@@ -283,7 +283,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
 
 
 def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
-    """Delete the gre_sample_selections rows older than the Variable's retention_days that no history rule,
+    """Delete the GOVT_RGLTRY_SAMPLE_SELECTIONS rows older than the Variable's retention_days that no history rule,
     replacement or audit needs (sampling.admin.purge_selections), for every scope of the Variable."""
     try:
         config = resolve_config(variable_key)
@@ -330,7 +330,7 @@ def sample_summary(ti, task_ids: list) -> str:
                    + "</tr>" for row in cells)
     return ("<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\"><tr>"
             + "".join(f"<th>{h}</th>" for h in head) + f"</tr>{rows}</table>"
-            + "<p>The selected cases are in gre_sample_selections (selected_flag = 1, etl_is_curr_ind = 'Y') "
+            + "<p>The selected cases are in GOVT_RGLTRY_SAMPLE_SELECTIONS (selected_flag = 1, etl_is_curr_ind = 'Y') "
               "and in the output table.</p>")
 
 
@@ -456,10 +456,10 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
         upstream = [*tasks, *triggers, *purge]
         success = EmailOperator(task_id="success_email", dag=dag, to=email_recipient,
                                 trigger_rule="none_failed_min_one_success",
-                                subject=f"Airflow EDEG-Compliance {load_env} Success: {dag_id} DAG",
+                                subject=f"Airflow EDEG-GOVT_RGLTRY {load_env} Success: {dag_id} DAG",
                                 html_content=f"DAG {dag_id} run {{{{ run_id }}}} completed successfully")
         fail = EmailOperator(task_id="fail_email", dag=dag, to=email_recipient, trigger_rule="one_failed",
-                             subject=f"Airflow EDEG-Compliance {load_env} Failure: {dag_id} DAG",
+                             subject=f"Airflow EDEG-GOVT_RGLTRY {load_env} Failure: {dag_id} DAG",
                              html_content=f"DAG {dag_id} run {{{{ run_id }}}} failed")
         upstream >> success
         upstream >> fail

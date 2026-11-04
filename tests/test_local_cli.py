@@ -36,7 +36,7 @@ def test_deploy_schema_dry_run_needs_no_connection(monkeypatch, capsys):
     monkeypatch.setenv("SAMPLING_LOG_DIR", str(ROOT / "local" / "logs"))
     assert cli.main(["deploy-schema", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "CREATE MULTISET TABLE HSABC_QA.gre_sampling_config" in out and "INSERT INTO" not in out
+    assert "CREATE MULTISET TABLE HSABC_QA.GOVT_RGLTRY_SAMPLING_CONFIG" in out and "INSERT INTO" not in out
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def test_run_command(local_db, capsys):
                      "--triggered-by", "jdoe"])
     report = json.loads(capsys.readouterr().out)
     assert code == 0 and report["runs"][0]["selected"] == 150
-    assert local_db.db.execute("SELECT triggered_by FROM gre_sampling_run").fetchall() == [("jdoe",)]
+    assert local_db.db.execute("SELECT triggered_by FROM GOVT_RGLTRY_SAMPLING_RUN").fetchall() == [("jdoe",)]
 
 
 def test_run_command_exit_codes(local_db, capsys):
@@ -94,8 +94,8 @@ def test_runs_and_errors_commands(local_db, capsys):
 
 
 def test_mark_failed(local_db, capsys):
-    local_db.db.execute("INSERT INTO gre_sampling_run (run_id, status) VALUES ('stuck', 'RUNNING')")
+    local_db.db.execute("INSERT INTO GOVT_RGLTRY_SAMPLING_RUN (run_id, status) VALUES ('stuck', 'RUNNING')")
     assert cli.main(["mark-failed", "--run-id", "stuck"]) == 0
     assert cli.main(["mark-failed", "--run-id", "stuck"]) == 1   # already closed
     capsys.readouterr()
-    assert local_db.db.execute("SELECT status, error_type FROM gre_sampling_run").fetchall() == [("ERROR", "ABANDONED")]
+    assert local_db.db.execute("SELECT status, error_type FROM GOVT_RGLTRY_SAMPLING_RUN").fetchall() == [("ERROR", "ABANDONED")]

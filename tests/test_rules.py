@@ -97,7 +97,7 @@ def test_c_condition_buckets_share_equally_and_refill(raw, conn, settings):
     out = _run(conn, settings)
     # the first true condition wins (OP rows are Outpatient), IP has 2: the other two share the rest
     assert _selected(out) == {"Inpatient": 2, "Outpatient": 9, "Behavioral": 9, "OTHER": 0}
-    paths = _rows(raw, "SELECT stratum_path, COUNT(*) FROM gre_sample_selections GROUP BY 1 ORDER BY 1")
+    paths = _rows(raw, "SELECT stratum_path, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS GROUP BY 1 ORDER BY 1")
     assert paths == [("Behavioral", 50), ("Inpatient", 2), ("OTHER", 50), ("Outpatient", 50)]
 
 
@@ -107,7 +107,7 @@ def test_d_diversity_rotates_and_cap_holds_through_top_up(raw, conn, settings):
     _universe(raw.db, _cases("a", 20, "D", code="X") + _cases("b", 20, "D", code="Y") + _cases("c", 3, "D", code="Z"))
     _config(raw.db, 9, diversity_expr="code")
     out = _run(conn, settings)
-    codes = _rows(raw, "SELECT SUBSTR(case_key, 9, 1), COUNT(*) FROM gre_sample_selections WHERE selected_flag = 1 "
+    codes = _rows(raw, "SELECT SUBSTR(case_key, 9, 1), COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selected_flag = 1 "
                        "GROUP BY 1 ORDER BY 1")
     assert out["selected"] == 9 and codes == [("a", 3), ("b", 3), ("c", 3)]
     set_config(raw.db, diversity_cap=2)
@@ -115,29 +115,67 @@ def test_d_diversity_rotates_and_cap_holds_through_top_up(raw, conn, settings):
     assert out["selected"] == 6 and out["shortfall"] == 3
 
 
-# ── E: output snapshot ────────────────────────────────────────────────────
+# ── E: the sample table: the selected cases' source rows ──────────────────
 
-def test_e_output_snapshot_of_the_selected_cases(raw, conn, settings):
-    _universe(raw.db, _cases("d", 10, "Denied", code="K"))
-    _config(raw.db, 4, output_table="out_t")
-    raw.db.execute("CREATE TABLE out_t (sample_run_id VARCHAR, config_id INTEGER, run_key VARCHAR, sample_cycle DATE, "
-                   "case_key VARCHAR, selection_order INTEGER, priority_rank INTEGER, stratum_path VARCHAR, "
-                   "etl_is_curr_ind VARCHAR, load_datetime TIMESTAMP, last_updated_datetime TIMESTAMP, "
-                   "case_id VARCHAR, code_lc VARCHAR)")
-    insert_rule(raw.db, "OUTPUT", 1, "case_id", seq_no=1, rule_sql="case_id")
-    insert_rule(raw.db, "OUTPUT", 2, "code_lc", seq_no=2, rule_sql="LOWER(code)")
-    first = _run(conn, settings)
-    assert first["status"] == "COMPLETED", first
-    assert _rows(raw, "SELECT selection_order, case_id, code_lc FROM out_t ORDER BY 1") == \
-        [(1, "d000", "k"), (2, "d001", "k"), (3, "d002", "k"), (4, "d003", "k")]
-    _run(conn, settings)
-    assert _rows(raw, "SELECT etl_is_curr_ind, COUNT(*) FROM out_t GROUP BY 1 ORDER BY 1") == [("N", 4), ("Y", 4)]
+SAMPLE_COLS = ("etl_is_curr_ind VARCHAR, etl_is_del_ind VARCHAR, etl_load_dt_tm TIMESTAMP, "
+               "etl_last_updt_dt_tm TIMESTAMP, smpl_run_id VARCHAR, smpl_run_key VARCHAR, smpl_cycle_dt DATE, "
+               "smpl_order_nbr INTEGER, smpl_stratum_path VARCHAR")
 
 
-def test_e_output_without_columns_is_a_config_problem(raw, conn, settings):
+def _source(db, rows):
+    """A source carrying the framework's audit columns: rows (case_id, code, etl_is_curr_ind)."""
+    db.execute("CREATE TABLE src (case_id VARCHAR, code VARCHAR, etl_is_curr_ind VARCHAR, etl_is_del_ind VARCHAR, "
+               "etl_load_dt_tm TIMESTAMP, etl_last_updt_dt_tm TIMESTAMP)")
+    db.executemany("INSERT INTO src VALUES (?, ?, ?, 'N', TIMESTAMP '2020-01-01 00:00:00', NULL)", rows)
+    insert_config(db, universe_table="src", exclusion_sql=None, scope_sql="etl_is_curr_ind = 'Y'", target_volume=4,
+                  priority_rank_sql="case_id", output_db="main", output_table="smpl_t")
+
+
+def test_e_the_sample_table_gets_every_source_column(raw, conn, settings):
+    _source(raw.db, [(f"d{i:03d}", f"K{i}", "Y") for i in range(10)])
+    raw.db.execute(f"CREATE TABLE smpl_t (case_id VARCHAR, code VARCHAR, {SAMPLE_COLS})")
+    first = _run(conn, settings, run_key="W1")
+    assert first["status"] == "COMPLETED" and first["output_table"] == "main.smpl_t", first
+    rows = _rows(raw, "SELECT smpl_order_nbr, case_id, code, smpl_run_key, smpl_stratum_path, etl_is_curr_ind, "
+                      "etl_is_del_ind, YEAR(etl_load_dt_tm) > 2020, smpl_run_id = (SELECT run_id FROM "
+                      "GOVT_RGLTRY_SAMPLING_RUN) FROM smpl_t ORDER BY 1")
+    # the source's audit values (2020, its own flags) are replaced by the process's
+    assert rows == [(n + 1, f"d{n:03d}", f"K{n}", "W1", "ALL", "Y", "N", True, True) for n in range(4)]
+    _run(conn, settings, run_key="W1")                                        # a rerun retires the earlier rows
+    assert _rows(raw, "SELECT etl_is_curr_ind, etl_is_del_ind, COUNT(*), COUNT(etl_last_updt_dt_tm) FROM smpl_t "
+                      "GROUP BY 1, 2 ORDER BY 1") == [("N", "Y", 4, 4), ("Y", "N", 4, 4)]
+    _run(conn, settings, run_key="W2")                                        # another cycle leaves W1 alone
+    assert _rows(raw, "SELECT smpl_run_key, COUNT(*) FROM smpl_t WHERE etl_is_curr_ind = 'Y' GROUP BY 1 "
+                      "ORDER BY 1") == [("W1", 4), ("W2", 4)]
+
+
+def test_e_the_sample_table_columns_are_checked(raw, conn, settings):
+    _source(raw.db, [("d000", "K", "Y")])
+    raw.db.execute("CREATE TABLE smpl_t (code VARCHAR, notes VARCHAR, etl_is_curr_ind VARCHAR)")
+    out = _run(conn, settings)
+    assert out["error_type"] == "CONFIG_ERROR"
+    assert "needs the column SMPL_RUN_KEY" in out["error"] and "needs the key column case_id" in out["error"]
+    assert "neither in the source nor set by sampling: notes" in out["error"]
+    bad = validate(conn, settings, config_id=1, check_sql=True)
+    assert "needs the column SMPL_RUN_KEY" in bad["configs"][0]["problems"][0]
+
+
+def test_e_one_source_row_per_selected_case(raw, conn, settings):
+    _source(raw.db, [("d000", "K", "Y"), ("d000", "K2", "Y")])                 # two current versions of one case
+    raw.db.execute(f"CREATE TABLE smpl_t (case_id VARCHAR, code VARCHAR, {SAMPLE_COLS})")
+    out = _run(conn, settings)
+    assert out["error_type"] == "CONFIG_ERROR" and "do not identify a case uniquely" in out["error"]
+
+
+def test_e_sample_table_names_and_old_output_rules(raw, conn, settings):
     _universe(raw.db, _cases("d", 3, "D"))
-    _config(raw.db, 2, output_table="out_t")
-    assert config_problems(load_config(conn, settings, 1)) == ["output_table needs OUTPUT rules"]
+    _config(raw.db, 2, output_table="smpl_t")
+    insert_rule(raw.db, "OUTPUT", 1, "case_id", rule_sql="case_id")
+    problems = config_problems(load_config(conn, settings, 1))
+    assert "output_db and output_table go together: set both (the sample table) or neither" in problems
+    assert any("OUTPUT rules are no longer used" in p for p in problems)
+    set_config(raw.db, output_db="main.x")
+    assert any("output_db 'main.x' must be a plain name" in p for p in config_problems(load_config(conn, settings, 1)))
 
 
 # ── F: history: dedupe and carry-over ─────────────────────────────────────
@@ -153,18 +191,18 @@ def test_f_prior_selection_excluded_and_unselected_carried_over(raw, conn, setti
     set_config(raw.db, priority_rank_sql="case_id DESC")
     second = _run(conn, settings, run_key="W2", as_of=AS_OF + timedelta(days=7))
     assert second["exclusions"] == {"ALREADY_AUDITED": 3} and second["candidates"] == 7
-    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM gre_sample_selections WHERE run_key = 'W2' "
+    assert _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE run_key = 'W2' "
                       "AND excluded_flag = 1 GROUP BY 1") == [("ALREADY_AUDITED", 3)]
-    picked = {r[0] for r in _rows(raw, "SELECT case_key FROM gre_sample_selections WHERE run_key = 'W2' "
+    picked = {r[0] for r in _rows(raw, "SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE run_key = 'W2' "
                                        "AND selected_flag = 1")}
     assert picked == {"case_id=c009", "case_id=c008", "case_id=c007"}
 
     insert_rule(raw.db, "PRIORITY", 2, "CARRY_OVER", seq_no=1, rule_type="PRIOR_CANDIDATE", lookback_days=30,
                 history_scope="CONFIG")
-    raw.db.execute("UPDATE gre_sampling_rule SET act_ind = 0 WHERE rule_class = 'EXCLUSION'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET act_ind = 0 WHERE rule_class = 'EXCLUSION'")
     third = _run(conn, settings, run_key="W3", as_of=AS_OF + timedelta(days=14))
     # c003..c006 were considered (W1, W2) but never selected: they come first
-    picked = {r[0] for r in _rows(raw, "SELECT case_key FROM gre_sample_selections WHERE run_key = 'W3' "
+    picked = {r[0] for r in _rows(raw, "SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE run_key = 'W3' "
                                        "AND selected_flag = 1")}
     assert picked == {"case_id=c006", "case_id=c005", "case_id=c004"}, third
 
@@ -176,9 +214,9 @@ def test_f_sql_exclusions_first_match_and_stats(raw, conn, settings):
         insert_rule(raw.db, "EXCLUSION", i, name, seq_no=i, rule_type="SQL", rule_sql=sql)
     out = _run(conn, settings)
     assert out["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and out["candidates"] == 5 and out["excluded"] == 10
-    report = json.loads(_rows(raw, "SELECT run_report FROM gre_sampling_run")[0][0])
+    report = json.loads(_rows(raw, "SELECT run_report FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])
     assert report["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and report["buckets"]["ALL"]["selected"] == 3
-    reasons = _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM gre_sample_selections WHERE excluded_flag = 1 "
+    reasons = _rows(raw, "SELECT exclusion_reason, COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE excluded_flag = 1 "
                          "GROUP BY 1 ORDER BY 1")
     assert reasons == [("CODE_Q", 5), ("FLAGGED", 5)]
 
@@ -190,7 +228,7 @@ def test_priority_conditions_and_expressions_in_order(raw, conn, settings):
     insert_rule(raw.db, "PRIORITY", 1, "REV", seq_no=1, rule_type="CONDITION", rule_sql="rev = 1")
     insert_rule(raw.db, "PRIORITY", 2, "CODE", seq_no=2, rule_type="EXPRESSION", rule_sql="code", sort_dir="DESC")
     _run(conn, settings)
-    order = _rows(raw, "SELECT case_key FROM gre_sample_selections ORDER BY selection_order")
+    order = _rows(raw, "SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS ORDER BY selection_order")
     assert [r[0] for r in order] == ["case_id=p2", "case_id=p3", "case_id=p4", "case_id=p1"]
 
 
@@ -203,7 +241,7 @@ def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):
     insert_rule(raw.db, "PARAM", 1, "batch_id", seq_no=1, rule_sql="SELECT MAX(batch) FROM u")
     out = _run(conn, settings, run_key="{batch_id}")
     assert out["status"] == "COMPLETED" and out["run_key"] == "B2" and out["in_scope"] == 6
-    assert json.loads(_rows(raw, "SELECT run_params_txt FROM gre_sampling_run")[0][0])["batch_id"] == "B2"
+    assert json.loads(_rows(raw, "SELECT run_params_txt FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])["batch_id"] == "B2"
     given = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": "B1"})
     assert given["run_key"] == "B1" and given["in_scope"] == 10
 
@@ -214,7 +252,7 @@ def test_g_param_without_a_value_is_a_technical_failure(raw, conn, settings):
     insert_rule(raw.db, "PARAM", 1, "batch_id", seq_no=1, rule_sql="SELECT MAX(batch) FROM u WHERE 1 = 0")
     out = _run(conn, settings)
     assert out["error_kind"] == "technical" and out["error_type"] == "PARAM_FAILURE"
-    assert _rows(raw, "SELECT status, error_type FROM gre_sampling_run") == [("ERROR", "PARAM_FAILURE")]
+    assert _rows(raw, "SELECT status, error_type FROM GOVT_RGLTRY_SAMPLING_RUN") == [("ERROR", "PARAM_FAILURE")]
 
 
 # ── validation of the rule rows ───────────────────────────────────────────
@@ -250,11 +288,11 @@ def test_gate_waits_until_its_select_returns_a_row(raw, conn, settings):
     out = _run(conn, settings, run_key="{batch_id}")
     assert out["error_type"] == "GATE_NOT_MET" and out["error_kind"] == "technical"   # Airflow retries it
     assert "BATCH_CLOSED (batch closed)" in out["error"]
-    assert _rows(raw, "SELECT COUNT(*) FROM gre_sample_selections")[0][0] == 0
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SAMPLE_SELECTIONS")[0][0] == 0
     raw.db.execute("UPDATE batch_control SET status = 'CLOSED'")
     again = _run(conn, settings, run_key="{batch_id}")
     assert again["status"] == "COMPLETED" and again["run_key"] == "B1" and again["selected"] == 2
-    assert _rows(raw, "SELECT status FROM gre_sampling_run ORDER BY started_at") == [("ERROR",), ("COMPLETED",)]
+    assert _rows(raw, "SELECT status FROM GOVT_RGLTRY_SAMPLING_RUN ORDER BY started_at") == [("ERROR",), ("COMPLETED",)]
 
 
 def test_a_broken_gate_is_reported(raw, conn, settings):
@@ -262,5 +300,5 @@ def test_a_broken_gate_is_reported(raw, conn, settings):
     _config(raw.db, 2)
     insert_rule(raw.db, "GATE", 1, "BROKEN", rule_sql="SELECT 1 FROM no_such_table")
     assert _run(conn, settings)["error_type"] == "GATE_FAILURE"
-    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = NULL")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET rule_sql = NULL")
     assert _run(conn, settings)["error_type"] == "CONFIG_ERROR"

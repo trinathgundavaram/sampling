@@ -16,13 +16,12 @@ any answer: they become rows.
 | Q7 | The out-of-network share and how OON is identified | a bucket or priority |
 | Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) **Decided 2026-10-30:** `TOPUP`, `fail_on_shortfall` false (the shortfall is recorded, the run succeeds). The functional-area-within-denials part stays with Q2. | LEVEL `parent_path`, `shortfall_policy`, `fail_on_shortfall` |
 | Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation **Later:** no code-variety rule for now (`diversity_expr` NULL). | `diversity_expr`, `diversity_cap` |
-| Q10 | The output table's database and name, its columns, and whether GRE exceptions go into it | `output_table`, OUTPUT rules |
+| Q10 | The sample table's database and name (created by another process with the source's columns plus the sampling columns) | `output_db`, `output_table` |
 | Q11 | Scheduled (which day and time, Central), or started by a framework step (which one: EXPORT_LOAD, BATCH_CLOSE …)? Which framework table and status say a batch is ready to sample? How late can it be (retries × delay)? **Decided 2026-10-30:** started by hand (`schedule_interval` null); GATE `BATCH_CLOSED` refuses a batch with a source still open. | Variable `schedule_interval` / framework `trigger_dags`, `trigger_keys`, a GATE rule, `retries`, `retry_delay_minutes` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? **Decided 2026-10-30:** EXCLUSION `PRIOR_SELECTION` 90 days and PRIORITY `PRIOR_CANDIDATE` 14 days (first), this config only. | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
 | Q13 | Who receives the "sample ready" email | Variable `notify_recipients` |
-| Q14 | How long must the candidate rows of a run be kept (records retention)? The selected cases and the run rows are kept in any case **Decided 2026-10-30:** 10 years (CMS records): no purge, `retention_days` stays unset. | Variable `retention_days` / `purge --older-than-days` |
+| Q14 | How long must the candidate rows of a run be kept (records retention)? The selected cases and the run rows are kept in any case **Decided 2026-10-30:** 10 years (records retention): no purge, `retention_days` stays unset. | Variable `retention_days` / `purge --older-than-days` |
 | Q15 | The framework's metadata database per environment (the one holding `ComplianceRequestControl`: `HSABC_DEV` in its example Variable), whether Teradata grants the sampling service account SELECT on it, and ODAG1's `Project_Cd` there (`CMSUNIV` in its example setup). Is the sampling universe `SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1` (template) or the framework's export `SDO_CMSUNIV_ODAG1_2022`, and does it carry `BTCH_ID`? **Decided 2026-10-30:** `ComplianceRequestControl` is in `HSABC_$ENV` (`HSABC_DEV` in DEV, `HSABC` in UAT / PROD), written that way in the PARAM and GATE rules; the sampling service account can read it. Still open: `Project_Cd`, the universe table. | PARAM `batch_id`, GATE `BATCH_CLOSED`, `universe_table`, `scope_sql` |
-| Q16 | Reuse of the GRE rules engine's results: should a case with a current GRE exception for its batch (`HSABC_$ENV.gre_exceptions`, `run_key` = the batch ID, `etl_is_curr_ind = 'Y'`) be left out of the sample, flagged in the output, or neither? Which ODAG1 GRE rule groups count, and are their `src_key_cols` `AUTHZN_ID` and `SRC_DATA_KEY`? (the match is on `src_key_value` `AUTHZN_ID=…\|SRC_DATA_KEY=…`) **Decided 2026-10-30:** neither: a GRE exception is a separate matter from sampling, so the sample does not read `gre_exceptions` and no engine change is made. Rule validation is not shared with GRE either: GRE has no configuration check (it only fails at run time on a parameter with no value), while sampling checks the structure (levels, shares, history rules), refuses SQL that writes, and with `--check-sql` runs every query before a run. | nothing |
 
 ## B. Data the requirements need that sampling cannot supply
 
@@ -40,21 +39,21 @@ From the Section 4 review: these are not in ODAG1, so no configuration can selec
 - Run on a real Teradata system: `deploy-schema`, `validate --check-sql`, a dry run, a run (runbook section 11).
   Tested so far only on the DuckDB stand-in.
 - Run the DAG on a real Airflow 3.3.0 scheduler and worker (parsed and run in-process in tests only).
-- DBA review of the primary indexes and secondary indexes in `sql/schema.sql`, and of the space of
-  `gre_sample_selections` (one row per candidate per run).
+- DBA review of the primary indexes in `sql/schema.sql` (no secondary indexes are created), and of the space of
+  `GOVT_RGLTRY_SAMPLE_SELECTIONS` (one row per candidate per run).
 - The Variable's `email_recipient`, `snow_assignment_group` and the Connection for QA / UAT / PROD.
 - The candidate pull holds the scope in worker memory: confirm the weekly scope size.
 
 ## D. The ODAG1 rows known so far (config_id 2, to enter with `act_ind = 0`)
 
-There are no seed files: these rows are entered in `gre_sampling_config` / `gre_sampling_rule` once their TODOs are
+There are no seed files: these rows are entered in `GOVT_RGLTRY_SAMPLING_CONFIG` / `GOVT_RGLTRY_SAMPLING_RULE` once their TODOs are
 answered, then `act_ind = 1` and `validate --config-id 2 --check-sql`. `<ODAG1>` is
 `EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1`; `<CURRENT>` is
 `BTCH_ID = '{batch_id}' AND ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N'`.
 
 **Config:** project `UMCM`, process and sample `COMO_WEEKLY_SAMPLE`, universe `<ODAG1>`, key_columns
 `AUTHZN_ID, SRC_DATA_KEY`, scope_sql `<CURRENT>`, target 150, `RANKED`, `FLOOR`, no diversity (Q9), `TOPUP`,
-keep_excluded 1, output_table TODO(Q10).
+keep_excluded 1, output_db / output_table TODO(Q10) (the sample table, runbook 4.3).
 
 | rule_id | class | seq | name | type / settings | rule_sql |
 |---|---|---|---|---|---|
@@ -69,4 +68,3 @@ keep_excluded 1, output_table TODO(Q10).
 | 232 | BUCKET | 1 | TODO(Q1) the denial value | level 0, `REMAINDER` (other values and quotas TODO(Q1)) | |
 | 241 | LEVEL | 1 | `functional_area` | level 1, parent TODO(Q8) the denial bucket, `SHARE` | (none: buckets select) |
 | 242 | BUCKET | 1 | TODO(Q2) one per area | level 1, `FRACTION` TODO(Q2) | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q2) |
-| 251–252 | OUTPUT | 1–2 | `AUTHZN_ID`, `MBR_ID` | TODO(Q10) the rest | the column |

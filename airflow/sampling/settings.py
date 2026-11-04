@@ -12,8 +12,8 @@ from datetime import date, datetime
 from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 
-# $env / $ENV in a database or table name -> this environment's value (the GRE / framework convention):
-# UAT and PROD have no suffix, so CMS_$ENV_STG is CMS_DEV_STG in DEV and CMS_STG in PROD.
+# $env / $ENV in a database or table name -> this environment's value (the framework convention):
+# UAT and PROD have no suffix, so UMCM_$ENV_STG is UMCM_DEV_STG in DEV and UMCM_STG in PROD.
 ENV_TOKEN_VALUES = {"DEV": "dev", "QA": "qa", "INT": "int", "UAT": "", "PROD": ""}
 DEFAULT_TIMEZONE = "America/Chicago"
 DEFAULT_CHUNK_ROWS = 1000
@@ -23,7 +23,7 @@ _IDENT = re.compile(r"^[A-Za-z_$#][A-Za-z0-9_$#]{0,127}$")
 
 
 class ConfigError(ValueError):
-    """A configuration problem (Variable, settings or gre_sampling_* rows): retrying does not help."""
+    """A configuration problem (Variable, settings or GOVT_RGLTRY_SAMPL* rows): retrying does not help."""
 
 
 def _flag(value: Any, default: bool) -> bool:

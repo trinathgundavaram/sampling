@@ -11,7 +11,7 @@ from conftest import ROOT, build_universe, insert_config, um_config  # noqa: E40
 from sampling import dags  # noqa: E402
 from sampling.settings import ConfigError  # noqa: E402
 
-VAR_KEY = "cms_compliance_umcm_sampling_config_var"
+VAR_KEY = "govt_rgltry_umcm_sampling_config_var"
 BASE = {"td_conn_var": "DEV", "meta_db": "main", "load_env": "DEV", "project": "UMCM", "process_name": "WEEKLY",
         "run_params": {"batch_id": "2026-08-01"}, "as_of": "2026-08-01", "access_lock": False}
 
@@ -27,7 +27,7 @@ def variable(monkeypatch):
 
 
 def _load_dag_file():
-    spec = importlib.util.spec_from_file_location("umcm_dag", ROOT / "airflow" / "cms_compliance_umcm_sampling.py")
+    spec = importlib.util.spec_from_file_location("umcm_dag", ROOT / "airflow" / "govt_rgltry_umcm_sampling.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.dag
@@ -37,7 +37,7 @@ def test_dag_parses_with_the_example_variable(variable):
     example = json.loads((ROOT / "airflow_resources" / "examples" / "umcm_dev" / f"{VAR_KEY}.json").read_text())
     variable({**example, "schedule_interval": "0 8 * * 5", "trigger_dags": ["NEXT_DAG"]})
     dag = _load_dag_file()
-    assert dag.dag_id == "CMS_COMPLIANCE_UMCM_SAMPLING" and dag.max_active_runs == 1
+    assert dag.dag_id == "GOVT_RGLTRY_UMCM_SAMPLING" and dag.max_active_runs == 1
     assert set(dag.task_dict) == {"run_sampling", "trigger_next_dag", "success_email", "fail_email"}
     assert set(dag.params) >= {"config_id", "project", "process_name", "run_key", "run_params", "seed", "as_of"}
 
@@ -93,7 +93,7 @@ def test_sample_ready_email_and_its_summary(variable):
     assert dags.sample_summary(type("E", (), {"xcom_pull": lambda self, task_ids: None})(), ["x"]) == \
         "<p>No sample was made.</p>"
     rendered = dag.get_template_env().from_string(ready.html_content).render(run_id="manual__1", ti=TI())
-    assert rendered.startswith("<p>DAG CMS_COMPLIANCE_UMCM_SAMPLING run manual__1:</p><table") and "B42" in rendered
+    assert rendered.startswith("<p>DAG GOVT_RGLTRY_UMCM_SAMPLING run manual__1:</p><table") and "B42" in rendered
 
 
 def test_retention_task(monkeypatch, variable, raw):
@@ -199,12 +199,12 @@ def test_extra_filters_add_up_across_the_layers(variable):
         dags.resolve_config(VAR_KEY, {})
 
 
-def test_the_connection_is_named_as_in_gre():
-    """The task's argument, then the Variable's connection_id (GRE), then td_conn_var (the framework), then
-    gre_teradata; connection_type, when given, must be teradata."""
-    assert dags._connection_id({}) == "gre_teradata"
+def test_the_connection_id_falls_back():
+    """The task's argument, then the Variable's connection_id, then td_conn_var (the framework), then
+    govt_rgltry_teradata; connection_type, when given, must be teradata."""
+    assert dags._connection_id({}) == "govt_rgltry_teradata"
     assert dags._connection_id({"td_conn_var": "DEV"}) == "DEV"
-    assert dags._connection_id({"td_conn_var": "DEV", "connection_id": "gre_teradata_dev"}) == "gre_teradata_dev"
+    assert dags._connection_id({"td_conn_var": "DEV", "connection_id": "govt_rgltry_teradata_dev"}) == "govt_rgltry_teradata_dev"
     assert dags._connection_id({"connection_id": "a", "connection_type": "Teradata"}, "b") == "b"
     with pytest.raises(ConfigError, match="connection_type must be 'teradata'"):
         dags._connection_id({"connection_type": "postgres"})

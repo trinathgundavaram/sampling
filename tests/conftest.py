@@ -109,8 +109,6 @@ def create_tables(db):
     import re
     text = (ROOT / "sql" / "schema.sql").read_text().replace("{{META_DB}}", META_DB)
     for stmt in load_cli().split_statements(text):
-        if stmt.upper().startswith("CREATE INDEX"):
-            continue
         stmt = re.sub(r"CREATE MULTISET TABLE", "CREATE TABLE", stmt)
         stmt = re.sub(r"\)\s*(UNIQUE\s+)?PRIMARY INDEX \([^)]*\)\s*$", ")", stmt, flags=re.S)
         stmt = re.sub(r"BIGINT GENERATED ALWAYS AS IDENTITY \([^)]*\)", "BIGINT", stmt)
@@ -142,10 +140,10 @@ def insert_config(db, config_id=1, sampling_method="RANKED", priority_rank_sql="
                   rounding_mode="FLOOR", universe_table="case_universe", key_columns="case_id",
                   exclusion_sql="auto_closed = 1", scope_sql="pull_date = '{batch_id}'", project_name="UMCM",
                   process_name="WEEKLY", sample_name="weekly_sample", act_ind=1, **more):
-    """One gre_sampling_config row; exclusion_sql (a condition, the fixtures' shorthand) becomes an EXCLUSION rule
+    """One GOVT_RGLTRY_SAMPLING_CONFIG row; exclusion_sql (a condition, the fixtures' shorthand) becomes an EXCLUSION rule
     named EXCLUDED (rule_id 9000 + config_id)."""
     db.execute("""
-        INSERT INTO gre_sampling_config (config_id, act_ind, project_name, process_name, sample_name,
+        INSERT INTO GOVT_RGLTRY_SAMPLING_CONFIG (config_id, act_ind, project_name, process_name, sample_name,
             universe_table, key_columns, scope_sql, target_volume, sampling_method, priority_rank_sql, rounding_mode)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                [config_id, act_ind, project_name, process_name, sample_name, universe_table, key_columns,
@@ -161,7 +159,7 @@ _SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)
 def as_select(db, config_id, text, value=False):
     """A condition (or, value=True, an expression) on the config's universe table as the SELECT a rule holds:
     the key columns of the rows where it is true (or each row's key columns and value)."""
-    table, keys = db.execute("SELECT universe_table, key_columns FROM gre_sampling_config WHERE config_id = ?",
+    table, keys = db.execute("SELECT universe_table, key_columns FROM GOVT_RGLTRY_SAMPLING_CONFIG WHERE config_id = ?",
                              [config_id]).fetchone()
     if value:
         return f"SELECT {keys}, {text} AS v FROM {table}"
@@ -169,7 +167,7 @@ def as_select(db, config_id, text, value=False):
 
 
 def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act_ind=1, raw_sql=False, **cols):
-    """One gre_sampling_rule row; cols = any of its other columns. A selection rule given a condition or an
+    """One GOVT_RGLTRY_SAMPLING_RULE row; cols = any of its other columns. A selection rule given a condition or an
     expression (the short form the tests write) is stored as the SELECT the engine needs (as_select), unless
     raw_sql."""
     kind = str(cols.get("rule_type") or "").upper()
@@ -182,7 +180,7 @@ def insert_rule(db, rule_class, rule_id, rule_name, config_id=1, seq_no=100, act
             cols["rule_type"] = "QUERY"
     row = {"rule_id": rule_id, "config_id": config_id, "act_ind": act_ind, "rule_class": rule_class,
            "seq_no": seq_no, "rule_name": rule_name, **cols}
-    db.execute(f"INSERT INTO gre_sampling_rule ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+    db.execute(f"INSERT INTO GOVT_RGLTRY_SAMPLING_RULE ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                list(row.values()))
 
 
@@ -208,7 +206,7 @@ def insert_bucket(db, rule_id, level_order, bucket_name, config_id=1, parent_pat
 
 def set_config(db, config_id=1, **cols):
     for name, value in cols.items():
-        db.execute(f"UPDATE gre_sampling_config SET {name} = ? WHERE config_id = ?", [value, config_id])
+        db.execute(f"UPDATE GOVT_RGLTRY_SAMPLING_CONFIG SET {name} = ? WHERE config_id = ?", [value, config_id])
 
 
 def build_universe(db, n=1000, table="case_universe"):

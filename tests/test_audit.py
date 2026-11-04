@@ -36,7 +36,7 @@ def _rows(raw, sql):
 
 
 def _selected(raw, run_key="K1"):
-    return [r[0] for r in _rows(raw, "SELECT case_key FROM gre_sample_selections WHERE etl_is_curr_ind = 'Y' AND "
+    return [r[0] for r in _rows(raw, "SELECT case_key FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE etl_is_curr_ind = 'Y' AND "
                                      f"run_key = '{run_key}' AND selected_flag = 1 ORDER BY selection_order")]
 
 
@@ -45,24 +45,24 @@ def _selected(raw, run_key="K1"):
 def test_every_run_stores_the_rules_it_used_and_their_hash(raw, conn, settings):
     _sample(raw.db)
     first = _run(conn, settings)
-    run = _rows(raw, "SELECT config_hash, run_report FROM gre_sampling_run")[0]
+    run = _rows(raw, "SELECT config_hash, run_report FROM GOVT_RGLTRY_SAMPLING_RUN")[0]
     report = json.loads(run[1])
     assert run[0] == first["config_hash"] == report["config_hash"] and len(run[0]) == 64
     assert report["config"]["config"]["universe_table"] == "u"
     assert [(r["rule_class"], r["rule_name"]) for r in report["config"]["rules"]] == \
         [("LEVEL", "disp"), ("BUCKET", "Denied"), ("BUCKET", "Withdrawn")]
 
-    raw.db.execute("UPDATE gre_sampling_rule SET created_by = 'someone', load_datetime = CURRENT_TIMESTAMP")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET created_by = 'someone', load_datetime = CURRENT_TIMESTAMP")
     assert _run(conn, settings, dry_run=True)["config_hash"] == first["config_hash"]   # who / when do not count
-    raw.db.execute("UPDATE gre_sampling_rule SET target_fraction = 0.75 WHERE rule_name = 'Denied'")
-    raw.db.execute("UPDATE gre_sampling_rule SET target_fraction = 0.25 WHERE rule_name = 'Withdrawn'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET target_fraction = 0.75 WHERE rule_name = 'Denied'")
+    raw.db.execute("UPDATE GOVT_RGLTRY_SAMPLING_RULE SET target_fraction = 0.25 WHERE rule_name = 'Withdrawn'")
     assert _run(conn, settings, run_key="K2")["config_hash"] != first["config_hash"]
 
 
 def test_a_failed_run_keeps_its_snapshot_too(raw, conn, settings):
     _sample(raw.db, sampling_method="BOGUS")
     out = _run(conn, settings)
-    report = json.loads(_rows(raw, "SELECT run_report FROM gre_sampling_run")[0][0])
+    report = json.loads(_rows(raw, "SELECT run_report FROM GOVT_RGLTRY_SAMPLING_RUN")[0][0])
     assert out["error_type"] == "CONFIG_ERROR" and report["config"]["config"]["sampling_method"] == "BOGUS"
 
 
@@ -76,15 +76,15 @@ def test_a_final_sample_needs_a_force_reason_to_be_replaced(raw, conn, settings)
         finalize_run(conn, settings, 1, "K1", "auditor")                  # already final
     refused = _run(conn, settings)
     assert refused["status"] == "ERROR" and refused["error_type"] == "FINALIZED" and refused["error_kind"] == "config"
-    current = _rows(raw, "SELECT run_id, status, finalized_by FROM gre_sampling_run WHERE etl_is_curr_ind = 'Y'")
+    current = _rows(raw, "SELECT run_id, status, finalized_by FROM GOVT_RGLTRY_SAMPLING_RUN WHERE etl_is_curr_ind = 'Y'")
     assert current == [(first["sample_run_id"], "FINAL", "auditor")]       # the final sample is untouched
     assert _run(conn, settings, dry_run=True)["finalized_run"] == first["sample_run_id"]   # a dry run may look
 
     forced = _run(conn, settings, force_reason="rules corrected, approved by J. Doe")
     assert forced["status"] == "COMPLETED" and forced["retired_runs"] == 1
-    assert _rows(raw, f"SELECT override_reason, etl_is_curr_ind FROM gre_sampling_run "
+    assert _rows(raw, f"SELECT override_reason, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN "
                       f"WHERE run_id = '{forced['sample_run_id']}'") == [("rules corrected, approved by J. Doe", "Y")]
-    assert _rows(raw, f"SELECT status, etl_is_curr_ind FROM gre_sampling_run "
+    assert _rows(raw, f"SELECT status, etl_is_curr_ind FROM GOVT_RGLTRY_SAMPLING_RUN "
                       f"WHERE run_id = '{first['sample_run_id']}'") == [("FINAL", "N")]
 
 
@@ -105,7 +105,7 @@ def test_replace_takes_the_next_candidate_of_the_same_bucket(raw, conn, settings
     assert (out["replacement"], out["selection_order"], out["stratum_path"]) == ("case_id=d07", 3, "Denied")
     assert _selected(raw) == ["case_id=w04", "case_id=w03", "case_id=d07", "case_id=d08"]
     rows = _rows(raw, "SELECT case_key, selection_status, linked_case_key, status_reason, status_by "
-                      "FROM gre_sample_selections WHERE selection_status IN ('REPLACED', 'REPLACEMENT') ORDER BY 2")
+                      "FROM GOVT_RGLTRY_SAMPLE_SELECTIONS WHERE selection_status IN ('REPLACED', 'REPLACEMENT') ORDER BY 2")
     assert rows == [("case_id=d09", "REPLACED", "case_id=d07", "no medical record", "auditor"),
                     ("case_id=d07", "REPLACEMENT", "case_id=d09", "no medical record", "auditor")]
 
@@ -126,20 +126,16 @@ def test_replace_when_the_bucket_is_used_up(raw, conn, settings):
     assert out["replacement"] == "case_id=d04" and out["stratum_path"] == "Denied"
 
 
-def test_replace_updates_the_output_snapshot(raw, conn, settings):
-    _sample(raw.db, output_table="out_t")
-    raw.db.execute("CREATE TABLE out_t (sample_run_id VARCHAR, config_id INTEGER, run_key VARCHAR, sample_cycle DATE, "
-                   "case_key VARCHAR, selection_order INTEGER, priority_rank INTEGER, stratum_path VARCHAR, "
-                   "etl_is_curr_ind VARCHAR, load_datetime TIMESTAMP, last_updated_datetime TIMESTAMP, "
-                   "case_id VARCHAR, code VARCHAR)")
-    insert_rule(raw.db, "OUTPUT", 1, "case_id", rule_sql="case_id")
-    insert_rule(raw.db, "OUTPUT", 2, "code", rule_sql="code")
+def test_replace_updates_the_sample_table(raw, conn, settings):
+    _sample(raw.db, output_db="main", output_table="smpl_t")
+    raw.db.execute("CREATE TABLE smpl_t (case_id VARCHAR, disp VARCHAR, code VARCHAR, etl_is_curr_ind VARCHAR, "
+                   "etl_is_del_ind VARCHAR, smpl_run_key VARCHAR, smpl_order_nbr INTEGER, smpl_stratum_path VARCHAR)")
     _run(conn, settings)
-    raw.db.execute("UPDATE gre_sampling_rule SET rule_sql = 'LOWER(code)' WHERE rule_id = 2")   # changed later
     replace_case(conn, settings, 1, "K1", "case_id=w04", "no record", "auditor")
-    assert _rows(raw, "SELECT case_id, code, selection_order FROM out_t WHERE etl_is_curr_ind = 'Y' "
-                      "ORDER BY selection_order") == [("w02", "Y", 1), ("w03", "Y", 2), ("d09", "X", 3), ("d08", "X", 4)]
-    assert _rows(raw, "SELECT case_id FROM out_t WHERE etl_is_curr_ind = 'N'") == [("w04",)]
+    assert _rows(raw, "SELECT case_id, code, smpl_order_nbr, smpl_stratum_path FROM smpl_t WHERE etl_is_curr_ind = 'Y' "
+                      "ORDER BY smpl_order_nbr") == [("w02", "Y", 1, "Withdrawn"), ("w03", "Y", 2, "Withdrawn"),
+                                                     ("d09", "X", 3, "Denied"), ("d08", "X", 4, "Denied")]
+    assert _rows(raw, "SELECT case_id, etl_is_del_ind FROM smpl_t WHERE etl_is_curr_ind = 'N'") == [("w04", "Y")]
 
 
 def test_a_replaced_case_is_not_carried_over(raw, conn, settings):
