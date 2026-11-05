@@ -15,7 +15,7 @@ any answer: they become rows.
 | Q6 | Which rows a cycle samples: the latest framework batch (`BTCH_ID`), or a decision-date window (`DETRMTN_NOTFTN_DT`, stored as VARCHAR(10): its format?). How the 7–14 day reporting lag of the requirements applies **Decided 2026-10-30:** one framework `WKLY` batch per sample: PARAM `batch_id` = the latest batch of the sample's project / table / run type (`{project_cd}`, `{table_nm}`, `{run_ty}`) with every source closed, `Scope_Sql_Txt` `BTCH_ID = '{batch_id}'`, `run_key` `{batch_id}`. Needs `WKLY` added to ODAG1's sources in the framework (they list `DLY,MNT` only), and Q15. | `Scope_Sql_Txt`, a PARAM rule, `run_key` |
 | Q7 | The out-of-network share and how OON is identified **Answered 2026-11-04:** OON = `SVC_PROV_TY = 'Non par'` (the values are `PAr` and `Non par`; Teradata compares them without regard to case); at most 10 among the denials | a CAP rule (`Parent_Path_Txt` the denial bucket, `Max_Val` 10) |
 | Q8 | Do the functional-area shares apply only within denials? When there are too few cases: top up from other groups, or leave the sample short (and fail the task?) **Decided 2026-10-30:** `TOPUP`, `fail_on_shortfall` false (the shortfall is recorded, the run succeeds). The functional-area-within-denials part stays with Q2. | LEVEL `Parent_Path_Txt`, `Shortfall_Cd`, `fail_on_shortfall` |
-| Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation **Answered 2026-11-04:** the CPT code, at most 3 per code in the sample (a CAP rule, `PER_VALUE`, `Max_Val` 3); ODAG1 has no CPT code column yet (to be added). | `Diversity_Sql_Txt`, `Diversity_Cap_Cnt` |
+| Q9 | The code-variety rule: which code (procedure / diagnosis / service category), and a maximum per code or just rotation **Answered 2026-11-04:** the CPT code, at most 3 per code in the sample (a CAP rule, `PER_VALUE`, `Max_Val` 3); ODAG1 has no CPT code column yet (to be added). | CAP rule 261 |
 | Q10 | The target table's database and name (created by another process with the source's columns plus the sampling columns) **Decided 2026-11-04:** `EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1_Sample`; only ODAG1 is sampled (one sample, `UMCM` / `ODAG1` / `WKLY`); its rule IDs are 200–299 | `Tgt_Schema_Nm`, `Tgt_Table_Nm` |
 | Q11 | Scheduled (which day and time, Central), or started by a framework step (which one: EXPORT_LOAD, BATCH_CLOSE …)? Which framework table and status say a batch is ready to sample? How late can it be (retries × delay)? **Decided 2026-10-30:** started by hand (`schedule_interval` null); GATE `BATCH_CLOSED` refuses a batch with a source still open. | Variable `schedule_interval` / framework `trigger_dags`, `trigger_keys`, a GATE rule, `retries`, `retry_delay_minutes` |
 | Q12 | Does a case selected in one cycle stay out of later cycles, and for how long? Should last cycle's unselected cases go first? **Decided 2026-10-30:** EXCLUSION `PRIOR_SELECTION` 90 days and PRIORITY `PRIOR_CANDIDATE` 14 days (first), this sample only (`History_Scope_Cd` `SAMPLE`). | `PRIOR_SELECTION` exclusion, `PRIOR_CANDIDATE` priority |
@@ -56,8 +56,9 @@ their TODOs are answered, then `Active_Ind = 1` and `validate --project UMCM --t
 
 **Config:** `Project_Cd` `UMCM`, `Table_Nm` `ODAG1`, `Run_Ty` `WKLY`, `Src_Schema_Nm` `EXPORT_FEED_$ENV_T`,
 `Src_Table_Nm` `SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1`, `Key_Columns_Txt` `AUTHZN_ID, SRC_DATA_KEY`,
-`Scope_Sql_Txt` `SELECT * FROM <ODAG1> WHERE <CURRENT>`, `Target_Ty` `CNT`, `Target_Val` 150 (a percentage is
-possible: `PCT` with `Min_Target_Cnt` / `Max_Target_Cnt`), `RANKED`, `FLOOR`, no diversity (Q9), `TOPUP`, `Keep_Excluded_Ind`
+`Scope_Sql_Txt` `SELECT * FROM <ODAG1> WHERE <CURRENT>`, `Target_Ty` `CNT`, `Target_Val` 150 TODO confirm (a percentage is
+possible: `PCT` with `Min_Target_Cnt` / `Max_Target_Cnt`), `RANKED`, `FLOOR`, no `Diversity_Sql_Txt` (the 3 per CPT code
+limit is CAP 261), `TOPUP`, `Keep_Excluded_Ind`
 1, `Tgt_Schema_Nm` `EXPORT_FEED_$ENV_T`, `Tgt_Table_Nm` `SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1_Sample` (the target table, runbook 4.3).
 
 The PARAM and GATE rows use the sample's own `{project_cd}`, `{table_nm}` and `{run_ty}`, so with `Table_Nm` /
@@ -69,11 +70,13 @@ the same rows). The other rows are ODAG1 weekly only.
 | 201 | `*` / `*` | PARAM | 1 | `batch_id` | | `SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM HSABC_$ENV.ComplianceRequestControl WHERE Project_Cd = '{project_cd}' AND Table_Nm = '{table_nm}' AND Run_Ty = '{run_ty}' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches` |
 | 205 | `*` / `*` | GATE | 1 | `BATCH_CLOSED` | | `SELECT 1 FROM HSABC_$ENV.ComplianceRequestControl WHERE Btch_ID = '{batch_id}' AND Project_Cd = '{project_cd}' AND Table_Nm = '{table_nm}' AND Run_Ty = '{run_ty}' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1` |
 | 210 | `ODAG1` / `WKLY` | EXCLUSION | 0 | `SELECTED_IN_LAST_90_DAYS` | `PRIOR_SELECTION`, 90 days, `SAMPLE` | |
-| 211–213 | `ODAG1` / `WKLY` | EXCLUSION | 1–3 | `AUTO_APPROVED`, `NO_PA_REQUIRED`, `DIABETIC_SUPPLIES` | `QUERY` | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q4) |
+| 211–213 | `ODAG1` / `WKLY` | EXCLUSION | 1–3 | `AUTO_APPROVED`, `NO_PA_REQUIRED`, `DIABETIC_SUPPLIES` | `QUERY` | `SELECT o.AUTHZN_ID, o.SRC_DATA_KEY FROM <ODAG1> o JOIN` TODO(Q4) the SHRPA table `ON` the CPT code `WHERE <CURRENT> AND` TODO(Q4) its flag |
+| 214 | `ODAG1` / `WKLY` | EXCLUSION | 4 | `REVISION` | `QUERY` | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND RVSN_NBR <> '1'` |
 | 220 | `ODAG1` / `WKLY` | PRIORITY | 0 | `CARRY_OVER_14_DAYS` | `PRIOR_CANDIDATE`, 14 days, `SAMPLE` | |
-| 221 | `ODAG1` / `WKLY` | PRIORITY | 1 | `REVISION` | `QUERY` | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q3) |
-| 222 | `ODAG1` / `WKLY` | PRIORITY | 2 | `EXPEDITED` | `QUERY` | as 221, TODO(Q1) a condition on `AUTHZN_REQ_STD_OR_EXPDT_IND` |
+| 221 | `ODAG1` / `WKLY` | PRIORITY | 1 | `EXPEDITED` | `QUERY` | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND AUTHZN_REQ_STD_OR_EXPDT_IND = 'E'` |
 | 231 | `ODAG1` / `WKLY` | LEVEL | 1 | `determination` | level 0, parent `*`, `SKIP` | `SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REQ_DETRMTN_TY FROM <ODAG1> WHERE <CURRENT>` |
-| 232 | `ODAG1` / `WKLY` | BUCKET | 1 | TODO(Q1) the denial value | level 0, `REMAINDER` (other values and quotas TODO(Q1)) | |
-| 241 | `ODAG1` / `WKLY` | LEVEL | 1 | `functional_area` | level 1, parent TODO(Q8) the denial bucket, `SHARE` | (none: buckets select) |
+| 232–234 | `ODAG1` / `WKLY` | BUCKET | 1–3 | `Denied`, `Approved`, `Dismissed` | level 0, `Quota_Cd` / `Quota_Val` TODO(Q1) (and the 10 % withdrawals) | |
+| 241 | `ODAG1` / `WKLY` | LEVEL | 1 | `functional_area` | level 1, parent `Denied` TODO(Q2) confirm, `SHARE` | (none: buckets select) |
 | 242 | `ODAG1` / `WKLY` | BUCKET | 1 | TODO(Q2) one per area | level 1, `PCT` `Quota_Val` TODO(Q2) (or `CNT` cases) | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND` TODO(Q2) |
+| 260 | `ODAG1` / `WKLY` | CAP | 2 | `OON_DENIALS` | `QUERY`, parent `Denied`, `CNT` 10 | `SELECT AUTHZN_ID, SRC_DATA_KEY FROM <ODAG1> WHERE <CURRENT> AND SVC_PROV_TY = 'Non par'` |
+| 261 | `ODAG1` / `WKLY` | CAP | 1 | `PER_CPT_CODE` | `PER_VALUE`, parent `*`, `CNT` 3 | `SELECT AUTHZN_ID, SRC_DATA_KEY,` TODO(Q9) the CPT code column `FROM <ODAG1> WHERE <CURRENT>` |
