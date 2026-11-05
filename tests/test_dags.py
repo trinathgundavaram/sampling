@@ -224,6 +224,7 @@ def test_unknown_scope_and_missing_meta_db_fail_without_retry(monkeypatch, varia
 def test_as_of_and_run_params_from_a_trigger(monkeypatch, variable, raw):
     build_source(raw.db)
     um_config(raw.db)
+    variable({**BASE, "trigger_keys": ["as_of", "run_params", "dry_run"]})
     report = _run_task(monkeypatch, raw, {"as_of": "2026-09-01", "run_params": '{"batch_id": "2026-08-01"}',
                                           "dry_run": "true"})
     run = report["runs"][0]
@@ -234,7 +235,7 @@ def test_as_of_and_run_params_from_a_trigger(monkeypatch, variable, raw):
 
 
 def test_extra_filters_add_up_across_the_layers(variable):
-    variable({**BASE, "extra_filters": "ETL_IS_CURR_IND = 'Y'",
+    variable({**BASE, "extra_filters": "ETL_IS_CURR_IND = 'Y'", "trigger_keys": ["extra_filters"],
               "runs": [{"table": "T5", "extra_filters": ["SRC = 'A'", "X = 1 OR Y = 2"]}]})
     config = dags.resolve_config(VAR_KEY, {"extra_filters": "BTCH_ID = 'B42'"}, 0)
     assert config["extra_filters"] == "(ETL_IS_CURR_IND = 'Y') AND (SRC = 'A') AND (X = 1 OR Y = 2) AND (BTCH_ID = 'B42')"
@@ -258,3 +259,13 @@ def test_an_unknown_log_level_fails_without_retry(monkeypatch, variable, raw):
     from airflow.sdk.exceptions import AirflowFailException
     with pytest.raises(AirflowFailException, match="log_level"):
         _run_task(monkeypatch, raw, {"log_level": "LOUD"})
+
+
+def test_a_trigger_sets_sql_text_only_when_the_variable_allows_it(variable):
+    variable({**BASE, "extra_filters": "A = 1"})
+    config = dags.resolve_config(VAR_KEY, {"extra_filters": "1=1 OR B = 2", "run_params": '{"batch_id": "X"}',
+                                           "run_key": "rk"})
+    assert config["extra_filters"] == "A = 1" and config["run_params"] == {"batch_id": "2026-08-01"}
+    assert config["run_key"] == "rk"
+    variable({**BASE, "trigger_keys": ["run_params"]})
+    assert dags.resolve_config(VAR_KEY, {"run_params": '{"batch_id": "X"}'})["run_params"] == '{"batch_id": "X"}'

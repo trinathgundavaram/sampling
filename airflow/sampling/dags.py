@@ -35,6 +35,8 @@ TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("project", "table", "run_type")
 RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "dry_run")
 TRIGGER_KEYS = (*SCOPE_KEYS, *RUN_KEYS, "log_level")
+SQL_TRIGGER_KEYS = ("run_params", "extra_filters")
+DEFAULT_TRIGGER_KEYS = tuple(k for k in TRIGGER_KEYS if k not in SQL_TRIGGER_KEYS)
 PASSED_ON = ("project", "table", "run_type", "run_key", "as_of")
 SETTINGS_KEYS = ("meta_db", "load_env", "environment", "env_value", "timezone", "chunk_rows", "access_lock")
 DEFAULT_TIMEOUT = timedelta(hours=2)
@@ -148,7 +150,7 @@ def conf_value(dag_run, params, key: str):
 def allowed_trigger_keys(variable: dict) -> tuple:
     names = variable.get("trigger_keys")
     if names in (None, "", []):
-        return TRIGGER_KEYS
+        return DEFAULT_TRIGGER_KEYS
     names = [str(n).strip().lower() for n in (names if isinstance(names, list) else str(names).split(","))]
     unknown = sorted(set(names) - set(TRIGGER_KEYS))
     if unknown:
@@ -163,7 +165,7 @@ def _list(value) -> list:
     return [str(v).strip().lower() for v in items if str(v).strip()]
 
 
-def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS, quiet: tuple = ()) -> dict:
+def trigger_values(given: Optional[dict], allowed: tuple = DEFAULT_TRIGGER_KEYS, quiet: tuple = ()) -> dict:
     out, ignored = {}, []
     for key, value in _keys(given).items():
         if value in (None, "", []):

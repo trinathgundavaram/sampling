@@ -39,6 +39,7 @@ tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests 
 | [OPERATIONAL_RUNBOOK.md](airflow_resources/docs/OPERATIONAL_RUNBOOK.md) | Every table and code, recipes, support procedures |
 | [AIRFLOW_DEPLOYMENT.md](airflow_resources/docs/AIRFLOW_DEPLOYMENT.md) | Deploying the DAG: Connection, Variable, triggers |
 | [OPEN_ITEMS.md](airflow_resources/docs/OPEN_ITEMS.md) | Questions open for the ODAG1 configuration, checks before production |
+| [diagrams/](airflow_resources/docs/diagrams/sampling.drawio) | draw.io architecture and flow diagrams, PNGs in `diagrams/png/` (runbook section 13) |
 
 Tests:
 

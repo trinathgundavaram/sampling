@@ -25,6 +25,7 @@ airflow_resources/                          (not deployed with the DAGs)
   docs/AIRFLOW_DEPLOYMENT.md                this guide
   docs/OPERATIONAL_RUNBOOK.md               tables, values, procedures, monitoring
   docs/OPEN_ITEMS.md                        what is still open
+  docs/diagrams/                            draw.io architecture and flow diagrams (+ png)
   examples/umcm_dev/                        the Variable (file name = Variable name), DEV
   requirements.txt                          Python packages for the workers
 
@@ -151,7 +152,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, target table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `table`, `run_type`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
-| `trigger_keys` | Optional list of the keys a trigger may set (default: all of `project`, `table`, `run_type`, `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level`). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
+| `trigger_keys` | Optional list of the keys a trigger may set (default: `project`, `table`, `run_type`, `run_key`, `seed`, `as_of`, `dry_run`, `log_level`; `run_params` and `extra_filters` reach the SQL, so a trigger sets them only when listed here). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
 | `snow_assignment_group` | ServiceNow assignment group of the failure ticket |
 | `owner`, `tags`, `pool` | As usual |
 
@@ -315,7 +316,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (144 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (162 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

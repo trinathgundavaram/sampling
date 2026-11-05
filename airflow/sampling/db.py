@@ -187,6 +187,10 @@ class Connection:
 _TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)\b")
 
 
+_LITERAL = re.compile(r"'(?:[^']|'')*'")
+_BARE_VALUE = re.compile(r"^[A-Za-z0-9_.:-]*$")
+
+
 def _escape_literal(value) -> str:
     return str(value if value is not None else "").replace("'", "''")
 
@@ -194,29 +198,48 @@ def _escape_literal(value) -> str:
 def substitute_params(sql: Optional[str], params: dict, escape: bool = True) -> Optional[str]:
     if not sql:
         return sql
-    params = params or {}
-    lowered = {str(k).lower(): v for k, v in params.items()}
-
-    def _replace(m):
-        key = (m.group(1) or m.group(2)).lower()
-        if key not in lowered:
-            return m.group(0)
-        return _escape_literal(lowered[key]) if escape else str(lowered[key] if lowered[key] is not None else "")
-
-    resolved = _TOKEN_RE.sub(_replace, sql)
-    missing = sorted({a or b for a, b in _TOKEN_RE.findall(resolved)})
+    lowered = {str(k).lower(): v for k, v in (params or {}).items()}
+    missing = sorted({(a or b) for a, b in _TOKEN_RE.findall(sql) if (a or b).lower() not in lowered})
     if missing:
         raise ValueError(f"no value for parameter(s) {missing} in the SQL; run_params given: {sorted(lowered)}")
-    return resolved
+
+    def text(value) -> str:
+        return str(value if value is not None else "")
+
+    if not escape:
+        return _TOKEN_RE.sub(lambda m: text(lowered[(m.group(1) or m.group(2)).lower()]), sql)
+
+    def quoted(m):
+        return _escape_literal(lowered[(m.group(1) or m.group(2)).lower()])
+
+    def bare(m):
+        name = m.group(1) or m.group(2)
+        value = text(lowered[name.lower()])
+        if not _BARE_VALUE.match(value):
+            raise ValueError(f"parameter {name} is outside quotes in the SQL, so its value may only be a number, a "
+                             f"date or a name (letters, digits, _ . : -); quote it in the SQL to use any text")
+        return value
+
+    out, at = [], 0
+    for m in _LITERAL.finditer(sql):
+        out.append(_TOKEN_RE.sub(bare, sql[at:m.start()]))
+        out.append(_TOKEN_RE.sub(quoted, m.group(0)))
+        at = m.end()
+    out.append(_TOKEN_RE.sub(bare, sql[at:]))
+    return "".join(out)
+
+
+RUN_ID_MAX = 250
 
 
 def generate_run_id(*label_parts, timestamp: Optional[datetime] = None) -> str:
     ts = (timestamp or datetime.now()).strftime("%Y%m%dT%H%M%S.%f")
-    labels = [str(p) for p in label_parts if p not in (None, "")]
-    run_id = "::".join([*labels, ts, secrets.token_hex(3)])
-    if len(run_id) > 250:
-        log.warning("run id is %d characters, over the VARCHAR(250) columns that hold it: %s", len(run_id), labels)
-    return run_id
+    labels = "::".join(str(p) for p in label_parts if p not in (None, ""))
+    suffix = f"{ts}::{secrets.token_hex(3)}"
+    room = RUN_ID_MAX - len(suffix) - 2
+    if len(labels) > room:
+        labels = labels[:room]
+    return f"{labels}::{suffix}" if labels else suffix
 
 
 _DATABASE_ERROR = re.compile(r"\[Teradata Database\] \[Error (\d+)\].*")

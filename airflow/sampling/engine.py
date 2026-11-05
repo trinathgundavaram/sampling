@@ -62,11 +62,13 @@ _USED = {"PARAM": {"rule_sql_txt"},
                     "max_val"},
          "CAP": {"rule_ty", "rule_sql_txt", "parent_path_txt", "max_ty", "max_val"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
-_STATEMENT_WORDS = ("INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "DROP", "CREATE", "ALTER",
+_STATEMENT_WORDS = ("INSERT", "INS", "UPDATE", "UPD", "DELETE", "DEL", "MERGE", "UPSERT", "REPLACE", "DROP",
+                    "CREATE", "ALTER",
                     "RENAME", "MODIFY", "GRANT", "REVOKE", "CALL", "EXEC", "EXECUTE", "COLLECT", "COMMENT",
                     "COMMIT", "ROLLBACK", "ABORT", "BEGIN TRANSACTION", "END TRANSACTION", "SET SESSION",
                     "SET QUERY_BAND")
 _STATEMENT_RE = re.compile(r"\b(" + "|".join(w.replace(" ", r"\s+") for w in _STATEMENT_WORDS) + r")\b", re.I)
+_LOCK_FOR_WRITE = re.compile(r"\bLOCK(ING)?\b.*?\bFOR\s+(WRITE|EXCLUSIVE|EXCL|LOAD)\b", re.I | re.S)
 _QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|/\*.*?\*/", re.S)
 _SELECT_START = re.compile(r"^\s*(LOCKING\s+.*?\s+FOR\s+ACCESS\s+)?\(*\s*(SELECT|SEL|WITH)\b", re.I | re.S)
 _CONFIG_SQL = ("scope_sql_txt", "diversity_sql_txt")
@@ -76,6 +78,8 @@ DIVERSITY_RULE = {"rule_id": "div", "rule_class_cd": "DIVERSITY", "rule_nm": "Di
 DIVERSITY = "smp_r_div"
 SCOPE_ALIAS = "smp_scope"
 EXTRA_FILTERS = "extra_filters"
+RUN_KEY_MAX, RUN_PARAMS_MAX, USER_MAX = 250, 4000, 100
+BUILT_IN_PARAMS = {"as_of_date", "project_cd", "table_nm", "run_ty", "run_key", EXTRA_FILTERS}
 
 
 def _up(value, default: str = "") -> str:
@@ -228,6 +232,10 @@ def config_problems(sample: Sample) -> list:
     if str(c.get("diversity_sql_txt") or "").strip() and method == "SYSTEMATIC":
         problems.append("diversity_sql_txt cannot be combined with SYSTEMATIC (it steps through a fixed order)")
 
+    for p in sample.params:
+        if str(p.get("rule_nm") or "").lower() in BUILT_IN_PARAMS:
+            problems.append(f"PARAM rule {p.get('rule_nm')}: the name is set by the engine "
+                            f"({', '.join(sorted(BUILT_IN_PARAMS))})")
     for r in sample.stray:
         if r["rule_class_cd"] == "BUCKET":
             problems.append(f"rule {r['rule_id']}: BUCKET of level_nbr {r.get('level_nbr')}, which has no LEVEL")
@@ -386,6 +394,8 @@ def sql_problems(text, what: str, select: bool = False) -> list:
     if bare.count("'") or bare.count('"') or "/*" in bare:
         out.append(f"{what}: a quote or /* comment is not closed")
     words = sorted({re.sub(r"\s+", " ", m.group(1)).upper() for m in _STATEMENT_RE.finditer(bare)})
+    if _LOCK_FOR_WRITE.search(bare):
+        words = sorted({*words, "LOCKING FOR WRITE"})
     if words:
         out.append(f"{what}: only reading SQL is allowed, found {', '.join(words)}")
     if ";" in bare:
@@ -568,7 +578,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
                         raise ConfigError(f"returns {len(extra)} columns besides the key_columns, it needs one: the "
                                           f"value ({', '.join(extra) or 'none'})")
                     if key in found:
-                        raise ConfigError(f"returns the case {key} more than once")
+                        raise ConfigError("returns a case more than once")
                     found[key] = r[extra[0]]
                 else:
                     found[key] = 1
@@ -585,11 +595,16 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
 
 def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
     project, table, run_type = sample.key
-    params = {"as_of_date": as_of.isoformat(), "project_cd": project, "table_nm": table, "run_ty": run_type,
-              **(given or {})}
     given_names = {str(k).lower() for k in (given or {})}
+    reserved = sorted(given_names & BUILT_IN_PARAMS)
+    if reserved:
+        raise ValueError(f"run_params {reserved} are set by the engine and cannot be passed with the run")
+    params = {**(given or {}), "as_of_date": as_of.isoformat(), "project_cd": project, "table_nm": table,
+              "run_ty": run_type}
     for p in sample.params:
         name = str(p["rule_nm"])
+        if name.lower() in BUILT_IN_PARAMS:
+            raise ValueError(f"PARAM rule {name}: {name.lower()} is set by the engine, give the rule another name")
         if name.lower() in given_names:
             continue
         text = substitute_params(s.resolve_env(_text(p), identifier=False), params)
@@ -1013,13 +1028,13 @@ def current_run(conn: Connection, s: Settings, key, run_key: str) -> Optional[di
     return rows[0] if rows else None
 
 
-def _start_run(conn, s, run_id, run_key, sample: Sample, seed, as_of, params, triggered_by, started,
+def _start_run(conn, s, run_id, run_key, sample: Sample, seed, as_of, params_text, triggered_by, started,
                override_reason=None):
     config, now = sample.config, s.now()
     columns = ["Smpl_Run_ID", "Project_Cd", "Table_Nm", "Run_Ty", "Run_Key", "As_Of_Dt_Key", "Run_Stat", "Curr_Ind",
                "Random_Seed_Nbr", "Run_Parm_Txt", "Config_Hash", "Override_Rsn_Txt", "Triggered_By", "Start_Dtts",
                *_RUN_CONFIG_COLUMNS, "Load_Dtts", "LastUpdt_Dtts"]
-    values = [run_id, *sample.key, run_key, as_of, "RUNNING", 0, seed, json.dumps(params, default=str)[:4000],
+    values = [run_id, *sample.key, run_key, as_of, "RUNNING", 0, seed, params_text,
               sample.config_hash, override_reason, triggered_by, started,
               *(config.get(c) for c in _RUN_CONFIG_COLUMNS), now, now]
     conn.execute(f"INSERT INTO {s.meta_db}.GOVT_RGLTRY_SamplingRun ({', '.join(columns)}) "
@@ -1069,7 +1084,8 @@ def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) 
             out[case_key(r, keys)] = r
     missing = [r["_key"] for r in chosen if r["_key"] not in out]
     if missing:
-        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the target table, e.g. {missing[0]}")
+        raise RuntimeError(f"{len(missing)} selected case(s) not found again for the target table (the source "
+                           f"changed since the pull?)")
     return out
 
 
@@ -1099,10 +1115,19 @@ def _write_output(conn, s, queries, run_id, run_key, run_type, as_of, output: di
                      [row(*case) for case in cases], s.chunk_rows)
 
 
+class FinalizedMeanwhile(ConfigError):
+    pass
+
+
 def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, output,
-             as_of: date) -> int:
+             as_of: date, forced: bool = False) -> int:
     now = s.now()
     c, key = sample.config, sample.key
+    live = None if forced else current_run(conn, s, key, run_key)
+    if live and _up(live.get("run_stat")) == "FINAL":
+        raise FinalizedMeanwhile(f"the sample of run_key {run_key} was finalised while this run was selecting (run "
+                                 f"{live['smpl_run_id']}, by {live.get('finalized_by')}): rerun with a force reason "
+                                 f"to replace it")
     order = {r["_key"]: i + 1 for i, r in enumerate(chosen)}
     rows = [[run_id, *key, run_key, as_of, r["_key"], r["_order"] + 1,
              1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"),
@@ -1178,9 +1203,19 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         early, params = ("technical", "PARAM_FAILURE", e), dict(run_params or {})
     if early:
         run_key = template if "{" not in template and "$" not in template else as_of.isoformat()
+    if len(run_key) > RUN_KEY_MAX:
+        early = early or ("config", "CONFIG_ERROR", f"run_key is {len(run_key)} characters, over the {RUN_KEY_MAX} "
+                                                    f"Run_Key holds")
+        run_key = run_key[:RUN_KEY_MAX]
     params["run_key"] = run_key
     if str(extra_filters or "").strip():
         params[EXTRA_FILTERS] = str(extra_filters).strip()
+    params_text = json.dumps(params, default=str)
+    if len(params_text) > RUN_PARAMS_MAX:
+        early = early or ("config", "CONFIG_ERROR", f"the run parameters are {len(params_text)} characters as JSON, "
+                                                    f"over the {RUN_PARAMS_MAX} Run_Parm_Txt holds")
+        params_text = None
+    triggered_by = str(triggered_by or "SYSTEM")[:USER_MAX]
 
     label = sample.label
     attempt = 0 if dry_run else count_prior_attempts(conn, s, sample.key, run_key)
@@ -1212,12 +1247,15 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                 log.error("%s | %s | could not close the run row %s: %s", STEP, label, run_id, error_text(e))
         return summary
 
-    final = None if early else current_run(conn, s, sample.key, run_key)
-    final = final if final and _up(final.get("run_stat")) == "FINAL" else None
-    force_reason = str(force_reason or "").strip() or None
-    if not dry_run:
-        _start_run(conn, s, run_id, run_key, sample, run_seed, as_of, params, triggered_by, started,
-                   force_reason if final else None)
+    force_reason = str(force_reason or "").strip()[:1000] or None
+    try:
+        final = None if early else current_run(conn, s, sample.key, run_key)
+        final = final if final and _up(final.get("run_stat")) == "FINAL" else None
+        if not dry_run:
+            _start_run(conn, s, run_id, run_key, sample, run_seed, as_of, params_text, triggered_by, started,
+                       force_reason if final else None)
+    except Exception as e:  # noqa: BLE001
+        return fail("technical", "START_FAILURE", e, exc_info=True)
     if early:
         return fail(early[0], early[1], early[2])
     if final:
@@ -1328,8 +1366,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         with conn.transaction():
             summary["retired_runs"] = _persist(conn, s, run_id, run_key, sample, queries, candidates, excluded,
-                                               chosen, output, as_of)
+                                               chosen, output, as_of, forced=bool(force_reason))
             _finish_run(conn, s, run_id, summary)
+    except FinalizedMeanwhile as e:
+        return fail("config", "FINALIZED", str(e))
     except Exception as e:  # noqa: BLE001
         return fail("technical", "PERSIST_FAILURE", e, exc_info=True)
 
@@ -1347,10 +1387,14 @@ def finalize_run(conn: Connection, s: Settings, key, run_key: str, by: str) -> d
         raise ConfigError(f"{'.'.join(key)} has no current sample for run_key {run_key!r}")
     if _up(run["run_stat"]) == "FINAL":
         raise ConfigError(f"run {run['smpl_run_id']} is already final (by {run.get('finalized_by')})")
-    conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun SET Run_Stat = 'FINAL', Finalized_By = ?, "
-                 f"Finalized_Dtts = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
-                 f"WHERE Smpl_Run_ID = ? AND Run_Stat = 'COMPLETED'",
-                 [by, s.now(), s.now(), run["smpl_run_id"]])
+    by = str(by or "")[:USER_MAX]
+    done = conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun SET Run_Stat = 'FINAL', Finalized_By = ?, "
+                        f"Finalized_Dtts = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
+                        f"WHERE Smpl_Run_ID = ? AND Run_Stat = 'COMPLETED' AND Curr_Ind = 1",
+                        [by, s.now(), s.now(), run["smpl_run_id"]])
+    if done == 0:
+        raise ConfigError(f"run {run['smpl_run_id']} is no longer the current COMPLETED sample of run_key "
+                          f"{run_key!r} (a rerun replaced it meanwhile): check and finalise again")
     log.info("FINALIZE | %s | run_key %s | run %s finalised by %s", ".".join(key), run_key, run["smpl_run_id"], by)
     return {"smpl_run_id": run["smpl_run_id"], "project_cd": key[0], "table_nm": key[1], "run_ty": key[2],
             "run_key": run_key, "status": "FINAL", "finalized_by": by}
@@ -1367,6 +1411,28 @@ def parse_case_key(text: str, keys: list) -> dict:
             raise ConfigError(f"case_key {text!r}: expected column {column}, found {name}")
         out[column.lower()] = None if value == NULL_BUCKET else value
     return out
+
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}:\d{2}(\.\d+)?)?$")
+
+
+def _typed_keys(conn: Connection, queries: dict, sample: Sample, rows: list) -> list:
+    looks = [k for k in sample.keys if any(isinstance(r.get(k.lower()), str) and _ISO_DATE.match(r[k.lower()])
+                                           for r in rows)]
+    if not looks:
+        return rows
+    probe = conn.query(f"SELECT TOP 1 {', '.join(looks)} {queries['scope']}")
+    if not probe:
+        return rows
+    for k in looks:
+        kind = probe[0].get(k.lower())
+        convert = datetime.fromisoformat if isinstance(kind, datetime) else \
+            date.fromisoformat if isinstance(kind, date) else None
+        if convert:
+            for r in rows:
+                if isinstance(r.get(k.lower()), str) and _ISO_DATE.match(r[k.lower()]):
+                    r[k.lower()] = convert(r[k.lower()])
+    return rows
 
 
 def run_sample(conn: Connection, s: Settings, run: dict) -> Sample:
@@ -1404,13 +1470,15 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
     else:
         new = pool[0]
 
-    output = queries = sample = None
+    output = queries = sample = gone = None
     if _text(run, "tgt_table_nm"):
         sample = run_sample(conn, s, run)
         params = json.loads(run.get("run_parm_txt") or "{}")
         queries = build_queries(sample, s, params)
         queries["output_columns"] = target_table_columns(conn, queries, sample)
         row = {**parse_case_key(new["case_key"], sample.keys), "_key": new["case_key"]}
+        gone = parse_case_key(old["case_key"], sample.keys)
+        _typed_keys(conn, queries, sample, [row, gone])
         output = fetch_output(conn, queries, sample, [row])
 
     now = s.now()
@@ -1427,7 +1495,7 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
         if output is not None:
             where = []
             _retire_output(conn, queries, run_key, now,
-                           _key_condition(sample.keys, parse_case_key(old["case_key"], sample.keys), where), where)
+                           _key_condition(sample.keys, gone, where), where)
             _write_output(conn, s, queries, run_id, run_key, key[2], run.get("as_of_dt_key"), output,
                           [(new["case_key"], old["selection_order_nbr"], new["stratum_path_txt"])], now)
         conn.execute(f"UPDATE {db}.GOVT_RGLTRY_SamplingRun SET LastUpdt_Dtts = ?, LastUpdt_ID = USER "
@@ -1467,11 +1535,14 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
         raise ConfigError(f"no active GOVT_RGLTRY_SamplingConfig matches {scope}")
     runs = []
     for key in keys:
+        failed = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "status": "ERROR"}
         try:
             runs.append(run_sampling(conn, s, key, **kwargs))
         except ConfigError as e:
-            runs.append({"project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "status": "ERROR",
-                         "error_kind": "config", "error_type": "CONFIG_ERROR", "error": str(e)})
+            runs.append({**failed, "error_kind": "config", "error_type": "CONFIG_ERROR", "error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            log.error("%s | %s | START_FAILURE: %s", STEP, ".".join(key), error_text(e), exc_info=True)
+            runs.append({**failed, "error_kind": "technical", "error_type": "START_FAILURE", "error": error_text(e)})
     failed = [r for r in runs if r.get("status") != "COMPLETED"]
     result = "ALL SAMPLES COMPLETED" if not failed else f"{len(failed)} OF {len(runs)} SAMPLE(S) FAILED"
     return {"result": result, "scope": scope, "runs": runs, "failed": len(failed)}

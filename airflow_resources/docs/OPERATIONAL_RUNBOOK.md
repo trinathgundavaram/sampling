@@ -18,6 +18,7 @@ How to deploy is in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md). What is stil
 10. [Monitoring and support procedures](#10-monitoring-and-support-procedures)
 11. [First run on DEV (checklist)](#11-first-run-on-dev-checklist)
 12. [Retention](#12-retention)
+13. [Diagrams](#13-diagrams)
 
 ---
 
@@ -43,7 +44,8 @@ All of that is **configuration rows holding SQL**: one config row per sample and
 name and no value is in the code. A new sample, or a changed mix, is new rows, not a release.
 
 Every run is recorded: what was in scope, what was excluded and why, every candidate's group and rank, what was
-selected, the counts per rule and per group, the outcome, and **the exact configuration and rules it used** (with a
+selected (counts per rule and per group are a `GROUP BY` on these rows), the outcome, and **the exact configuration
+and rules it used** (with a
 hash, so two runs made by the same rules are recognisable). A rerun of the same cycle replaces the earlier sample as
 the current one; nothing is ever deleted.
 
@@ -91,7 +93,7 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 |---|---|---|
 | `GOVT_RGLTRY_SamplingConfig` | One row per sample (project + table + run type) | you |
 | `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, CAP; of one sample, or shared (`*`) | you |
-| `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, counts per rule and bucket, the configuration it used | engine |
+| `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, the configuration it used | engine |
 | `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
 | *`Tgt_Schema_Nm`.`Tgt_Table_Nm`* | The target table: the selected cases' source rows (optional, one per sample, created by another process, [4.3](#43-the-target-table)) | engine |
@@ -394,7 +396,7 @@ and counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `GOVT_RGLTRY_SamplingRun.Run_Stat` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
-| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` (technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
 | `GOVT_RGLTRY_SampleSelection.Selection_Stat` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
@@ -404,7 +406,8 @@ and counts per bucket, are a `GROUP BY` on it.
 | `{as_of_date}` | The run's business date `YYYY-MM-DD` |
 | `{run_key}` | The run key |
 | `{project_cd}`, `{table_nm}`, `{run_ty}` | The sample's project, table and run type (upper case) |
-| `{name}` / `$name` | A `run_params` value or a PARAM rule |
+| `{name}` / `$name` | A `run_params` value or a PARAM rule. Inside quotes (`'{batch_id}'`) any value is safe (quotes are doubled). Outside quotes (`n < {top}`) the value may only be a number, a date or a name (letters, digits, `_ . : -`), else the run is a `CONFIG_ERROR` |
+| Reserved | `as_of_date`, `project_cd`, `table_nm`, `run_ty`, `run_key`, `extra_filters` are set by the engine: a `run_params` value or a PARAM rule of that name is a `CONFIG_ERROR` |
 
 ### 6.4a Dates held as text
 
@@ -471,8 +474,8 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
   "Started by the GOVT_RGLTRY framework").
 - **Auditors** get `sample_ready_email` (counts, run key, target table, rules hash) with `notify_recipients`.
 - **Triggering** (UI "Trigger DAG w/ config", CLI, REST, or an upstream DAG): `project`, `table`, `run_type`,
-  `run_key`, `run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level` (`run` on a timed DAG) – limited by the Variable's
-  `trigger_keys` when set. The database, the Connection and the environment are never taken from a trigger.
+  `run_key`, `seed`, `as_of`, `dry_run`, `log_level` (`run` on a timed DAG); `run_params` and `extra_filters` (they reach
+  the SQL) only when the Variable's `trigger_keys` lists them. `trigger_keys`, when set, limits all of them. The database, the Connection and the environment are never taken from a trigger.
 
 ```bash
 airflow dags trigger GOVT_RGLTRY_UMCM_SAMPLING -c '{"run_key": "{batch_id}", "dry_run": true}'
@@ -569,7 +572,8 @@ to change one run type only, add a row for it with the same `Rule_Nm`.
 
 ### 10.8 Finalise a sample
 When the auditors start on a cycle: `finalize --project P --table T --run-type R --run-key K`. From then on a run of that run key, by the
-DAG or by hand, fails as `FINALIZED` (no retry) and the final sample stays current. To replace it anyway (e.g. the
+DAG or by hand, fails as `FINALIZED` (no retry) and the final sample stays current; so does a run that was
+already selecting when the sample was finalised. To replace it anyway (e.g. the
 rules were wrong), with sign-off: `run --project P --table T --run-type R --run-key K --force-reason "<why,
 approved by whom>"` – the reason is stored on the new run row (`Override_Rsn_Txt`), and the final run stays
 recorded with `Curr_Ind = 0`. A force is only
@@ -611,8 +615,8 @@ sample of the scope, for runs whose as-of date (`As_Of_Dt_Key`) is more than D d
 | newer than D days | none |
 
 The selected, `REPLACED` and `REPLACEMENT` rows of current runs stay, so the sample of every cycle, the cases
-taken out and why stay readable, and no-repeat rules keep working. The run rows (with each run's rules, counts per
-bucket and hash) are never deleted. Not touched: the target tables.
+taken out and why stay readable, and no-repeat rules keep working. The run rows (with each run's totals, rules and
+hash) are never deleted. Not touched: the target tables.
 
 D must be at least the longest `Lookback_Days` of the active history rules that may read the sample's rows (the
 `SAMPLE`-scope rules of its table and run type, the `TABLE`-scope rules of its table, the `PROJECT`-scope rules of
@@ -623,3 +627,21 @@ candidates of its run: replace before the run is older than D.
 Without `--apply` only the counts are shown. In Airflow, the Variable's `retention_days` adds a
 `purge_selections` task after the runs (it applies). How long the candidate rows must be kept is a records
 retention decision (OPEN_ITEMS.md Q14): until it is made, leave `retention_days` out.
+
+---
+
+## 13. Diagrams
+
+The draw.io source is [diagrams/sampling.drawio](diagrams/sampling.drawio) (every page); each page is also in
+`diagrams/pages/` and exported as a PNG in `diagrams/png/`. Open them in draw.io (desktop or app.diagrams.net).
+
+| Page | What it shows | Runbook sections | Files |
+|---|---|---|---|
+| 01 | Architecture: Airflow DAG and local CLI, one engine, Teradata tables, source and target | 2, 3, 8, 9 | [png](diagrams/png/01_architecture.png) · [drawio](diagrams/pages/01_architecture.drawio) |
+| 02 | A DAG run: checks, run_scope, how a task ends (retry, fail, incident, emails) | 2, 8, 10 | [png](diagrams/png/02_dag_run_and_result.png) · [drawio](diagrams/pages/02_dag_run_and_result.drawio) |
+| 03 | One sample end to end: params, gate, pull, exclusions, priority, select, persist | 2 | [png](diagrams/png/03_one_run.png) · [drawio](diagrams/pages/03_one_run.drawio) |
+| 04 | Levels and buckets: quotas, water-filling, unlisted values, priority order | 2, 4 | [png](diagrams/png/04_stratify_and_select.png) · [drawio](diagrams/pages/04_stratify_and_select.drawio) |
+| 05 | CAP rules, replacements within caps, top-up and shortfall | 2, 4 | [png](diagrams/png/05_caps_and_top_up.png) · [drawio](diagrams/pages/05_caps_and_top_up.drawio) |
+| 06 | Finalise, replace a case, rerun a cycle, purge | 10.6–10.9, 12 | [png](diagrams/png/06_after_a_run.png) · [drawio](diagrams/pages/06_after_a_run.drawio) |
+| 07 | Run_Stat and Curr_Ind of a run row | 5, 6.3 | [png](diagrams/png/07_run_lifecycle.png) · [drawio](diagrams/pages/07_run_lifecycle.drawio) |
+| 08 | The five tables and the target table: who fills them and how they join | 3–5 | [png](diagrams/png/08_tables.png) · [drawio](diagrams/pages/08_tables.drawio) |
