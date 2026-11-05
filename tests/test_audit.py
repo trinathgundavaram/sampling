@@ -150,7 +150,7 @@ def test_cli_finalize_replace_and_force(raw, conn, monkeypatch, tmp_path, capsys
     monkeypatch.setenv("SAMPLING_ACCESS_LOCK", "false")
     monkeypatch.setenv("SAMPLING_ENV_FILE", "does-not-exist.env")
     monkeypatch.setenv("SAMPLING_LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     _sample(raw.db)
     base = ["--project", "umcm", "--table", "t1", "--run-type", "wkly", "--run-key", "K1"]

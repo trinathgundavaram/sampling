@@ -45,8 +45,8 @@ local/                                      the local version (command line, dev
    | `GOVT_RGLTRY_UMCM_SAMPLING` | `govt_rgltry_umcm_sampling_config_var` | `govt_rgltry_umcm_sampling.py` |
 
 2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. The
-   bridge reads it with `BaseHook.get_connection` and exports it as `TERADATA_HOST` / `TERADATA_USER` /
-   `TERADATA_PASSWORD` / `TERADATA_LOGMECH`; the engine opens one Teradata
+   bridge reads it with `BaseHook.get_connection` and passes host, login, password and logmech straight to the
+   connection (they are not put in the environment); the engine opens one Teradata
    session and uses it for the metadata tables and for the source tables (`Src_Schema_Nm` / `Src_Table_Nm` of the
    configuration rows, so they may sit in any database that login can read).
 3. **A task runs one sampling scope** in-process: every active sample of a `project`, optionally only one `table`
@@ -86,8 +86,8 @@ times (daily, weekly, monthly: see [Timed runs](#timed-runs)).
 
 **Teradata** - read with `BaseHook.get_connection`: the Connection named by the Variable's `connection_id`
 (falls back to the framework's `td_conn_var`, then `govt_rgltry_teradata`). `connection_type`, when given, must be `teradata` (the only one: the engine reads and writes Teradata).
-Host, login and password become `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD`; extra `logmech` becomes
-`TERADATA_LOGMECH` (else that variable, else LDAP). The password is never logged.
+Host, login and password are passed to the Teradata connection directly, never through the environment; extra
+`logmech` is the logon mechanism (else `TERADATA_LOGMECH`, else LDAP). The password is never logged.
 
 | Field | Value |
 |---|---|
@@ -142,7 +142,9 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `timezone` | Business time zone for the as-of date and the timestamps written (default `America/Chicago`) |
 | `log_level` | `INFO` (default) or `DEBUG` (adds every SQL statement's text and row count; never data) |
 | `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried. A GATE rule not met (`GATE_NOT_MET`, the data is not ready) is retried the same way |
-| `retry_delay_minutes` | Minutes between retries (default 5). With GATE rules, `retries` × `retry_delay_minutes` is how long a run waits for the data |
+| `retry_delay_minutes` | Minutes between retries (default 5). With GATE rules and no `gate_wait_minutes`, `retries` × `retry_delay_minutes` is how long a run waits for the data |
+| `gate_wait_minutes` | Optional. Adds a `wait_for_gates` sensor before the runs: it checks every sample's GATE rules every `gate_poke_minutes` (default 15) and frees the worker in between, for up to this many minutes; then it fails (fail_email, incident). The runs start once every gate is met, so `retries` stay for technical failures. Not used on a DAG with timed runs |
+| `gate_poke_minutes` | Minutes between gate checks of `wait_for_gates` (default 15) |
 | `execution_timeout_minutes` / `dagrun_timeout_minutes` | Task limit (default 120) / DAG run limit (default 480) |
 | `fail_on_shortfall` | true = fail the task when a sample has fewer cases than its target (`Target_Val`, or the percentage resolved: the run row's `Target_Cnt`) (default false: a warning) |
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
@@ -316,7 +318,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (162 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (171 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

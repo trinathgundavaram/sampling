@@ -38,14 +38,17 @@ def _clean(value):
     return value
 
 
-def connect_teradata(database: Optional[str] = None, access_lock: bool = True) -> "Connection":
+def connect_teradata(database: Optional[str] = None, access_lock: bool = True,
+                     credentials: Optional[dict] = None) -> "Connection":
     if not _TERADATA_AVAILABLE:
         raise ImportError("teradatasql is required. Install with: pip install teradatasql")
-    host = _require("TERADATA_HOST")
-    user = _require("TERADATA_USER")
-    logmech = os.getenv("TERADATA_LOGMECH", "LDAP")
+    given = credentials or {}
+    host = given.get("host") or _require("TERADATA_HOST")
+    user = given.get("user") or _require("TERADATA_USER")
+    logmech = given.get("logmech") or os.getenv("TERADATA_LOGMECH", "LDAP")
     log.info("Connecting to Teradata: host=%s user=%s logmech=%s database=%s", host, user, logmech, database)
-    kwargs = {"host": host, "user": user, "password": _require("TERADATA_PASSWORD"), "logmech": logmech}
+    kwargs = {"host": host, "user": user, "password": given.get("password") or _require("TERADATA_PASSWORD"),
+              "logmech": logmech}
     if database:
         kwargs["database"] = database
     return Connection(teradatasql.connect(**kwargs), host=host, access_lock=access_lock)
@@ -184,7 +187,7 @@ class Connection:
         self.close()
 
 
-_TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)\b")
+_TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|(?<![A-Za-z0-9$#])\$([a-zA-Z_][a-zA-Z0-9_]*)\b")
 
 
 _LITERAL = re.compile(r"'(?:[^']|'')*'")

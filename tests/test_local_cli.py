@@ -34,7 +34,7 @@ def local_db(monkeypatch, raw, tmp_path):
     monkeypatch.setenv("SAMPLING_ACCESS_LOCK", "false")
     monkeypatch.setenv("SAMPLING_ENV_FILE", "does-not-exist.env")
     monkeypatch.setenv("SAMPLING_LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     build_source(raw.db)
     um_config(raw.db)

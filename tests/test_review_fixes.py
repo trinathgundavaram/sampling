@@ -5,8 +5,10 @@ import pytest
 from conftest import insert_config, insert_rule, key, set_config
 from sampling import engine
 from sampling.db import generate_run_id, substitute_params
-from sampling.engine import (Sample, _typed_keys, config_problems, finalize_run, load_config, run_sampling,
-                             run_scope, sql_problems)
+from sampling.admin import purge_selections
+from sampling.engine import (DIVERSITY, Caps, Sample, Stratifier, _typed_keys, apply_caps, config_problems,
+                             finalize_run, load_config, order_candidates, replace_case, run_sampling, run_scope,
+                             sql_problems)
 from sampling.settings import ConfigError
 
 AS_OF = date(2026, 8, 7)
@@ -139,3 +141,81 @@ def test_teradata_short_forms_and_write_locks_are_refused(sql):
 
 def test_access_locks_and_plain_selects_still_pass():
     assert sql_problems("LOCKING ROW FOR ACCESS SELECT del_ind, upd_dt FROM t", "x", select=True) == []
+
+
+def test_a_failed_run_is_recorded_under_the_run_key_it_was_given(raw, conn, settings):
+    insert_rule(raw.db, "PARAM", 50, "batch_id", seq_nbr=1, rule_sql_txt="SELECT n FROM main.u WHERE n > 99")
+    out = _run(conn, settings, run_key="{run_ty}-{as_of_date}")
+    assert out["error_type"] == "PARAM_FAILURE" and out["run_key"] == "WKLY-2026-08-07"
+    out = _run(conn, settings, run_key="B-{batch_id}")
+    assert out["run_key"] == "B-{batch_id}"
+
+
+def test_replace_says_when_the_candidates_were_purged(raw, conn, settings):
+    run = _run(conn, settings)
+    picked = raw.db.execute("SELECT MIN(Case_Key) FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1").fetchone()[0]
+    purge_selections(conn, settings, 30, project="UMCM", apply=True, as_of=date(2027, 1, 1))
+    with pytest.raises(ConfigError, match="were purged"):
+        replace_case(conn, settings, key(1), "K", picked, "no record", "A" * 300)
+    assert run["status"] == "COMPLETED"
+
+
+def test_replace_keeps_the_who_within_its_column(raw, conn, settings):
+    _run(conn, settings)
+    picked = raw.db.execute("SELECT MIN(Case_Key) FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1").fetchone()[0]
+    replace_case(conn, settings, key(1), "K", picked, "no record", "A" * 300)
+    assert raw.db.execute("SELECT MAX(LENGTH(Stat_By)) FROM GOVT_RGLTRY_SampleSelection").fetchone()[0] == 100
+
+
+def test_a_cap_replacement_keeps_the_diversity_cap():
+    sample = Sample(config={"diversity_sql_txt": "x", "diversity_cap_ty": "CNT", "diversity_cap_val": 1,
+                            "smpl_method_cd": "RANKED"},
+                    caps=[{"rule_id": 1, "rule_nm": "C", "rule_ty": "QUERY", "max_ty": "CNT", "max_val": 0}])
+    rows = [{"_key": k, "_order": i, "_path": "ALL", DIVERSITY: g, "smp_r_1": cap}
+            for i, (k, g, cap) in enumerate([("a", "G1", 1), ("b", "G2", 0), ("c", "G2", 0), ("d", "G3", 0)])]
+    strat = Stratifier(sample, None, "FLOOR")
+    chosen = strat.run(rows, 2)
+    assert [r["_key"] for r in chosen] == ["a", "b"]
+    kept = apply_caps(Caps(sample, 2, "FLOOR"), strat, rows, chosen)
+    assert [r["_key"] for r in kept] == ["b", "d"]
+
+
+def test_mixed_value_types_sort_instead_of_failing():
+    sample = Sample(config={"key_columns_txt": "case_id"},
+                    priorities=[{"rule_id": 9, "rule_ty": "EXPRESSION", "sort_dir_cd": "DESC"}])
+    rows = [{"case_id": c, "smp_r_9": v} for c, v in (("a", 3), ("b", "x"), ("c", None), ("d", date(2026, 1, 1)),
+                                                        ("e", datetime(2026, 1, 2)), ("f", 1.5))]
+    ordered = [r["case_id"] for r in order_candidates(rows, sample, {})]
+    assert ordered == ["b", "e", "d", "a", "f", "c"]
+
+
+def test_a_dollar_inside_a_name_is_not_a_parameter():
+    assert substitute_params("SELECT * FROM DB.TAB$X WHERE a = '$v'", {"v": "1"}) == "SELECT * FROM DB.TAB$X WHERE a = '1'"
+
+
+def test_key_columns_must_be_plain_names(raw, conn, settings):
+    set_config(raw.db, key_columns_txt="case_id, n; DROP TABLE u")
+    assert any("must be plain column names" in p for p in config_problems(load_config(conn, settings, key(1))))
+
+
+def test_water_filling_reallocates_only_buckets_whose_share_changed(raw, conn, settings, monkeypatch):
+    from conftest import insert_bucket
+    raw.db.execute("CREATE TABLE w (case_id VARCHAR, g VARCHAR)")
+    raw.db.executemany("INSERT INTO w VALUES (?, ?)", [(f"{g}{i:02d}", g) for g, n in (("A", 2), ("B", 30), ("C", 30))
+                                                       for i in range(n)])
+    insert_config(raw.db, config_id=2, src_table_nm="w", exclusion_sql=None, scope_sql_txt=None, target_cnt=30,
+                  order_by="case_id")
+    insert_rule(raw.db, "LEVEL", 2000, "g", config_id=2, seq_nbr=1, level_nbr=0, rule_sql_txt="g")
+    for i, g in enumerate("ABC"):
+        insert_bucket(raw.db, 2001 + i, 0, g, config_id=2, seq_nbr=i + 1, quota_cd="ALL")
+    calls = []
+    real = Stratifier._allocate
+
+    def counted(self, rows, target, index, path):
+        calls.append(path)
+        return real(self, rows, target, index, path)
+
+    monkeypatch.setattr(Stratifier, "_allocate", counted)
+    out = run_sampling(conn, settings, key(2), run_key="K", as_of=AS_OF)
+    assert out["selected"] == 30 and out["by_stratum"]["A"]["selected"] == 2
+    assert calls.count("A") == 1 and calls.count("B") == 2

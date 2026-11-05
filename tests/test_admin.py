@@ -138,7 +138,7 @@ def test_cli_purge(raw, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SAMPLING_ACCESS_LOCK", "false")
     monkeypatch.setenv("SAMPLING_ENV_FILE", "does-not-exist.env")
     monkeypatch.setenv("SAMPLING_LOG_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(cli, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     _sample(raw.db)
     assert cli.main(["purge", "--project", "UMCM", "--older-than-days", "30"]) == 0

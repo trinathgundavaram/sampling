@@ -148,7 +148,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 | `Project_Cd`, `Table_Nm`, `Run_Ty` | The sample (unique together): the framework's project, the table sampled (e.g. `ODAG1`), the run type (`DLY`, `WKLY`, `MNT` …). A DAG run samples every active config of its project, optionally of one table and / or run type |
 | `Smpl_Desc` | Optional description |
 | `Src_Schema_Nm`, `Src_Table_Nm` | The source table (or view) to sample from: its database and its name, each a plain name, `$env` allowed |
-| `Key_Columns_Txt` | Comma separated columns that identify one case. Must be unique within the scope (checked every run) |
+| `Key_Columns_Txt` | Comma separated column names that identify one case (plain names only). Must be unique within the scope (checked every run) |
 | `Scope_Sql_Txt` | A `SELECT` of this run's source rows (any joins), e.g. `SELECT * FROM EXPORT_FEED_$ENV_T.ODAG1 WHERE BTCH_ID = '{batch_id}' AND ETL_IS_CURR_IND = 'Y'`. It must return the key columns, one row per case; the target table gets the rows (and columns) it returns. NULL = every row of the source |
 | `Target_Ty` | `CNT` (default): `Target_Val` cases / `PCT`: `Target_Val` % of the candidates (the cases left after the scope and the exclusions) |
 | `Target_Val` | The sample size: `150` (CNT) or `5` = 5 % (PCT) |
@@ -553,7 +553,9 @@ than its target is short; with `TOPUP` the rest came from other buckets.
 ### 10.4a The run is waiting for data (GATE_NOT_MET)
 The message names the GATE rules not met. Airflow retries the task `retries` times, `retry_delay_minutes` apart;
 each attempt is a run row. When the retries run out the task fails: check the load, then clear the task (or
-rerun locally) once the data is there.
+rerun locally) once the data is there. With the Variable's `gate_wait_minutes`, a `wait_for_gates` sensor waits for
+the gates before the runs start instead (its log names the gates still not met, `GATES | waiting for: ...`); it
+fails when that time is up.
 
 ### 10.5 A run is stuck in RUNNING
 The worker was killed mid-run (nothing of the run was written: the writes are one transaction).
@@ -622,7 +624,8 @@ D must be at least the longest `Lookback_Days` of the active history rules that 
 `SAMPLE`-scope rules of its table and run type, the `TABLE`-scope rules of its table, the `PROJECT`-scope rules of
 its project, `*` included), or the sample is skipped with the reason: a carry-over or a
 no-repeat rule would otherwise lose the cycles it looks back on. A replacement (10.9) needs the unselected
-candidates of its run: replace before the run is older than D.
+candidates of its run: replace before the run is older than D (after that, `replace` says the candidates were
+purged).
 
 Without `--apply` only the counts are shown. In Airflow, the Variable's `retention_days` adds a
 `purge_selections` task after the runs (it applies). How long the candidate rows must be kept is a records

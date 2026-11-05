@@ -12,6 +12,7 @@ import pendulum
 from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import DAG, BaseHook, Param, Variable
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
@@ -23,7 +24,7 @@ except ImportError:
 from sampling import __version__
 from sampling.db import connect_teradata, error_text
 from sampling.admin import purge_selections
-from sampling.engine import run_scope
+from sampling.engine import pending_gates, run_scope
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
 
@@ -46,12 +47,6 @@ DEFAULT_TAGS = ["GOVT_RGLTRY", "Sampling"]
 _TEXT = ["null", "string"]
 
 
-def _set_env(key: str, value) -> None:
-    if value is None or value == "":
-        return
-    os.environ[str(key)] = str(value)
-
-
 def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
     kind = str(config.get("connection_type") or CONNECTION_TYPE).strip().lower()
     if kind != CONNECTION_TYPE:
@@ -59,17 +54,15 @@ def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
     return str(connection_id or config.get("connection_id") or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
 
 
-def _load_teradata_connection(conn_id: str) -> None:
+def _load_teradata_connection(conn_id: str) -> dict:
     conn = BaseHook.get_connection(conn_id)
     if not conn.host or not conn.login or not conn.password:
         raise ConfigError(f"Airflow Connection '{conn_id}' needs host, login and password")
-    _set_env("TERADATA_HOST", conn.host)
-    _set_env("TERADATA_USER", conn.login)
-    _set_env("TERADATA_PASSWORD", conn.password)
     extra = conn.extra_dejson or {}
-    _set_env("TERADATA_LOGMECH", extra.get("logmech") or os.environ.get("TERADATA_LOGMECH") or "LDAP")
+    logmech = extra.get("logmech") or os.environ.get("TERADATA_LOGMECH") or "LDAP"
     logger.info("Loaded Teradata connection '%s': host=%s user=%s logmech=%s (password not logged)",
-                conn_id, conn.host, conn.login, os.environ.get("TERADATA_LOGMECH"))
+                conn_id, conn.host, conn.login, logmech)
+    return {"host": conn.host, "user": conn.login, "password": conn.password, "logmech": logmech}
 
 
 def _keys(value: Optional[dict]) -> dict:
@@ -248,7 +241,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
         if not isinstance(logging.getLevelName(level), int):
             raise ConfigError(f"log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, got {level!r}")
         logging.getLogger("sampling").setLevel(level)
-        _load_teradata_connection(_connection_id(config, connection_id))
+        credentials = _load_teradata_connection(_connection_id(config, connection_id))
         scope = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
         kwargs = {"run_key": config.get("run_key") or None, "run_params": _run_params(config.get("run_params")),
                   "extra_filters": config.get("extra_filters") or None,
@@ -262,7 +255,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
                 kwargs["extra_filters"] or "none",
                 " | DRY RUN" if kwargs["dry_run"] else "")
     try:
-        conn = connect_teradata(settings.meta_db, settings.access_lock)
+        conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     try:
@@ -322,13 +315,13 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
     try:
         config = resolve_config(variable_key)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
-        _load_teradata_connection(_connection_id(config, connection_id))
+        credentials = _load_teradata_connection(_connection_id(config, connection_id))
         runs = _load_variable(variable_key).get("runs")
         scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
     try:
-        conn = connect_teradata(settings.meta_db, settings.access_lock)
+        conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     out = []
@@ -342,6 +335,43 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
         conn.close()
     logger.info("PURGE report:\n%s", json.dumps(out, indent=2, default=str))
     return {"scopes": out}
+
+
+def gates_task(variable_key: str, overrides: Optional[dict] = None, dag_run=None,
+               connection_id: Optional[str] = None) -> bool:
+    try:
+        config = resolve_config(variable_key, overrides)
+        settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
+        credentials = _load_teradata_connection(_connection_id(config, connection_id))
+        runs = _load_variable(variable_key).get("runs")
+        scopes = [resolve_config(variable_key, overrides, i) for i in range(len(runs))] if runs else [config]
+        as_of = _as_of(config, dag_run, settings.timezone)
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    try:
+        conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("GATES | cannot connect to Teradata, checking again later: %s", error_text(e))
+        return False
+    try:
+        waiting = []
+        for scope in scopes:
+            waiting += pending_gates(conn, settings, **{k: scope.get(k) for k in SCOPE_KEYS
+                                                        if scope.get(k) not in (None, "")},
+                                     run_key=scope.get("run_key") or None,
+                                     run_params=_run_params(scope.get("run_params")), as_of=as_of)
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    except Exception as e:  # noqa: BLE001
+        logger.warning("GATES | checking the gates failed, checking again later: %s", error_text(e))
+        return False
+    finally:
+        conn.close()
+    if waiting:
+        logger.info("GATES | waiting for: %s", "; ".join(waiting))
+        return False
+    logger.info("GATES | every gate is met")
+    return True
 
 
 def sample_summary(ti, task_ids: list) -> str:
@@ -470,6 +500,20 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
                  for i, scope in enumerate(scopes)]
     task_ids.extend(t.task_id for t in tasks)
 
+    gates = []
+    if dag_config.get("gate_wait_minutes") not in (None, ""):
+        if timed:
+            logger.warning("%s: gate_wait_minutes is not used on a DAG with timed runs", dag_id)
+        else:
+            gates = [PythonSensor(task_id="wait_for_gates", dag=dag, mode="reschedule",
+                                  python_callable=lambda **c: gates_task(variable_key, overrides=_overrides(c),
+                                                                         dag_run=c.get("dag_run")),
+                                  poke_interval=_minutes(dag_config, "gate_poke_minutes",
+                                                         timedelta(minutes=15)).total_seconds(),
+                                  timeout=_minutes(dag_config, "gate_wait_minutes",
+                                                   timedelta(hours=12)).total_seconds(), retries=0, **pool)]
+            gates[0] >> tasks
+
     given = "{{ conf_value(dag_run, params, '%s') }}"
     triggers = [TriggerDagRunOperator(task_id=f"trigger_{str(target).lower()}", dag=dag, trigger_dag_id=str(target),
                                       trigger_rule="all_success", conf={k: given % k for k in PASSED_ON})
@@ -487,7 +531,7 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     email_recipient = dag_config.get("email_recipient")
     if email_recipient:
         load_env = dag_config.get("load_env") or dag_config.get("environment") or ""
-        upstream = [*tasks, *triggers, *purge]
+        upstream = [*gates, *tasks, *triggers, *purge]
         success = EmailOperator(task_id="success_email", dag=dag, to=email_recipient,
                                 trigger_rule="none_failed_min_one_success",
                                 subject=f"Airflow EDEG-GOVT_RGLTRY {load_env} Success: {dag_id} DAG",

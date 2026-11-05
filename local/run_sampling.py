@@ -39,13 +39,19 @@ def read_env_file(path: Path) -> dict:
     return out
 
 
+_SECRETS = {}
+
+
 def load_env_file() -> Path | None:
     name = os.environ.get(PREFIX + "ENV_FILE") or "dev.env"
     path = Path(name) if Path(name).is_absolute() else _HERE / name
     if not path.is_file():
         return None
     for key, value in read_env_file(path).items():
-        if value != "" and not os.environ.get(key):
+        if key == "TERADATA_PASSWORD":
+            if value != "" and not os.environ.get(key):
+                _SECRETS["password"] = value
+        elif value != "" and not os.environ.get(key):
             os.environ[key] = value
     return path
 
@@ -287,7 +293,7 @@ def main(argv=None) -> int:
     log.info("sampling %s | env file %s | log %s", __version__, env_file or "none", log_path)
     try:
         s = settings_from_env()
-        with connect_teradata(s.meta_db, s.access_lock) as conn:
+        with connect_teradata(s.meta_db, s.access_lock, credentials=dict(_SECRETS) or None) as conn:
             out, code = COMMANDS[args.command](conn, s, args)
     except (ConfigError, ValueError, EnvironmentError, ImportError) as e:
         out, code = {"command": args.command, "result": "COULD NOT RUN", "problem": error_text(e)}, 2

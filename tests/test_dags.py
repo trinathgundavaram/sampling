@@ -88,7 +88,7 @@ def test_a_timed_run_samples_the_entries_due(monkeypatch, variable, raw):
     um_config(raw.db, run_ty="WKLY")
     insert_config(raw.db, config_id=2, run_ty="MNT", table_nm="T1", exclusion_sql=None)
     variable(TIMED)
-    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     report = dags.run_timed_task(VAR_KEY, {}, _DagRun())
     assert [(r["table_nm"], r["run_ty"]) for r in report["runs"]] == [("T1", "WKLY")]
@@ -149,7 +149,7 @@ def test_retention_task(monkeypatch, variable, raw):
     assert purge.upstream_task_ids == {"run_sampling"} and "purge_selections" in dag.task_dict["fail_email"].upstream_task_ids
     build_source(raw.db)
     um_config(raw.db)
-    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
     out = dags.purge_task(VAR_KEY)
     assert out["scopes"][0]["configs"][0]["rows"] == {"retired_runs": 0, "unselected_of_current_runs": 0}
@@ -168,19 +168,28 @@ def test_layering_and_blocked_trigger_keys(variable):
 
 def _run_task(monkeypatch, raw, overrides=None):
     from sampling.db import Connection
-    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     return dags.run_sampling_task(VAR_KEY, overrides=overrides or {})
 
 
-def test_task_runs_the_scope_and_exports_the_connection(monkeypatch, variable, raw):
+def test_task_runs_the_scope_and_passes_the_connection(monkeypatch, variable, raw):
+    import os
+    from sampling.db import Connection
     build_source(raw.db)
     um_config(raw.db)
-    report = _run_task(monkeypatch, raw)
+    given = {}
+
+    def connect(db, lock, credentials=None):
+        given.update(credentials or {})
+        return Connection(raw, host="duckdb", access_lock=False)
+
+    monkeypatch.delenv("TERADATA_PASSWORD", raising=False)
+    monkeypatch.setattr(dags, "connect_teradata", connect)
+    report = dags.run_sampling_task(VAR_KEY, overrides={})
     assert report["result"] == "ALL SAMPLES COMPLETED" and report["runs"][0]["selected"] == 150
     assert report["runs"][0]["as_of_date"] == "2026-08-01"
-    import os
-    assert (os.environ["TERADATA_HOST"], os.environ["TERADATA_USER"], os.environ["TERADATA_LOGMECH"]) == \
-        ("td.example", "svc", "TD2")
+    assert given == {"host": "td.example", "user": "svc", "password": "secret", "logmech": "TD2"}
+    assert "TERADATA_PASSWORD" not in os.environ
 
 
 def test_config_problem_fails_without_retry(monkeypatch, variable, raw):
@@ -269,3 +278,25 @@ def test_a_trigger_sets_sql_text_only_when_the_variable_allows_it(variable):
     assert config["run_key"] == "rk"
     variable({**BASE, "trigger_keys": ["run_params"]})
     assert dags.resolve_config(VAR_KEY, {"run_params": '{"batch_id": "X"}'})["run_params"] == '{"batch_id": "X"}'
+
+
+def test_the_gate_sensor_waits_until_every_gate_is_met(monkeypatch, variable, raw):
+    from conftest import insert_config, insert_rule
+    from sampling.db import Connection
+    variable({**BASE, "gate_wait_minutes": 60, "gate_poke_minutes": 5})
+    dag = dags.build_sampling_dag("GATED", VAR_KEY)
+    sensor = dag.get_task("wait_for_gates")
+    assert sensor.mode == "reschedule" and sensor.poke_interval == 300 and sensor.timeout == 3600
+    assert {t.task_id for t in sensor.downstream_list} == {"run_sampling"}
+    raw.db.execute("CREATE TABLE ready (ok INTEGER)")
+    insert_config(raw.db, src_table_nm="ready", key_columns="ok", exclusion_sql=None, scope_sql_txt=None,
+                  order_by=None)
+    insert_rule(raw.db, "GATE", 70, "LOADED", seq_nbr=1, rule_sql_txt="SELECT 1 FROM main.ready")
+    monkeypatch.setattr(raw, "close", lambda: None)
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb",
+                                                                                   access_lock=False))
+    assert dags.gates_task(VAR_KEY) is False
+    raw.db.execute("INSERT INTO ready VALUES (1)")
+    assert dags.gates_task(VAR_KEY) is True
+    variable(BASE)
+    assert "wait_for_gates" not in dags.build_sampling_dag("PLAIN", VAR_KEY).task_ids

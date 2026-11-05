@@ -7,7 +7,8 @@ import math
 import random
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from fnmatch import fnmatchcase
 from typing import Optional, Sequence
 
@@ -219,6 +220,9 @@ def config_problems(sample: Sample) -> list:
     problems += _target_problems(c)
     if not sample.keys:
         problems.append("key_columns_txt is empty")
+    bad_keys = [k for k in sample.keys if not _IDENT.match(k)]
+    if bad_keys:
+        problems.append(f"key_columns_txt {bad_keys} must be plain column names, comma separated")
     for col in ("src_schema_nm", "src_table_nm"):
         name = _text(c, col)
         if not name:
@@ -692,8 +696,18 @@ def apply_exclusions(rows: list, sample: Sample, history: dict) -> tuple:
     return candidates, excluded, counts
 
 
+def _sort_value(v) -> tuple:
+    if isinstance(v, bool) or isinstance(v, (int, float, Decimal)):
+        return (0, v, "")
+    if isinstance(v, datetime):
+        return (1, v.replace(tzinfo=None), "")
+    if isinstance(v, date):
+        return (1, datetime.combine(v, time()), "")
+    return (2, 0, str(v))
+
+
 def _sortable(v) -> tuple:
-    return (v is None, 0 if v is None else v)
+    return (v is None, (0, 0, "") if v is None else _sort_value(v))
 
 
 def order_candidates(rows: list, sample: Sample, history: dict) -> list:
@@ -705,7 +719,8 @@ def order_candidates(rows: list, sample: Sample, history: dict) -> list:
             rows.sort(key=lambda r: 0 if r.get(col) == 1 else 1)
         elif kind == "EXPRESSION":
             if _up(p.get("sort_dir_cd"), "ASC") == "DESC":
-                rows.sort(key=lambda r: (r.get(col) is not None, 0 if r.get(col) is None else r.get(col)),
+                rows.sort(key=lambda r: (r.get(col) is not None,
+                                         (0, 0, "") if r.get(col) is None else _sort_value(r.get(col))),
                           reverse=True)
             else:
                 rows.sort(key=lambda r: _sortable(r.get(col)))
@@ -897,7 +912,7 @@ class Stratifier:
             chosen[key] = self._allocate(buckets[key], targets[key], index + 1, sub(key))
 
         def fill(keys: list, budget: int) -> None:
-            fixed, active = {}, list(keys)
+            fixed, active, done = {}, list(keys), {}
             while active:
                 base, extra = divmod(max(0, budget - sum(fixed.values())), len(active))
                 full = []
@@ -906,8 +921,10 @@ class Stratifier:
                     if cap(k) is not None:
                         want = min(want, cap(k))
                     targets[k] = want
-                    self._forget(sub(k))
-                    chosen[k] = self._allocate(buckets[k], want, index + 1, sub(k))
+                    if done.get(k) != want:
+                        self._forget(sub(k))
+                        chosen[k] = self._allocate(buckets[k], want, index + 1, sub(k))
+                        done[k] = want
                     if len(chosen[k]) < want or (cap(k) is not None and want >= cap(k)):
                         full.append(k)
                 if not full:
@@ -997,17 +1014,29 @@ def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) 
     if strat.method == "RANDOM":
         for path, pool in pools.items():
             strat.rng(f"CAP|{path}").shuffle(pool)
+    spread = {}
+    for r in kept:
+        spread.setdefault(r.get("_path"), {}).setdefault(_norm(r.get(DIVERSITY)), 0)
+        spread[r.get("_path")][_norm(r.get(DIVERSITY))] += 1
+
+    def diverse(path, c) -> bool:
+        limit = strat.cap_for((strat.leaves.get(path) or {}).get("target") or 0)
+        return limit is None or spread.get(path, {}).get(_norm(c.get(DIVERSITY)), 0) < limit
+
     for row, name in over:
-        pool = pools.get(row.get("_path"), [])
-        new = next((c for c in pool if caps.blocking(c) is None), None)
+        path = row.get("_path")
+        pool = pools.get(path, [])
+        new = next((c for c in pool if caps.blocking(c) is None and diverse(path, c)), None)
         if new:
+            spread.setdefault(path, {}).setdefault(_norm(new.get(DIVERSITY)), 0)
+            spread[path][_norm(new.get(DIVERSITY))] += 1
             pool.remove(new)
             caps.take(new)
             kept.append(new)
             caps.report[name]["replaced"] += 1
         else:
             strat.unselect(row.get("_path"))
-            strat.notes.append(f"{row.get('_path')}: {row['_key']} is over the cap {name} and its bucket has no "
+            strat.notes.append(f"{row.get('_path')}: a case over the cap {name} left out: its bucket has no "
                                f"other candidate within the caps")
     return sorted(kept, key=lambda r: r["_order"])
 
@@ -1202,7 +1231,12 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     except Exception as e:  # noqa: BLE001
         early, params = ("technical", "PARAM_FAILURE", e), dict(run_params or {})
     if early:
-        run_key = template if "{" not in template and "$" not in template else as_of.isoformat()
+        known = {**(run_params or {}), "as_of_date": as_of.isoformat(), "project_cd": project, "table_nm": table,
+                 "run_ty": run_type}
+        try:
+            run_key = substitute_params(template, known, escape=False)
+        except ValueError:
+            run_key = template
     if len(run_key) > RUN_KEY_MAX:
         early = early or ("config", "CONFIG_ERROR", f"run_key is {len(run_key)} characters, over the {RUN_KEY_MAX} "
                                                     f"Run_Key holds")
@@ -1446,6 +1480,7 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
                  any_bucket: bool = False) -> dict:
     if not str(reason or "").strip():
         raise ConfigError("a reason is required to replace a case")
+    by = str(by or "")[:USER_MAX]
     key = sample_key(key)
     run = current_run(conn, s, key, run_key)
     if not run or _up(run["run_stat"]) not in ("COMPLETED", "FINAL"):
@@ -1461,6 +1496,9 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
             and r["selection_stat"] is None]
     if not any_bucket:
         pool = [r for r in pool if r["stratum_path_txt"] == old["stratum_path_txt"]]
+    if not pool and int(run.get("candidate_cnt") or 0) > sum(1 for r in rows if int(r["excluded_ind"] or 0) == 0):
+        raise ConfigError(f"the unselected candidates of run {run_id} were purged (retention), so it has none left "
+                          f"to replace {case_key_text!r} with: rerun the cycle with a force reason if a case must go")
     if not pool:
         raise ConfigError(f"no candidate left to replace {case_key_text!r}"
                           + ("" if any_bucket else f" in bucket {old['stratum_path_txt']!r} (allow any bucket)"))
@@ -1546,6 +1584,25 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
     failed = [r for r in runs if r.get("status") != "COMPLETED"]
     result = "ALL SAMPLES COMPLETED" if not failed else f"{len(failed)} OF {len(runs)} SAMPLE(S) FAILED"
     return {"result": result, "scope": scope, "runs": runs, "failed": len(failed)}
+
+
+def pending_gates(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
+                  run_type: Optional[str] = None, run_key: Optional[str] = None, run_params: Optional[dict] = None,
+                  as_of: Optional[date] = None) -> list:
+    as_of = as_of or s.today()
+    out = []
+    for key in discover_configs(conn, s, project, table, run_type):
+        sample = load_config(conn, s, key)
+        if not sample.gates:
+            continue
+        try:
+            params = resolve_params(conn, s, sample, run_params, as_of)
+            params["run_key"] = substitute_params(str(run_key or "{as_of_date}"), params, escape=False)
+        except LookupError as e:
+            out.append(f"{sample.label}: {e}")
+            continue
+        out += [f"{sample.label}: {g}" for g in unmet_gates(conn, s, sample, params)]
+    return out
 
 
 def validate(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
