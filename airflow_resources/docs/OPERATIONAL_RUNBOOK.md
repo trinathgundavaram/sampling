@@ -490,7 +490,6 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | Command | What it does | Writes |
 |---|---|---|
 | `test-connection` | Logs in, shows the session and which sampling tables exist | – |
-| `deploy-schema [--dry-run] [--drop-first]` | Creates the 5 tables | DDL |
 | `validate <scope> [--check-sql] [--run-param k=v]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
 | `show-config <sample>` | The config and the rules it uses, by class, and its problems (JSON) | – |
 | `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
@@ -589,7 +588,7 @@ the diversity cap (`Diversity_Cap_Val`) and the CAP rules (the auditors choose t
 
 ## 11. First run on DEV (checklist)
 
-1. `deploy-schema --dry-run`, then `deploy-schema` (DBA rights on `meta_db`).
+1. Drop any existing `GOVT_RGLTRY_Sampl*` tables and create the five again by hand from `sql/schema.sql` (DBA).
 2. Have each target table created (4.3: the source's columns plus the `ETL_*` / `SMPL_*` ones).
 3. Enter the configuration rows (OPEN_ITEMS.md section D, once its TODOs are answered; `Active_Ind = 1`).
 4. `validate --project UMCM --table ODAG1 --run-type WKLY --check-sql`.

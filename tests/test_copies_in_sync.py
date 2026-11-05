@@ -1,4 +1,3 @@
-"""The Airflow and the local version run the same engine: one copy, importable without Airflow."""
 import subprocess
 import sys
 
@@ -18,7 +17,6 @@ def test_engine_never_imports_airflow():
 
 
 def test_local_cli_loads_the_engine_without_airflow():
-    """The local command line starts in a Python where importing airflow fails."""
     code = ("import builtins, runpy, sys\n"
             "real = builtins.__import__\n"
             "def guard(name, *a, **k):\n"

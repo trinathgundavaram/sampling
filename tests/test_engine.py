@@ -1,11 +1,10 @@
-"""The sampling engine (sampling/engine.py) end to end on the DuckDB stand-in."""
 import random
 from datetime import date
 
 import pytest
 
 from conftest import build_source, insert_config, insert_strata, key, um_config
-from sampling.db import build_run_key, generate_run_id, substitute_params
+from sampling.db import generate_run_id, substitute_params
 from sampling.engine import (Sample, Stratifier, build_queries, discover_configs, round_target, run_sampling,
                              run_scope, select, validate)
 from sampling.settings import ConfigError, Settings
@@ -24,12 +23,10 @@ def _rows(raw, sql):
     return raw.db.execute(sql).fetchall()
 
 
-# ── quotas and selection ────────────────────────────────────────────────────
-
 def test_round_target_rounding_and_float_artefacts():
     assert [round_target(3.5, m) for m in ("FLOOR", "CEIL", "ROUND")] == [3, 4, 4]
-    assert round_target(100 * 0.29, "FLOOR") == 29   # 28.999999999999996
-    assert round_target(100 * 0.07, "CEIL") == 7     # 7.000000000000001
+    assert round_target(100 * 0.29, "FLOOR") == 29
+    assert round_target(100 * 0.07, "CEIL") == 7
 
 
 def test_select_methods():
@@ -51,8 +48,6 @@ def test_stratify_any_number_of_levels_shares_equally():
     chosen = strat.run(rows, 40)
     assert len(chosen) == 40 and len(strat.leaves) == 8 and all(v["selected"] == 5 for v in strat.leaves.values())
 
-
-# ── the frozen UM regression of the DQ repo ─────────────────────────────────
 
 FROZEN_BY_STRATUM = {
     "Approved/Area A": (6, 1), "Approved/Area B": (7, 0), "Approved/Area C": (59, 9),
@@ -77,7 +72,7 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     um_config(raw.db)
     out = _run(conn, settings, triggered_by="tester")
     sel = _rows(raw, "SELECT COUNT(*), SUM(Selected_Ind), MIN(Run_Key), MIN(Smpl_Cycle_Dt_Key) FROM GOVT_RGLTRY_SampleSelection")
-    assert sel[0] == (1000, 150, "2026-08-01", AS_OF)        # the 20 excluded kept too (keep_excluded_ind)
+    assert sel[0] == (1000, 150, "2026-08-01", AS_OF)
     assert _rows(raw, "SELECT Exclusion_Rsn_Txt, COUNT(*) FROM GOVT_RGLTRY_SampleSelection WHERE Excluded_Ind = 1 "
                       "GROUP BY 1") == [("EXCLUDED", 20)]
     run = _rows(raw, "SELECT Run_Stat, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
@@ -88,7 +83,7 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     rules = _rows(raw, "SELECT Rule_ID, Rule_Class_Cd, Rule_Nm FROM GOVT_RGLTRY_SamplingRunRule ORDER BY Rule_ID")
     assert len(rules) == 10 and rules[0] == (1000, "LEVEL", "category") and rules[-1] == (9001, "EXCLUSION", "EXCLUDED")
     assert (8001, "PRIORITY", "ORDER") in rules
-    report = out   # the counts per bucket are in the run's report (the task log, the XCom), not in a table
+    report = out
     assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
     assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
     assert out["smpl_run_id"].startswith("UMCM.T1.WKLY::2026-08-01::attempt-1::tester::")
@@ -168,10 +163,10 @@ def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
     raw.fail_on = "UPDATE main.GOVT_RGLTRY_SampleSelection"
     out = _run(conn, settings)
     assert out["status"] == "ERROR" and out["error_type"] == "PERSIST_FAILURE"
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0   # rolled back
+    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0
     assert _rows(raw, "SELECT Run_Stat, Error_Ty FROM GOVT_RGLTRY_SamplingRun") == [("ERROR", "PERSIST_FAILURE")]
     stored = _rows(raw, "SELECT Error_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0]
-    assert stored.startswith("RuntimeError: ") and "\n" not in stored and "Traceback" not in stored   # one line
+    assert stored.startswith("RuntimeError: ") and "\n" not in stored and "Traceback" not in stored
 
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):
@@ -248,7 +243,6 @@ def test_queries_resolve_env_and_read_the_scope_select():
                         "smp_scope WHERE (b = 1)"
     assert q["output"] == "SELECT * FROM (SELECT u.* FROM UMCM_T.u JOIN UMCM_T.b ON b.a = u.a WHERE db = '') " \
                           "smp_scope WHERE (b = 1)"
-    # no scope: every row of the source
     q = build_queries(Sample(config={**config, "scope_sql_txt": None}), s, {})
     assert q["pull"] == "SELECT a, b FROM (SELECT * FROM UMCM_T.u) smp_scope WHERE (1=1)"
     assert Settings(meta_db="M", environment="DEV").resolve_env("UMCM_$ENV_STG") == "UMCM_DEV_STG"
@@ -258,8 +252,7 @@ def test_params_and_ids():
     assert substitute_params("a = '{x}' AND b = '$Y'", {"x": "it's", "y": 2}) == "a = 'it''s' AND b = '2'"
     with pytest.raises(ValueError):
         substitute_params("a = '{missing}'", {})
-    assert build_run_key(2026, 8) == "2026_8"
-    assert generate_run_id("P.S", "rk", None, "") .startswith("P.S::rk::")
+    assert generate_run_id("P.S", "rk", None, "").startswith("P.S::rk::")
 
 
 def test_settings_validation():

@@ -1,26 +1,3 @@
-"""Local command line for the sampling engine: the same engine as the Airflow DAG, credentials from dev.env.
-
-    python run_sampling.py run --project UMCM --run-type WKLY --run-key 2026-10-30
-    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --run-param pull_date=2026-10-30 --dry-run
-    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --filter "BTCH_ID = 'B42'" --filter "ETL_IS_CURR_IND = 'Y'"
-    python run_sampling.py validate --project UMCM --check-sql
-    python run_sampling.py show-config --project UMCM --table ODAG1 --run-type WKLY
-    python run_sampling.py runs --project UMCM --table ODAG1 --run-type WKLY
-    python run_sampling.py errors
-    python run_sampling.py finalize --project UMCM --table ODAG1 --run-type WKLY --run-key B42
-    python run_sampling.py replace --project UMCM --table ODAG1 --run-type WKLY --run-key B42 --case-key "AUTHZN_ID=123" --reason "no record"
-    python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --run-key B42 --force-reason "rules corrected, approved by ..."
-    python run_sampling.py purge --project UMCM --older-than-days 400 [--apply]
-    python run_sampling.py mark-failed --run-id <run_id>
-    python run_sampling.py test-connection
-    python run_sampling.py deploy-schema --dry-run [--drop-first]
-
-Settings come from the environment, filled from dev.env (next to this file; SAMPLING_ENV_FILE names another).
-A variable already set in the shell wins over the file. See dev.env.example.
-
-Exit codes: 0 = done; 1 = done with problems (a sample failed or fell short, validation found problems);
-2 = could not run (configuration, connection).
-"""
 from __future__ import annotations
 
 import argparse
@@ -33,8 +10,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-# one engine for both versions: the package deployed to Airflow (airflow/sampling); its DAG module (dags.py) is
-# the only part that imports Airflow, and it is not imported here
 _ENGINE_DIR = _HERE.parent / "airflow"
 if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
@@ -47,16 +22,10 @@ from sampling.engine import (config_problems, finalize_run, load_config, replace
 from sampling.settings import ConfigError, Settings  # noqa: E402
 
 log = logging.getLogger("sampling.cli")
-SQL_DIR = _HERE.parent / "sql"
 PREFIX = "SAMPLING_"
 
 
-# ---------------------------------------------------------------------------
-# Environment
-# ---------------------------------------------------------------------------
-
 def read_env_file(path: Path) -> dict:
-    """KEY=value lines; # comments, blank lines and 'export ' are ignored, surrounding quotes removed."""
     out = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -71,7 +40,6 @@ def read_env_file(path: Path) -> dict:
 
 
 def load_env_file() -> Path | None:
-    """Fill os.environ from dev.env without overwriting what the shell already set."""
     name = os.environ.get(PREFIX + "ENV_FILE") or "dev.env"
     path = Path(name) if Path(name).is_absolute() else _HERE / name
     if not path.is_file():
@@ -94,21 +62,16 @@ def settings_from_env() -> Settings:
 
 
 def configure_logging(level: str) -> Path:
-    """Console (stderr) plus one log file per run in SAMPLING_LOG_DIR (default local/logs)."""
     log_dir = Path(os.environ.get(PREFIX + "LOG_DIR") or _HERE / "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"sampling_{datetime.now():%Y%m%d_%H%M%S_%f}_{os.getpid()}.log"
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")   # the framework's format
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     handlers = [logging.StreamHandler(sys.stderr), logging.FileHandler(path, encoding="utf-8")]
     for h in handlers:
         h.setFormatter(fmt)
     logging.basicConfig(level=level.upper(), handlers=handlers, force=True)
     return path
 
-
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def _run_params(args) -> dict:
     params = {}
@@ -126,7 +89,6 @@ def _run_params(args) -> dict:
 
 
 def _filters(args) -> str:
-    """--filter "SQL condition" (repeat): ANDed to the scope for this run."""
     items = [f.strip() for f in args.filter or [] if f.strip()]
     return " AND ".join(f"({f})" for f in items) if len(items) > 1 else (items[0] if items else None)
 
@@ -137,7 +99,6 @@ def _scope(args) -> dict:
 
 
 def _key(args) -> tuple:
-    """One sample: (project, table, run_type)."""
     return (args.project, args.table, args.run_type)
 
 
@@ -201,7 +162,6 @@ def cmd_runs(conn, s, args) -> tuple:
 
 
 def cmd_errors(conn, s, args) -> tuple:
-    """Open errors: runs whose latest attempt of their (sample, run_key) failed."""
     where, params = ["1=1"], []
     _filter_sample(args, where, params)
     if args.run_key not in (None, ""):
@@ -217,7 +177,6 @@ def cmd_errors(conn, s, args) -> tuple:
 
 
 def cmd_mark_failed(conn, s, args) -> tuple:
-    """Close a run left RUNNING by a crashed process (it wrote no selections: persistence is one transaction)."""
     n = conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun SET Run_Stat = 'ERROR', End_Dtts = ?, "
                      f"Error_Ty = 'ABANDONED', Error_Txt = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
                      f"WHERE Smpl_Run_ID = ? AND Run_Stat = 'RUNNING'",
@@ -238,57 +197,9 @@ def cmd_test_connection(conn, s, args) -> tuple:
             "sampling_tables": sorted(str(t["tablename"]).strip() for t in tables)}, 0
 
 
-def render_sql(path: Path, meta_db: str) -> str:
-    text = path.read_text(encoding="utf-8")
-    if "{{META_DB}}" not in text:
-        raise ConfigError(f"{path} has no {{{{META_DB}}}} placeholder")
-    return text.replace("{{META_DB}}", meta_db)
-
-
-def split_statements(sql: str) -> list:
-    """The statements of a script: split on ';' at line ends, -- comment lines dropped."""
-    out, current = [], []
-    for line in sql.splitlines():
-        if line.strip().startswith("--"):
-            continue
-        current.append(line)
-        if line.rstrip().endswith(";"):
-            stmt = "\n".join(current).strip().rstrip(";").strip()
-            if stmt:
-                out.append(stmt)
-            current = []
-    tail = "\n".join(current).strip()
-    if tail:
-        out.append(tail)
-    return out
-
-
-def cmd_deploy_schema(conn, s, args) -> tuple:
-    sql_dir = Path(args.sql_dir) if args.sql_dir else SQL_DIR
-    files = [*(["schema_drop.sql"] if args.drop_first else []), "schema.sql"]
-    scripts = [(f, render_sql(sql_dir / f, s.meta_db)) for f in files]
-    if args.dry_run:
-        for f, text in scripts:
-            print(f"-- ===== {f} ({s.meta_db}) =====\n{text}")
-        return {"dry_run": True, "files": files, "meta_db": s.meta_db}, 0
-    executed = 0
-    for f, text in scripts:
-        for stmt in split_statements(text):
-            log.info("%s: %s", f, stmt.splitlines()[0][:120])
-            try:
-                conn.execute(stmt)
-            except Exception as e:  # noqa: BLE001
-                if f == "schema_drop.sql" and "3807" in str(e):  # table does not exist
-                    log.info("  (not there, skipped)")
-                    continue
-                raise
-            executed += 1
-    return {"meta_db": s.meta_db, "files": files, "statements": executed}, 0
-
-
 COMMANDS = {"run": cmd_run, "validate": cmd_validate, "show-config": cmd_show_config, "runs": cmd_runs,
             "errors": cmd_errors, "mark-failed": cmd_mark_failed, "test-connection": cmd_test_connection,
-            "deploy-schema": cmd_deploy_schema, "finalize": cmd_finalize, "replace": cmd_replace,
+            "finalize": cmd_finalize, "replace": cmd_replace,
             "purge": cmd_purge}
 
 
@@ -298,7 +209,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def scope(sp, required: bool = False):
-        """a project, optionally one table and / or one run type (required: exactly one sample)"""
         sp.add_argument("--project", required=required, help="Project_Cd")
         sp.add_argument("--table", required=required, help="Table_Nm")
         sp.add_argument("--run-type", required=required, help="Run_Ty (DLY, WKLY, MNT ...)")
@@ -361,10 +271,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("test-connection", help="connect, show the session and the sampling tables")
 
-    d = sub.add_parser("deploy-schema", help="create the tables in SAMPLING_META_DB from ../sql")
-    d.add_argument("--dry-run", action="store_true", help="print the rendered SQL, run nothing")
-    d.add_argument("--drop-first", action="store_true", help="drop the tables first (DESTROYS their rows)")
-    d.add_argument("--sql-dir", help=f"folder holding schema.sql (default {SQL_DIR})")
     return p
 
 
@@ -372,7 +278,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     env_file = load_env_file()
     level = str(args.log_level or os.environ.get(PREFIX + "LOG_LEVEL") or "INFO").strip().upper()
-    if not isinstance(logging.getLevelName(level), int):   # every name logging accepts (WARN too)
+    if not isinstance(logging.getLevelName(level), int):
         print(json.dumps({"command": args.command, "result": "COULD NOT RUN",
                           "problem": f"ConfigError: log level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, "
                                      f"got {level!r}"}, indent=2))
@@ -381,11 +287,8 @@ def main(argv=None) -> int:
     log.info("sampling %s | env file %s | log %s", __version__, env_file or "none", log_path)
     try:
         s = settings_from_env()
-        if args.command == "deploy-schema" and args.dry_run:
-            out, code = cmd_deploy_schema(None, s, args)
-        else:
-            with connect_teradata(s.meta_db, s.access_lock) as conn:
-                out, code = COMMANDS[args.command](conn, s, args)
+        with connect_teradata(s.meta_db, s.access_lock) as conn:
+            out, code = COMMANDS[args.command](conn, s, args)
     except (ConfigError, ValueError, EnvironmentError, ImportError) as e:
         out, code = {"command": args.command, "result": "COULD NOT RUN", "problem": error_text(e)}, 2
     except Exception as e:  # noqa: BLE001

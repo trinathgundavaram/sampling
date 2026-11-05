@@ -1,7 +1,5 @@
-# Local runner (run_sampling.py). Python >= 3.9.
 teradatasql>=17.20.0.0
 tzdata>=2023.3
 
-# tests (repository root: python -m pytest)
 pytest>=7.4.0
-duckdb>=0.10.0        # stand-in database for the tests only
+duckdb>=0.10.0

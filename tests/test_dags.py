@@ -1,4 +1,3 @@
-"""The Airflow version: DAG parsing, Variable / trigger layering, the task's outcome (needs apache-airflow 3)."""
 import importlib.util
 import json
 from datetime import date
@@ -73,12 +72,12 @@ def test_timed_runs_one_task_scheduled_at_every_time(variable):
     assert list(dag.task_dict) == ["run_sampling"] and "run" in dag.params
     assert type(dag.timetable).__name__ == "MultipleCronTriggerTimetable"
     import pendulum
-    friday_8 = pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")         # a Friday
+    friday_8 = pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")
     assert dags.chosen_runs(TIMED, _DagRun(when=friday_8)) == [1]
     first_6 = pendulum.datetime(2026, 9, 1, 6, tz="America/Chicago")
     assert dags.chosen_runs(TIMED, _DagRun(when=first_6)) == [0]
     assert dags.chosen_runs(TIMED, _DagRun("manual", conf={"run": "Monthly, daily"})) == [2, 0]
-    assert dags.chosen_runs(TIMED, _DagRun("manual")) == [None]               # the Variable's own scope
+    assert dags.chosen_runs(TIMED, _DagRun("manual")) == [None]
     with pytest.raises(ConfigError, match="not a name in runs"):
         dags.chosen_runs(TIMED, _DagRun("manual", conf={"run": "yearly"}))
 
@@ -87,16 +86,16 @@ def test_a_timed_run_samples_the_entries_due(monkeypatch, variable, raw):
     from sampling.db import Connection
     build_source(raw.db)
     um_config(raw.db, run_ty="WKLY")
-    insert_config(raw.db, config_id=2, run_ty="MNT", table_nm="T1", exclusion_sql=None)   # T1 monthly
+    insert_config(raw.db, config_id=2, run_ty="MNT", table_nm="T1", exclusion_sql=None)
     variable(TIMED)
     monkeypatch.setattr(dags, "connect_teradata", lambda db, lock: Connection(raw, host="duckdb", access_lock=False))
     monkeypatch.setattr(raw, "close", lambda: None)
-    report = dags.run_timed_task(VAR_KEY, {}, _DagRun())                      # Friday 8:00: weekly only
+    report = dags.run_timed_task(VAR_KEY, {}, _DagRun())
     assert [(r["table_nm"], r["run_ty"]) for r in report["runs"]] == [("T1", "WKLY")]
     report = dags.run_timed_task(VAR_KEY, {"run": "weekly,monthly"}, _DagRun("manual", conf={"run": "weekly,monthly"}))
     assert [(r["table_nm"], r["run_ty"], r["status"]) for r in report["runs"]] == \
         [("T1", "WKLY", "COMPLETED"), ("T1", "MNT", "COMPLETED")]
-    with pytest.raises(dags.AirflowFailException, match="1 of 1 run"):        # no daily sample: a config problem
+    with pytest.raises(dags.AirflowFailException, match="1 of 1 run"):
         dags.run_timed_task(VAR_KEY, {}, _DagRun("manual", conf={"run": "daily"}))
 
 
@@ -111,13 +110,13 @@ def test_trigger_keys_limit_what_an_upstream_dag_can_change(variable):
 
 
 FRAMEWORK_CONF = {"project": "UMCM_FRAMEWORK", "table_group": "UM", "table": "ODAG1", "run_type": "WEEKLY",
-                  "source": "", "as_of": "2026-08-08"}   # what a framework DAG passes to the DAGs it triggers
+                  "source": "", "as_of": "2026-08-08"}
 
 
 def test_triggered_by_the_framework(variable):
     variable({**BASE, "trigger_keys": ["as_of"], "trigger_run_params": ["run_type", "table"]})
     config = dags.resolve_config(VAR_KEY, FRAMEWORK_CONF)
-    assert config["project"] == "UMCM" and config["as_of"] == "2026-08-08"          # its project is not taken
+    assert config["project"] == "UMCM" and config["as_of"] == "2026-08-08"
     assert config["run_params"] == {"batch_id": "2026-08-01", "run_type": "WEEKLY", "table": "ODAG1"}
     assert "trigger_run_params" not in config
 
@@ -162,7 +161,7 @@ def test_retention_task(monkeypatch, variable, raw):
 def test_layering_and_blocked_trigger_keys(variable):
     variable({**BASE, "runs": [{"table": "ODAG1", "name": "x", "schedule_interval": "0 1 * * *"}]})
     config = dags.resolve_config(VAR_KEY, {"RUN_KEY": "rk", "meta_db": "PROD_DB", "td_conn_var": "PROD"}, 0)
-    assert (config["project"], config["table"], config["run_type"]) == ("UMCM", "ODAG1", "WKLY")   # layered
+    assert (config["project"], config["table"], config["run_type"]) == ("UMCM", "ODAG1", "WKLY")
     assert "schedule_interval" not in config and "name" not in config
     assert config["run_key"] == "rk" and config["meta_db"] == "main" and config["td_conn_var"] == "DEV"
 
@@ -196,12 +195,12 @@ def test_a_final_sample_is_not_replaced_by_the_dag(monkeypatch, variable, raw, s
     from airflow.sdk.exceptions import AirflowFailException
     from sampling.db import Connection
     from sampling.engine import finalize_run
-    monkeypatch.setattr(raw, "close", lambda: None)   # the task closes its connection: keep the test DB
+    monkeypatch.setattr(raw, "close", lambda: None)
     build_source(raw.db)
     um_config(raw.db)
     _run_task(monkeypatch, raw)
     finalize_run(Connection(raw, access_lock=False), settings, key(1), "2026-08-01", "auditor")
-    with pytest.raises(AirflowFailException):        # FINALIZED is a configuration problem: no retry
+    with pytest.raises(AirflowFailException):
         _run_task(monkeypatch, raw)
 
 
@@ -247,8 +246,6 @@ def test_extra_filters_add_up_across_the_layers(variable):
 
 
 def test_the_connection_id_falls_back():
-    """The task's argument, then the Variable's connection_id, then td_conn_var (the framework), then
-    govt_rgltry_teradata; connection_type, when given, must be teradata."""
     assert dags._connection_id({}) == "govt_rgltry_teradata"
     assert dags._connection_id({"td_conn_var": "DEV"}) == "DEV"
     assert dags._connection_id({"td_conn_var": "DEV", "connection_id": "govt_rgltry_teradata_dev"}) == "govt_rgltry_teradata_dev"

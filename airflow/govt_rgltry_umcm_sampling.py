@@ -1,4 +1,3 @@
-"""UMCM stratified sampling. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md."""
 import os
 import sys
 

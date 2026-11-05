@@ -1,5 +1,3 @@
-"""extra_filters: a SQL condition given at run time on the rows the scope returns, for tables
-that hold several loads, batches or SCD2 versions of a case."""
 import json
 from datetime import date
 
@@ -14,17 +12,14 @@ CURRENT_B2 = "btch_id = 'B2' AND curr_ind = 'Y'"
 
 @pytest.fixture(autouse=True)
 def _data(raw):
-    """Cases c00..c09 in batches B1 and B2; in B2 each case has an old version (N) and a current one (Y)."""
     db = raw.db
     db.execute("CREATE TABLE h (case_id VARCHAR, disp VARCHAR, btch_id VARCHAR, curr_ind VARCHAR)")
     rows = [(f"c{i:02d}", "Denied", "B1", "Y") for i in range(10)]
     rows += [(f"c{i:02d}", "Denied", "B2", ind) for i in range(10) for ind in ("N", "Y")]
     db.executemany("INSERT INTO h VALUES (?, ?, ?, ?)", rows)
     insert_config(db, src_table_nm="h", scope_sql_txt=None, exclusion_sql=None, target_cnt=4, order_by=None)
-    # a rule's SELECT reads its own rows: one per case
     insert_rule(db, "PRIORITY", 900, "by_id", rule_ty="EXPRESSION",
                 rule_sql_txt="SELECT DISTINCT case_id, case_id AS v FROM h")
-    # the level's SELECT reads one version of each case of the run's batch
     insert_rule(db, "LEVEL", 1000, "disp", seq_nbr=1, level_nbr=0, parent_path_txt="*",
                 rule_sql_txt="SELECT case_id, disp FROM h WHERE btch_id = '{batch}' AND curr_ind = 'Y'")
     db.execute("INSERT INTO GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Active_Ind, Rule_Class_Cd, "
@@ -42,7 +37,6 @@ def test_a_filter_picks_the_load_and_the_current_version(raw, conn, settings):
     assert out["status"] == "COMPLETED", out.get("error")
     assert out["in_scope"] == 10 and out["selected"] == 4
     assert out["params"]["extra_filters"] == CURRENT_B2
-    # kept with the run's parameters: a case replacement rebuilds its SQL from them
     assert json.loads(_rows(raw, "SELECT Run_Parm_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])["extra_filters"] == CURRENT_B2
 
 

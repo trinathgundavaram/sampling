@@ -30,7 +30,6 @@ airflow_resources/                          (not deployed with the DAGs)
 
 sql/                                        shared by both versions
   schema.sql                                Teradata DDL ({{META_DB}} template), 5 tables
-  schema_drop.sql                           drops them (fresh redeploy only)
 
 local/                                      the local version (command line, dev.env); uses airflow/sampling
 ```
@@ -68,10 +67,9 @@ version).
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK `airflow.sdk`,
    the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), validated on **3.3.0**. The email tasks
    use the Airflow Connection `smtp_default`.
-3. Create the tables once, in the metadata database, from `sql/schema.sql` (replace `{{META_DB}}`), e.g. from a
-   machine with the local version: `python local/run_sampling.py deploy-schema`. The engine never creates or alters
-   tables. A `GOVT_RGLTRY_SamplingRun` created before the run row lost its traceback and report columns needs
-   `ALTER TABLE <meta_db>.GOVT_RGLTRY_SamplingRun DROP Error_Detail_Txt, DROP Run_Rpt_Txt;` (or a redeploy).
+3. Create the tables by hand (DBA), in the metadata database, from the DDL in `sql/schema.sql` (replace
+   `{{META_DB}}`). A deployment is fresh: drop any existing `GOVT_RGLTRY_Sampl*` table first and create all five
+   again - no table is altered in place. Neither the engine nor the command line creates, drops or alters tables.
 4. Enter the configuration rows (`GOVT_RGLTRY_SamplingConfig`, `GOVT_RGLTRY_SamplingRule`; there are no seed files:
    the rows are entered in the tables, see the runbook sections 4 and 7, and for ODAG1 OPEN_ITEMS.md section D), then run
    `python local/run_sampling.py validate --project UMCM --check-sql`.
@@ -254,7 +252,6 @@ cd local
 cp dev.env.example dev.env          # fill in TERADATA_* and SAMPLING_META_DB
 pip install -r requirements.txt
 python run_sampling.py test-connection
-python run_sampling.py deploy-schema --dry-run
 python run_sampling.py validate --project UMCM --check-sql
 python run_sampling.py run --project UMCM --run-type WKLY --as-of 2026-10-30 --dry-run
 python run_sampling.py run --project UMCM --table ODAG1 --run-type WKLY --run-key 2026-10-30 --run-param pull_date=2026-10-30
@@ -318,7 +315,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (145 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (144 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

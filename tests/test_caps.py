@@ -1,5 +1,3 @@
-"""CAP rules: a limit across the whole sample (or the buckets under a parent), not one bucket at a time - at most 3
-cases of one CPT code, at most 10 out-of-network denials."""
 from datetime import date
 
 from conftest import insert_bucket, insert_config, insert_rule, key, set_config
@@ -9,7 +7,6 @@ AS_OF = date(2026, 8, 7)
 
 
 def _table(db, rows):
-    """rows: (case_id, disp, cpt, oon)."""
     db.execute("CREATE TABLE u (case_id VARCHAR, disp VARCHAR, cpt VARCHAR, oon VARCHAR)")
     db.executemany("INSERT INTO u VALUES (?, ?, ?, ?)", rows)
 
@@ -47,7 +44,6 @@ SELECTED_U = ("SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection s JOIN u ON s.Ca
 
 
 def test_at_most_3_of_one_code_across_every_bucket(raw, conn, settings):
-    """Both buckets would take 5 cases of C1; across the sample only 3 may be, each bucket keeps its quota."""
     rows = [(f"a{i:03d}", "A", "C1" if i < 5 else f"A{i}", "N") for i in range(10)]
     rows += [(f"b{i:03d}", "B", "C1" if i < 5 else f"B{i}", "N") for i in range(10)]
     _table(raw.db, rows)
@@ -56,16 +52,14 @@ def test_at_most_3_of_one_code_across_every_bucket(raw, conn, settings):
     out = _run(conn, settings)
     assert out["status"] == "COMPLETED", out.get("error")
     assert _count(raw, SELECTED_U + "u.cpt = 'C1'") == 3
-    assert {k: v["selected"] for k, v in out["by_stratum"].items()} == {"A": 5, "B": 5}     # the mix holds
+    assert {k: v["selected"] for k, v in out["by_stratum"].items()} == {"A": 5, "B": 5}
     assert out["caps"] == {"CPT_VARIETY": {"limit": 3, "over": 7, "replaced": 7}}
-    # the highest in priority order stay: a000-a002, then the next of each bucket
     assert [k for (k,) in _selected(raw)] == [f"case_id={c}" for c in
                                              ("a000", "a001", "a002", "a005", "a006", "b005", "b006", "b007", "b008",
                                               "b009")]
 
 
 def test_a_cap_under_a_parent_only(raw, conn, settings):
-    """At most 2 out-of-network denials; approvals are not limited."""
     rows = [(f"d{i:03d}", "Denied", f"D{i}", "Y" if i < 10 else "N") for i in range(20)]
     rows += [(f"p{i:03d}", "Approved", f"P{i}", "Y") for i in range(10)]
     _table(raw.db, rows)
@@ -78,15 +72,13 @@ def test_a_cap_under_a_parent_only(raw, conn, settings):
 
 
 def test_no_candidate_left_tops_up_within_the_caps_or_stays_short(raw, conn, settings):
-    rows = [(f"d{i:03d}", "Denied", f"D{i}", "Y") for i in range(10)]               # every denial is OON
+    rows = [(f"d{i:03d}", "Denied", f"D{i}", "Y") for i in range(10)]
     rows += [(f"p{i:03d}", "Approved", f"P{i}", "Y" if i < 2 else "N") for i in range(10)]
     _table(raw.db, rows)
     _config(raw.db, 10, {"Denied": 80, "Approved": 20})
-    _cap(raw.db, 51, "OON", OON_CAP, 4)                                             # the whole sample
+    _cap(raw.db, 51, "OON", OON_CAP, 4)
     out = _run(conn, settings, "TOPUP")
-    assert out["selected"] == 10 and _count(raw, SELECTED_U + "u.oon = 'Y'") == 4    # topped up with in-network cases
-    # in priority order the denials d000-d003 keep the 4 places; d004-d007 have no in-network denial to give way to,
-    # the 2 OON approvals give way to in-network ones
+    assert out["selected"] == 10 and _count(raw, SELECTED_U + "u.oon = 'Y'") == 4
     assert out["by_stratum"]["Denied"]["selected"] == 4 and len(out["notes"]) == 4
     set_config(raw.db, shortfall_cd="NONE")
     out = _run(conn, settings, "SHORT")
@@ -97,7 +89,7 @@ def test_a_cap_as_a_percentage_of_the_target(raw, conn, settings):
     rows = [(f"a{i:03d}", "A", "C1", "N") for i in range(20)] + [(f"b{i:03d}", "A", f"B{i}", "N") for i in range(20)]
     _table(raw.db, rows)
     _config(raw.db, 10, {"A": 100})
-    _cap(raw.db, 50, "CPT", CPT_CAP, 20, rule_ty="PER_VALUE", max_ty="PCT")       # 20 % of 10: 2 per code
+    _cap(raw.db, 50, "CPT", CPT_CAP, 20, rule_ty="PER_VALUE", max_ty="PCT")
     out = _run(conn, settings)
     assert out["caps"]["CPT"]["limit"] == 2 and _count(raw, SELECTED_U + "u.cpt = 'C1'") == 2 and out["selected"] == 10
 

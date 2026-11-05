@@ -1,5 +1,3 @@
-"""Report and parameter fixes: notes of a water-filled bucket, bucket counts after a rounded-up share, timestamp
-parameters, the cap groups of a case."""
 from datetime import date, datetime
 
 from conftest import insert_bucket, insert_config, insert_rule, key, set_config
@@ -25,7 +23,6 @@ def _run(conn, settings):
 
 
 def test_a_bucket_shared_again_keeps_only_its_last_notes(raw, conn, settings):
-    """A1 has 2 cases, so A2's share of the ALL budget grows from 5 to 8: only the note of 8 holds."""
     _table(raw.db, [(f"x{i:03d}", "A1", "B") for i in range(2)] + [(f"y{i:03d}", "A2", "B") for i in range(20)])
     _config(raw.db, 10)
     insert_rule(raw.db, "LEVEL", 1000, "a", seq_nbr=1, level_nbr=0, rule_sql_txt="a")
@@ -38,7 +35,6 @@ def test_a_bucket_shared_again_keeps_only_its_last_notes(raw, conn, settings):
 
 
 def test_bucket_counts_follow_the_cut_to_the_target(raw, conn, settings):
-    """CEIL shares of 10 between 3 values are 4 each (12): the 2 cut leave the counts at 10."""
     _table(raw.db, [(f"{v}{i:03d}", v, "B") for v in "PQR" for i in range(10)])
     _config(raw.db, 10)
     set_config(raw.db, rounding_cd="CEIL")

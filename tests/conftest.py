@@ -1,8 +1,3 @@
-"""Test setup: the engine runs on DuckDB standing in for teradatasql (same DB-API shape, ? parameters).
-
-The stand-in keeps one DuckDB connection for every cursor (so transactions span statements, as on Teradata)
-and maps the `autocommit` switch to BEGIN / COMMIT. Teradata-only syntax is avoided: Settings(access_lock=False).
-"""
 import random
 import re
 import sys
@@ -29,7 +24,7 @@ class _Cursor:
 
     def execute(self, sql, params=None):
         import re
-        top = re.match(r"\s*SELECT TOP (\d+) (.*)", sql, re.S)   # Teradata's TOP n -> LIMIT n
+        top = re.match(r"\s*SELECT TOP (\d+) (.*)", sql, re.S)
         if top:
             sql = f"SELECT {top.group(2)} LIMIT {top.group(1)}"
         self._raw.execute(sql, params) if params else self._raw.execute(sql)
@@ -52,12 +47,10 @@ class _Cursor:
 
 
 class DuckRaw:
-    """teradatasql-like connection over one DuckDB connection."""
-
     def __init__(self):
         self.db = duckdb.connect(":memory:")
         self._auto = True
-        self.fail_on = None   # a SQL fragment: execute() raises when a statement contains it
+        self.fail_on = None
 
     @property
     def autocommit(self):
@@ -95,7 +88,6 @@ class DuckRaw:
 
 
 def load_cli():
-    """local/run_sampling.py as a module (its `sampling` package is the same code as airflow/sampling)."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("run_sampling", ROOT / "local" / "run_sampling.py")
     module = importlib.util.module_from_spec(spec)
@@ -105,10 +97,11 @@ def load_cli():
 
 
 def create_tables(db):
-    """sql/schema.sql with Teradata-only clauses translated for DuckDB."""
     import re
     text = (ROOT / "sql" / "schema.sql").read_text().replace("{{META_DB}}", META_DB)
-    for stmt in load_cli().split_statements(text):
+    for stmt in (s.strip() for s in text.split(";")):
+        if not stmt:
+            continue
         stmt = re.sub(r"CREATE MULTISET TABLE", "CREATE TABLE", stmt)
         stmt = re.sub(r"\)\s*(UNIQUE\s+)?PRIMARY INDEX \([^)]*\)\s*$", ")", stmt, flags=re.S)
         stmt = (stmt.replace("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP").replace("TIMESTAMP(6)", "TIMESTAMP")
@@ -139,20 +132,17 @@ PROJECT, RUN_TY = "UMCM", "WKLY"
 
 
 def key(n=1, project=PROJECT, run_ty=RUN_TY) -> tuple:
-    """The sample the tests call config n: (project, table T<n>, run type)."""
     return (project, f"T{n}", run_ty)
 
 
-_CONFIGS = {}   # (id(db), config n) -> (project, table, run type) of the row insert_config wrote
+_CONFIGS = {}
 
 
 def _config_key(db, config_id) -> tuple:
-    """(project, table, run type) of config n's row (the defaults when it has none yet)."""
     return _CONFIGS.get((id(db), config_id)) or key(config_id)
 
 
 def _where(db, config_id) -> tuple:
-    """The WHERE of config n's row and its parameters."""
     project, table, run_ty = _config_key(db, config_id)
     return "UPPER(Project_Cd) = UPPER(?) AND UPPER(Table_Nm) = UPPER(?) AND UPPER(Run_Ty) = UPPER(?)", \
         [project, table, run_ty]
@@ -162,11 +152,6 @@ def insert_config(db, config_id=1, smpl_method_cd="RANKED", order_by="revision D
                   rounding_cd="FLOOR", src_table_nm="case_source", key_columns="case_id",
                   exclusion_sql="auto_closed = 1", scope_sql_txt="pull_date = '{batch_id}'", project_cd=PROJECT,
                   run_ty=RUN_TY, table_nm=None, src_schema_nm=META_DB, active_ind=1, **more):
-    """One GOVT_RGLTRY_SamplingConfig row: the sample (project_cd, T<config_id>, run_ty), target_cnt cases (CNT;
-    target_ty / target_val in `more` for a percentage). The tests' shorthands (set_config): scope_sql_txt may be a
-    condition on the source (stored as SELECT * FROM the source WHERE it), exclusion_sql (a condition) becomes an
-    EXCLUSION rule named EXCLUDED (rule_id 9000 + config_id), order_by ('expr [DESC]') a last PRIORITY EXPRESSION
-    rule named ORDER (rule_id 8000 + config_id)."""
     db.execute("""
         INSERT INTO GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty, Active_Ind, Src_Schema_Nm, Src_Table_Nm,
             Key_Columns_Txt, Target_Ty, Target_Val, Smpl_Method_Cd, Rounding_Cd)
@@ -184,8 +169,6 @@ _SELECT = re.compile(r"^\s*(SELECT|SEL|WITH)\b", re.I)
 
 
 def as_select(db, config_id, text, value=False):
-    """A condition (or, value=True, an expression) on the config's source table as the SELECT a rule holds:
-    the key columns of the rows where it is true (or each row's key columns and value)."""
     where, params = _where(db, config_id)
     schema, table, keys = db.execute("SELECT Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt FROM "
                                      f"GOVT_RGLTRY_SamplingConfig WHERE {where}", params).fetchone()
@@ -195,17 +178,12 @@ def as_select(db, config_id, text, value=False):
 
 
 def insert_rule(db, rule_class_cd, rule_id, rule_nm, config_id=1, seq_nbr=100, active_ind=1, raw_sql=False, **cols):
-    """One GOVT_RGLTRY_SamplingRule row of config n's sample (cols: any other column; table_nm / run_ty '*' to
-    share it). A selection rule given a condition or an expression (the short form the tests write) is stored as
-    the SELECT the engine needs (as_select), unless raw_sql."""
     kind = str(cols.get("rule_ty") or "").upper()
     sql = cols.get("rule_sql_txt")
     if not raw_sql and rule_class_cd in ("EXCLUSION", "PRIORITY", "LEVEL", "BUCKET") and sql \
             and not _SELECT.match(sql) and "TODO" not in sql:
         cols["rule_sql_txt"] = as_select(db, config_id, sql, value=rule_class_cd == "LEVEL"
                                          or (rule_class_cd == "PRIORITY" and kind == "EXPRESSION"))
-        if kind in ("SQL", "CONDITION"):
-            cols["rule_ty"] = "QUERY"
     project, table, run_ty = _config_key(db, config_id)
     row = {"rule_id": rule_id, "project_cd": project, "table_nm": table, "run_ty": run_ty, "active_ind": active_ind,
            "rule_class_cd": rule_class_cd, "seq_nbr": seq_nbr, "rule_nm": rule_nm, **cols}
@@ -217,8 +195,6 @@ def insert_rule(db, rule_class_cd, rule_id, rule_nm, config_id=1, seq_nbr=100, a
 
 def insert_strata(db, strata_id, config_id, level_nbr, name, expr, mix: dict, applies_to="*",
                   unlisted_cd="SHARE"):
-    """One LEVEL rule (rule_id 1000 * strata_id) and its BUCKET rules; mix = {bucket_name: percentage}
-    (PCT buckets) or {bucket_name: dict of bucket columns}."""
     insert_rule(db, "LEVEL", 1000 * strata_id, name, config_id, seq_nbr=1, rule_sql_txt=expr, level_nbr=level_nbr,
                 parent_path_txt=applies_to, unlisted_cd=unlisted_cd)
     for i, (bucket, spec) in enumerate(mix.items()):
@@ -228,9 +204,8 @@ def insert_strata(db, strata_id, config_id, level_nbr, name, expr, mix: dict, ap
 
 def insert_bucket(db, rule_id, level_nbr, bucket_name, config_id=1, parent_path_txt="*", seq_nbr=100,
                   rule_sql_txt=None, quota_cd="PCT", quota_val=None, max_cnt=None, active_ind=1, **cols):
-    """One BUCKET rule; max_cnt n is the shorthand of max_ty CNT, max_val n."""
     if rule_sql_txt and rule_sql_txt.strip() == "1=1":
-        rule_sql_txt = None   # every case: the bucket without rule_sql_txt takes the rest
+        rule_sql_txt = None
     if max_cnt is not None:
         cols.update(max_ty="CNT", max_val=max_cnt)
     insert_rule(db, "BUCKET", rule_id, bucket_name, config_id, seq_nbr, active_ind, rule_sql_txt=rule_sql_txt,
@@ -238,9 +213,6 @@ def insert_bucket(db, rule_id, level_nbr, bucket_name, config_id=1, parent_path_
 
 
 def set_config(db, config_id=1, **cols):
-    """Update config n's row. Shorthands: scope_sql_txt a condition (-> SELECT * FROM the source WHERE it),
-    diversity_sql_txt an expression (-> SELECT the key columns and it), target_cnt n (-> CNT n),
-    diversity_cap_cnt n (-> CNT n), order_by 'expr [DESC]' (-> the ORDER rule; None removes it)."""
     for name, value in cols.items():
         if name == "order_by":
             db.execute("DELETE FROM GOVT_RGLTRY_SamplingRule WHERE Rule_ID = ?", [8000 + config_id])
@@ -267,7 +239,6 @@ def set_config(db, config_id=1, **cols):
 
 
 def build_source(db, n=1000, table="case_source"):
-    """The fixture source table of the DQ repo's frozen UM regression test (random.seed(42))."""
     db.execute(f"CREATE TABLE {table} (case_id VARCHAR, category VARCHAR, area VARCHAR, revision INTEGER, "
                f"pull_date DATE, auto_closed INTEGER)")
     categories = ["Denied"] * 80 + ["Withdrawn"] * 10 + ["Dismissed"] * 2 + ["Approved"] * 8

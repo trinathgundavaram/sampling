@@ -1,9 +1,3 @@
-"""Run settings shared by the Airflow and the local version: metadata database, environment, time zone.
-
-Nothing here reads the process environment or Airflow: the Airflow bridge (dags.py) builds Settings from the
-Variable, the local command line (run_sampling.py) from dev.env / the shell. Both then hand the same object to
-the engine.
-"""
 from __future__ import annotations
 
 import re
@@ -12,8 +6,6 @@ from datetime import date, datetime
 from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 
-# $env / $ENV in a database or table name -> this environment's value (the framework convention):
-# UAT and PROD have no suffix, so UMCM_$ENV_STG is UMCM_DEV_STG in DEV and UMCM_STG in PROD.
 ENV_TOKEN_VALUES = {"DEV": "dev", "QA": "qa", "INT": "int", "UAT": "", "PROD": ""}
 DEFAULT_TIMEZONE = "America/Chicago"
 DEFAULT_CHUNK_ROWS = 1000
@@ -23,7 +15,7 @@ _IDENT = re.compile(r"^[A-Za-z_$#][A-Za-z0-9_$#]{0,127}$")
 
 
 class ConfigError(ValueError):
-    """A configuration problem (Variable, settings or GOVT_RGLTRY_Sampl* rows): retrying does not help."""
+    pass
 
 
 def _flag(value: Any, default: bool) -> bool:
@@ -37,14 +29,13 @@ def _flag(value: Any, default: bool) -> bool:
 class Settings:
     meta_db: str
     environment: str = "DEV"
-    env_value: Optional[str] = None      # replacement text for $env when the environment's default does not fit
+    env_value: Optional[str] = None
     timezone: str = DEFAULT_TIMEZONE
-    chunk_rows: int = DEFAULT_CHUNK_ROWS  # rows per fetchmany() and per executemany() batch
-    access_lock: bool = True              # prefix SELECTs with LOCKING ROW FOR ACCESS (Teradata dirty read)
+    chunk_rows: int = DEFAULT_CHUNK_ROWS
+    access_lock: bool = True
 
     def __post_init__(self):
         object.__setattr__(self, "environment", str(self.environment or "DEV").strip().upper())
-        # meta_db may carry $env too: HSABC_$ENV is HSABC_DEV in DEV, HSABC in PROD
         object.__setattr__(self, "meta_db", self.resolve_env(str(self.meta_db or "").strip()))
         if not self.meta_db or not _IDENT.match(self.meta_db):
             raise ConfigError(f"meta_db {self.meta_db!r} must be a plain Teradata database name")
@@ -57,7 +48,6 @@ class Settings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "Settings":
-        """Settings from a Variable / dev.env style mapping; keys are not case sensitive."""
         v = {str(k).lower(): val for k, val in (values or {}).items() if val not in (None, "")}
         if not v.get("meta_db"):
             raise ConfigError("'meta_db' is required")
@@ -73,15 +63,12 @@ class Settings:
                    access_lock=_flag(v.get("access_lock"), True))
 
     def now(self) -> datetime:
-        """The current business time (naive, in `timezone`) - what every timestamp the engine writes uses."""
         return datetime.now(ZoneInfo(self.timezone)).replace(tzinfo=None)
 
     def today(self) -> date:
         return self.now().date()
 
     def resolve_env(self, text: Optional[str], identifier: bool = True) -> Optional[str]:
-        """Replace $env / $ENV / $Env with this environment's value in the token's own casing. In a name an empty
-        value leaves no doubled, leading or trailing underscore (HSPROCS_$ENV.X -> HSPROCS.X in PROD)."""
         if not text or not _ENV_TOKEN.search(text):
             return text
         value = self.env_value if self.env_value is not None else ENV_TOKEN_VALUES.get(self.environment,

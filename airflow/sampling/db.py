@@ -1,15 +1,3 @@
-"""Teradata layer: the connection wrapper, transactions, {key} / $key parameters, run ids.
-
-One Teradata connection serves everything a run touches: the GOVT_RGLTRY_Sampl* metadata tables (in
-Settings.meta_db), the source table a sample reads (Src_Schema_Nm.Src_Table_Nm) and its target table.
-
-The connection comes from the TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH environment
-variables - set by the Airflow bridge from the Teradata Connection, or locally from dev.env. Nothing else here
-knows where they came from.
-
-Logging: SQL text and row counts only, never bind values or fetched row data (the source can hold member and
-case identifiers).
-"""
 from __future__ import annotations
 
 import logging
@@ -21,14 +9,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Iterator, Optional, Sequence
 
-# db: Teradata layer - connection wrapper, transactions, parameters, run ids, error text.
 
 log = logging.getLogger(__name__)
 
 try:
     import teradatasql
     _TERADATA_AVAILABLE = True
-except ImportError:  # the tests run on a stand-in
+except ImportError:
     teradatasql = None
     _TERADATA_AVAILABLE = False
 
@@ -46,14 +33,12 @@ def _one_line(sql: str, max_len: int = 500) -> str:
 
 
 def _clean(value):
-    """Teradata returns whole numbers (COUNT(*), ROW_NUMBER()) as Decimal: give them back as int."""
     if isinstance(value, Decimal) and value == value.to_integral_value():
         return int(value)
     return value
 
 
 def connect_teradata(database: Optional[str] = None, access_lock: bool = True) -> "Connection":
-    """A new Teradata connection from the TERADATA_* environment; `database` becomes the session default."""
     if not _TERADATA_AVAILABLE:
         raise ImportError("teradatasql is required. Install with: pip install teradatasql")
     host = _require("TERADATA_HOST")
@@ -67,8 +52,6 @@ def connect_teradata(database: Optional[str] = None, access_lock: bool = True) -
 
 
 class Connection:
-    """Wraps a teradatasql connection (autocommit on; transaction() turns it off for one atomic unit)."""
-
     def __init__(self, raw, host: Optional[str] = None, access_lock: bool = True):
         self._raw = raw
         self.host = host
@@ -83,7 +66,6 @@ class Connection:
         return sql
 
     def query(self, sql: str, params: Sequence = ()) -> list:
-        """Run a SELECT; rows as dicts with lower-case column names."""
         text = self._text(sql)
         log.debug("query: %s | params=%d", _one_line(text), len(params or ()))
         cur = self._raw.cursor()
@@ -99,7 +81,6 @@ class Connection:
             cur.close()
 
     def columns(self, sql: str) -> list:
-        """The column names (as the database spells them) of a SELECT's result; run it with WHERE 1=0."""
         text = self._text(sql)
         log.debug("columns: %s", _one_line(text))
         cur = self._raw.cursor()
@@ -112,7 +93,6 @@ class Connection:
             cur.close()
 
     def stream(self, sql: str, chunk_rows: int) -> list:
-        """Run one large SELECT, fetched `chunk_rows` at a time (bounds the driver's buffer, not the result)."""
         text = self._text(sql)
         log.debug("stream: %s | chunk=%d", _one_line(text), chunk_rows)
         cur = self._raw.cursor()
@@ -133,7 +113,6 @@ class Connection:
             cur.close()
 
     def execute(self, sql: str, params: Sequence = ()) -> int:
-        """One DML statement (committed by itself, or with the enclosing transaction()); returns the row count."""
         log.debug("execute: %s | params=%d", _one_line(sql), len(params or ()))
         cur = self._raw.cursor()
         try:
@@ -143,7 +122,6 @@ class Connection:
             cur.close()
 
     def executemany(self, sql: str, rows: list, chunk_rows: int) -> int:
-        """Batched parameterised DML; returns the number of rows sent."""
         if not rows:
             return 0
         log.debug("executemany: %s | %d row(s), chunk=%d", _one_line(sql), len(rows), chunk_rows)
@@ -157,7 +135,6 @@ class Connection:
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """One atomic unit; nested blocks join the outer one (Teradata has no savepoints)."""
         if self._depth:
             self._depth += 1
             try:
@@ -195,13 +172,6 @@ class Connection:
         finally:
             cur.close()
 
-    def ping(self) -> bool:
-        try:
-            self.query("SELECT 1 AS ok")
-            return True
-        except Exception:  # noqa: BLE001
-            return False
-
     def close(self) -> None:
         if not self.closed:
             self.closed = True
@@ -214,10 +184,6 @@ class Connection:
         self.close()
 
 
-# ---------------------------------------------------------------------------
-# {key} / $key run parameters in Scope_Sql_Txt and the rules' SQL
-# ---------------------------------------------------------------------------
-# Both spellings, freely mixed. "$key" ends at a word boundary, so "$year" in "$year_end" is not consumed.
 _TOKEN_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}|\$([a-zA-Z_][a-zA-Z0-9_]*)\b")
 
 
@@ -226,9 +192,6 @@ def _escape_literal(value) -> str:
 
 
 def substitute_params(sql: Optional[str], params: dict, escape: bool = True) -> Optional[str]:
-    """Replace every {key} / $key with the value of params[key], quotes doubled (the author writes the quotes:
-    pull_date = '{pull_date}'; escape=False for text that is not SQL, e.g. a run_key template). Raises
-    ValueError naming any token left without a value. Keys are not case sensitive."""
     if not sql:
         return sql
     params = params or {}
@@ -247,23 +210,7 @@ def substitute_params(sql: Optional[str], params: dict, escape: bool = True) -> 
     return resolved
 
 
-
-# ---------------------------------------------------------------------------
-# run_key / run ids
-# ---------------------------------------------------------------------------
-
-def build_run_key(*parts, delimiter: str = "_") -> str:
-    """Join values into one run_key: build_run_key(2026, 8) -> '2026_8'."""
-    if not parts:
-        raise ValueError("build_run_key() needs at least one part")
-    return delimiter.join(str(p) for p in parts)
-
-
 def generate_run_id(*label_parts, timestamp: Optional[datetime] = None) -> str:
-    """'<labels joined by ::>::<YYYYMMDDTHHMMSS.ffffff>::<6 hex>' - sortable, readable, collision-free.
-
-    e.g. UMCM.ODAG1.WKLY::2026-10-30::attempt-2::airflow-scheduled::20261030T080000.183045::f9e8d7
-    """
     ts = (timestamp or datetime.now()).strftime("%Y%m%dT%H%M%S.%f")
     labels = [str(p) for p in label_parts if p not in (None, "")]
     run_id = "::".join([*labels, ts, secrets.token_hex(3)])
@@ -277,19 +224,15 @@ ERROR_TEXT_MAX = 1000
 
 
 def error_line(exc: BaseException) -> str:
-    """The database's own message in a driver exception (the driver puts its own lines first), else the first line."""
     m = _DATABASE_ERROR.search(str(exc))
     return m.group(0) if m else (str(exc).strip().splitlines() or [""])[0]
 
 
 def error_text(exc: BaseException) -> str:
-    """One line for logs, reports and the stored Error_Txt: the exception type and the database's message."""
     return f"{type(exc).__name__}: {error_line(exc)}"[:ERROR_TEXT_MAX]
 
 
 def log_sql(what: str, template: Optional[str], sql: str, params: Optional[dict] = None) -> None:
-    """Log a configured statement as it runs (as the framework does): the SQL as configured, each {name} / $name
-    parameter it uses with its value, and the statement as sent (run parameters only, never row data)."""
     params = {str(k).lower(): v for k, v in (params or {}).items()}
     names = dict.fromkeys(n for n in ((a or b).lower() for a, b in _TOKEN_RE.findall(template or "")) if n != "env")
     shown = ", ".join(f"{n} = {params.get(n)!r}" for n in names) or "none"

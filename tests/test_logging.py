@@ -1,5 +1,3 @@
-"""Logging and stored errors as the framework does them: 'SAMPLING | <sample> | <what>' at each stage, configured SQL
-with its parameters, one line of error text in the table (the detail in the log only)."""
 import logging
 from datetime import date
 

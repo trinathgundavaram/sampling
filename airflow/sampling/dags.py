@@ -1,16 +1,3 @@
-"""Airflow: the sampling DAG, its task, and the bridge from the Variable + Teradata Connection to the engine.
-
-Everything about a DAG comes from its own Airflow Variable (JSON); the DAG file only names the dag_id and the
-Variable. The Teradata login comes from an Airflow Connection: the
-Variable's `connection_id` (or the framework's `td_conn_var`; default govt_rgltry_teradata) is read with
-BaseHook.get_connection and exported as TERADATA_HOST / TERADATA_USER / TERADATA_PASSWORD / TERADATA_LOGMECH for
-sampling.db. No .env file is read on Airflow. See airflow_resources/docs/AIRFLOW_DEPLOYMENT.md.
-
-A sample is a project + table + run type (GOVT_RGLTRY_SamplingConfig): the Variable (or each of its `runs`
-entries) names a project and optionally a table and / or a run type. `runs` entries with their own
-schedule_interval make a timed DAG, as in the framework: one task, scheduled at every entry's time, running the
-entries due then (or the ones named in the trigger's `run`).
-"""
 from __future__ import annotations
 
 import html
@@ -30,7 +17,7 @@ from airflow.timetables.trigger import MultipleCronTriggerTimetable
 from croniter import croniter
 try:
     from airflow.sdk.exceptions import AirflowFailException
-except ImportError:  # Airflow 3.0
+except ImportError:
     from airflow.exceptions import AirflowFailException
 
 from sampling import __version__
@@ -39,17 +26,15 @@ from sampling.admin import purge_selections
 from sampling.engine import run_scope
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
-# sampling_task: Airflow bridge - the Variable + the Teradata Connection -> the engine; the DAG factory.
 
 logger = logging.getLogger(__name__)
 
-# Airflow Connection id used when neither the task, the Variable's connection_id nor td_conn_var names one
 DEFAULT_CONNECTION_ID = "govt_rgltry_teradata"
-CONNECTION_TYPE = "teradata"   # the only connection_type: the engine reads and writes Teradata
+CONNECTION_TYPE = "teradata"
 TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("project", "table", "run_type")
 RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "dry_run")
-TRIGGER_KEYS = (*SCOPE_KEYS, *RUN_KEYS, "log_level")   # what a trigger may change for one run
+TRIGGER_KEYS = (*SCOPE_KEYS, *RUN_KEYS, "log_level")
 PASSED_ON = ("project", "table", "run_type", "run_key", "as_of")
 SETTINGS_KEYS = ("meta_db", "load_env", "environment", "env_value", "timezone", "chunk_rows", "access_lock")
 DEFAULT_TIMEOUT = timedelta(hours=2)
@@ -59,10 +44,6 @@ DEFAULT_TAGS = ["GOVT_RGLTRY", "Sampling"]
 _TEXT = ["null", "string"]
 
 
-# ---------------------------------------------------------------------------
-# Variable, Connection -> environment and settings
-# ---------------------------------------------------------------------------
-
 def _set_env(key: str, value) -> None:
     if value is None or value == "":
         return
@@ -70,8 +51,6 @@ def _set_env(key: str, value) -> None:
 
 
 def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
-    """The Teradata Connection id: the task's argument, then the Variable's connection_id, then
-    td_conn_var (the framework's), then govt_rgltry_teradata. connection_type, when given, must be teradata."""
     kind = str(config.get("connection_type") or CONNECTION_TYPE).strip().lower()
     if kind != CONNECTION_TYPE:
         raise ConfigError(f"connection_type must be '{CONNECTION_TYPE}', got {config.get('connection_type')!r}")
@@ -79,8 +58,6 @@ def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
 
 
 def _load_teradata_connection(conn_id: str) -> None:
-    """The Airflow Connection's host, login, password and extra `logmech` as the TERADATA_* variables
-    sampling.db.connect_teradata reads."""
     conn = BaseHook.get_connection(conn_id)
     if not conn.host or not conn.login or not conn.password:
         raise ConfigError(f"Airflow Connection '{conn_id}' needs host, login and password")
@@ -94,7 +71,6 @@ def _load_teradata_connection(conn_id: str) -> None:
 
 
 def _keys(value: Optional[dict]) -> dict:
-    """A Variable / trigger object with its keys in lower case (keys are not case sensitive)."""
     return {str(k).lower(): v for k, v in (value or {}).items()}
 
 
@@ -111,7 +87,6 @@ def _load_variable(variable_key: str) -> dict:
 
 
 def load_dag_config(variable_key: str) -> dict:
-    """The Variable for the DAG file ({} when missing or invalid, so a bad Variable cannot break parsing)."""
     try:
         return _load_variable(variable_key)
     except Exception as e:  # noqa: BLE001
@@ -120,7 +95,6 @@ def load_dag_config(variable_key: str) -> dict:
 
 
 def run_scopes(config: dict) -> list:
-    """The Variable's `runs` (one task each), or one scope: the Variable itself."""
     runs = config.get("runs")
     if not runs:
         return [{}]
@@ -130,7 +104,6 @@ def run_scopes(config: dict) -> list:
 
 
 def timed_runs(config: dict) -> bool:
-    """Whether the Variable's `runs` have their own schedule_interval: one task, run at each entry's times."""
     try:
         return any(r.get("schedule_interval") for r in run_scopes(config))
     except ConfigError:
@@ -138,11 +111,6 @@ def timed_runs(config: dict) -> bool:
 
 
 def chosen_runs(variable: dict, dag_run, tz: str = DEFAULT_TIMEZONE) -> list:
-    """The `runs` entries a DAG run of a timed DAG works with (None = the Variable's own scope).
-
-    `run` in the trigger's configuration names them (comma separated); otherwise a scheduled run takes the entries
-    whose schedule_interval is its scheduled time, and a manual or triggered run the Variable's own scope.
-    """
     runs = run_scopes(variable)
     names = [n.strip().upper() for n in str(_keys(getattr(dag_run, "conf", None)).get("run") or "").split(",")
              if n.strip()]
@@ -165,7 +133,6 @@ def chosen_runs(variable: dict, dag_run, tz: str = DEFAULT_TIMEZONE) -> list:
 
 
 def _schedule(dag_config: dict, tz: str):
-    """The DAG's schedule: its schedule_interval, or with timed runs every time of the entries (and its own)."""
     if not timed_runs(dag_config):
         return dag_config.get("schedule_interval")
     crons = [c for c in [dag_config.get("schedule_interval"), *(r.get("schedule_interval") for r in dag_config["runs"])]
@@ -174,14 +141,11 @@ def _schedule(dag_config: dict, tz: str):
 
 
 def conf_value(dag_run, params, key: str):
-    """A trigger value by key in any case, else the form's parameter (passed on to the triggered DAGs)."""
     value = _keys(getattr(dag_run, "conf", None)).get(key)
     return value if value not in (None, "", []) else (params or {}).get(key) or ""
 
 
 def allowed_trigger_keys(variable: dict) -> tuple:
-    """The Variable's trigger_keys (default: all of TRIGGER_KEYS). An upstream DAG passing values this DAG must
-    not take - the framework passes its own project, say - is limited this way."""
     names = variable.get("trigger_keys")
     if names in (None, "", []):
         return TRIGGER_KEYS
@@ -193,7 +157,6 @@ def allowed_trigger_keys(variable: dict) -> tuple:
 
 
 def _list(value) -> list:
-    """A list setting given as a JSON list or as one comma-separated string, lower case."""
     if value in (None, "", []):
         return []
     items = value if isinstance(value, list) else str(value).split(",")
@@ -201,8 +164,6 @@ def _list(value) -> list:
 
 
 def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS, quiet: tuple = ()) -> dict:
-    """What a trigger may change: the scope, the run's inputs and the log level (only the `allowed` ones). The
-    database, the Connection and the environment stay the Variable's."""
     out, ignored = {}, []
     for key, value in _keys(given).items():
         if value in (None, "", []):
@@ -217,21 +178,16 @@ def trigger_values(given: Optional[dict], allowed: tuple = TRIGGER_KEYS, quiet: 
 
 
 def resolve_config(variable_key: str, overrides: Optional[dict] = None, scope_index: Optional[int] = None) -> dict:
-    """The Variable, then one entry of its `runs`, then the trigger's values (later wins): an entry naming only a
-    run type samples the Variable's project (and table) at that run type."""
     variable = _load_variable(variable_key)
     scope = dict(run_scopes(variable)[scope_index]) if scope_index is not None else {}
     as_params = _list(variable.get("trigger_run_params"))
     given = trigger_values(overrides, allowed_trigger_keys(variable), quiet=tuple(as_params))
     config = {k: v for layer in (variable, scope, given) for k, v in layer.items()
               if k not in ("runs", "trigger_keys", "trigger_run_params", "schedule_interval", "name")}
-    # trigger_run_params: values an upstream DAG passes (the framework's run_type, table ...) become run parameters
     picked = {k: v for k, v in _keys(overrides).items() if k in as_params and v not in (None, "", [])}
     if picked:
         config["run_params"] = {**_run_params(config.get("run_params")), **picked}
         logger.info("run parameters from the trigger: %s", ", ".join(sorted(picked)))
-    # extra_filters (SQL conditions) add up: the Variable's (an SCD2 current flag, say), a runs entry's, the
-    # trigger's (a batch), ANDed
     filters = [f for layer in (variable, scope, given) for f in _filters(layer.get("extra_filters"))]
     config["extra_filters"] = " AND ".join(f"({f})" for f in filters) if len(filters) > 1 else \
         (filters[0] if filters else None)
@@ -241,7 +197,6 @@ def resolve_config(variable_key: str, overrides: Optional[dict] = None, scope_in
 
 
 def _filters(value) -> list:
-    """extra_filters of one layer: a SQL condition, or a list of them."""
     if value in (None, "", []):
         return []
     items = value if isinstance(value, list) else [value]
@@ -264,7 +219,6 @@ def _run_params(value, name: str = "run_params") -> dict:
 
 
 def _as_of(config: dict, dag_run, tz: str) -> date:
-    """The run's business date: `as_of` (YYYY-MM-DD) if given, else the DAG run's time in the business zone."""
     if config.get("as_of"):
         try:
             return date.fromisoformat(str(config["as_of"]).strip())
@@ -285,13 +239,11 @@ def _triggered_by(dag_run) -> str:
 
 def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope_index: Optional[int] = None,
                       dag_run=None, connection_id: Optional[str] = None) -> dict:
-    """Run the sampling scope of the Variable (or one `runs` entry). A configuration problem fails the task at once
-    (AirflowFailException, no retry); a technical error raises RuntimeError, which Airflow retries."""
     try:
         config = resolve_config(variable_key, overrides, scope_index)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
         level = str(config.get("log_level") or "INFO").strip().upper()
-        if not isinstance(logging.getLevelName(level), int):   # every name logging accepts (WARN too)
+        if not isinstance(logging.getLevelName(level), int):
             raise ConfigError(f"log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, got {level!r}")
         logging.getLogger("sampling").setLevel(level)
         _load_teradata_connection(_connection_id(config, connection_id))
@@ -342,8 +294,6 @@ def _sample(report: dict) -> str:
 
 def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=None,
                    connection_id: Optional[str] = None) -> dict:
-    """A timed DAG run: run_sampling_task once for each entry it works with (chosen_runs). One failing entry does
-    not stop the others; the task fails at the end (retried only when an entry failed for a technical reason)."""
     try:
         variable = _load_variable(variable_key)
         tz = variable.get("timezone") or DEFAULT_TIMEZONE
@@ -367,8 +317,6 @@ def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=
 
 
 def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
-    """Delete the GOVT_RGLTRY_SampleSelection rows older than the Variable's retention_days that no history rule,
-    replacement or audit needs (sampling.admin.purge_selections), for every scope of the Variable."""
     try:
         config = resolve_config(variable_key)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
@@ -394,12 +342,7 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
     return {"scopes": out}
 
 
-# ---------------------------------------------------------------------------
-# The DAG
-# ---------------------------------------------------------------------------
-
 def sample_summary(ti, task_ids: list) -> str:
-    """HTML table of the samples a DAG run made (from its tasks' reports): counts and names only, never case data."""
     runs = []
     for task_id in task_ids:
         report = ti.xcom_pull(task_ids=task_id) or {}
@@ -431,7 +374,6 @@ def _failure_alert_ticket(assignment_group: str):
 
 
 def _names(value) -> list:
-    """A list setting of the Variable (trigger_dags, tags) given as a list or as one comma-separated string."""
     if isinstance(value, str):
         return [v.strip() for v in value.split(",") if v.strip()]
     return list(value or [])
@@ -456,7 +398,6 @@ def _minutes(dag_config: dict, key: str, default: timedelta) -> timedelta:
 
 
 def _task_id(scope: dict, index: int, scopes: list) -> str:
-    """run_sampling, or run_sampling_<name or project_table_run_type> per `runs` entry (numbered when they clash)."""
     if len(scopes) == 1:
         return "run_sampling"
 
@@ -468,7 +409,6 @@ def _task_id(scope: dict, index: int, scopes: list) -> str:
 
 
 def _overrides(context, names: tuple = TRIGGER_KEYS) -> dict:
-    """What the trigger gave (its configuration, else the form's parameters); empty values are left out."""
     conf = _keys(context["dag_run"].conf) if context.get("dag_run") else {}
     for name in names:
         if name not in conf and context["params"].get(name) not in (None, "", []):
@@ -477,7 +417,6 @@ def _overrides(context, names: tuple = TRIGGER_KEYS) -> dict:
 
 
 def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
-    """The sampling DAG; everything about it comes from its own Variable."""
     dag_config = load_dag_config(variable_key)
     tz = dag_config.get("schedule_timezone") or dag_config.get("timezone") or DEFAULT_TIMEZONE
     try:
@@ -518,7 +457,7 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
         scopes = [{}]
     timeout = _minutes(dag_config, "execution_timeout_minutes", DEFAULT_TIMEOUT)
     pool = {"pool": dag_config["pool"]} if dag_config.get("pool") else {}
-    task_ids = []   # filled below: the summary macro reads the run tasks' reports
+    task_ids = []
     if timed:
         tasks = [PythonOperator(task_id="run_sampling", dag=dag, python_callable=run_timed,
                                 execution_timeout=timeout, show_return_value_in_logs=False, **pool)]

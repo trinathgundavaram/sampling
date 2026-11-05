@@ -29,7 +29,7 @@ old candidate rows are purged on a retention period that keeps every sample.
 ```
 airflow/                 DAG file + sampling/ package: the engine (engine.py, db.py, settings.py) and dags.py
 local/                   run_sampling.py, dev.env.example (imports the engine from airflow/sampling)
-sql/                     schema.sql (5 GOVT_RGLTRY_Sampl* tables), schema_drop.sql (DDL only)
+sql/                     schema.sql (DDL of the 5 GOVT_RGLTRY_Sampl* tables, run by hand)
 airflow_resources/       docs, the example Variable, worker requirements
 tests/                   pytest on a DuckDB stand-in for teradatasql; DAG tests need apache-airflow 3
 ```

@@ -38,7 +38,7 @@ From the Section 4 review: these are not in ODAG1, so no configuration can selec
 
 ## C. Before production
 
-- Run on a real Teradata system: `deploy-schema`, `validate --check-sql`, a dry run, a run (runbook section 11).
+- Run on a real Teradata system: create the tables by hand, `validate --check-sql`, a dry run, a run (runbook section 11).
   Tested so far only on the DuckDB stand-in.
 - Run the DAG on a real Airflow 3.3.0 scheduler and worker (parsed and run in-process in tests only).
 - DBA review of the primary indexes in `sql/schema.sql` (no secondary indexes are created), and of the space of

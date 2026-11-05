@@ -1,8 +1,3 @@
-"""Looking after the sampling tables: retention of the candidate rows.
-
-Retention: `purge_selections` deletes the GOVT_RGLTRY_SampleSelection rows that no history rule, replacement or
-audit needs any more. See OPERATIONAL_RUNBOOK.md ("Retention").
-"""
 from __future__ import annotations
 
 import logging
@@ -10,21 +5,14 @@ from datetime import date, timedelta
 from typing import Optional
 
 from sampling.db import Connection
-from sampling.engine import ALL_TABLES, HISTORY_TYPES, _up, discover_configs, sample_key
+from sampling.engine import ALL_TABLES, HISTORY_TYPES, _same_sample, _up, discover_configs, sample_key
 from sampling.settings import ConfigError, Settings
 
-# admin: retention of the candidate rows.
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Retention of GOVT_RGLTRY_SampleSelection
-# ---------------------------------------------------------------------------
 
 def history_days(conn: Connection, s: Settings, key) -> int:
-    """The longest Lookback_Days of the active history rules that may read a sample's rows: every PROJECT-scope
-    rule of its project, the TABLE-scope rules of its table (or '*'), the SAMPLE-scope rules of its table and run
-    type (or '*')."""
     project, table, run_type = sample_key(key)
     rows = conn.query(f"""
         SELECT Table_Nm, Run_Ty, Rule_Ty, Lookback_Days, History_Scope_Cd
@@ -44,16 +32,6 @@ def history_days(conn: Connection, s: Settings, key) -> int:
 def purge_selections(conn: Connection, s: Settings, older_than_days: int, project: Optional[str] = None,
                      table: Optional[str] = None, run_type: Optional[str] = None, apply: bool = False,
                      as_of: Optional[date] = None) -> dict:
-    """Delete the GOVT_RGLTRY_SampleSelection rows of runs older than older_than_days (by As_Of_Dt_Key) that
-    nothing needs any more, per sample of the scope (a project, optionally a table and / or a run type):
-
-      - a run no longer current (a rerun replaced it): all its rows;
-      - a current COMPLETED run: its excluded rows and the candidates never selected (the selected, REPLACED and
-        REPLACEMENT rows stay).
-
-    FINAL runs keep every row, and GOVT_RGLTRY_SamplingRun / SamplingRunRule rows are never deleted.
-    older_than_days must cover the longest lookback of the history rules reading the sample's rows. Without
-    apply, only counts what would go."""
     try:
         days = int(older_than_days)
     except (TypeError, ValueError):
@@ -62,7 +40,7 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
         raise ConfigError("older_than_days must be >= 1")
     cutoff = (as_of or s.today()) - timedelta(days=days)
     db = s.meta_db
-    same = "UPPER(Project_Cd) = ? AND UPPER(Table_Nm) = ? AND UPPER(Run_Ty) = ?"
+    same = _same_sample()
     retired = (f"SELECT Smpl_Run_ID FROM {db}.GOVT_RGLTRY_SamplingRun WHERE {same} AND Curr_Ind = 0 "
                f"AND Run_Stat <> 'FINAL' AND As_Of_Dt_Key < ?")
     current = (f"SELECT Smpl_Run_ID FROM {db}.GOVT_RGLTRY_SamplingRun WHERE {same} AND Curr_Ind = 1 "
