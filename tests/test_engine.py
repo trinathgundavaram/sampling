@@ -1,5 +1,4 @@
 """The sampling engine (sampling/engine.py) end to end on the DuckDB stand-in."""
-import json
 import random
 from datetime import date
 
@@ -89,7 +88,7 @@ def test_run_writes_every_candidate_and_the_run_row(raw, conn, settings):
     rules = _rows(raw, "SELECT Rule_ID, Rule_Class_Cd, Rule_Nm FROM GOVT_RGLTRY_SamplingRunRule ORDER BY Rule_ID")
     assert len(rules) == 10 and rules[0] == (1000, "LEVEL", "category") and rules[-1] == (9001, "EXCLUSION", "EXCLUDED")
     assert (8001, "PRIORITY", "ORDER") in rules
-    report = json.loads(_rows(raw, "SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])
+    report = out   # the counts per bucket are in the run's report (the task log, the XCom), not in a table
     assert report["buckets"]["Denied"] == {"candidates": 777, "target": 120, "selected": 118}
     assert {k: (v["candidates"], v["selected"]) for k, v in report["buckets"].items() if "/" in k} == FROZEN_BY_STRATUM
     assert out["smpl_run_id"].startswith("UMCM.T1.WKLY::2026-08-01::attempt-1::tester::")
@@ -171,7 +170,8 @@ def test_persist_failure_leaves_no_partial_rows(raw, conn, settings):
     assert out["status"] == "ERROR" and out["error_type"] == "PERSIST_FAILURE"
     assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0   # rolled back
     assert _rows(raw, "SELECT Run_Stat, Error_Ty FROM GOVT_RGLTRY_SamplingRun") == [("ERROR", "PERSIST_FAILURE")]
-    assert "Traceback" in _rows(raw, "SELECT Error_Detail_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0]
+    stored = _rows(raw, "SELECT Error_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0]
+    assert stored.startswith("RuntimeError: ") and "\n" not in stored and "Traceback" not in stored   # one line
 
 
 def test_a_later_error_retires_the_earlier_one(raw, conn, settings):

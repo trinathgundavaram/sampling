@@ -255,3 +255,9 @@ def test_the_connection_id_falls_back():
     assert dags._connection_id({"connection_id": "a", "connection_type": "Teradata"}, "b") == "b"
     with pytest.raises(ConfigError, match="connection_type must be 'teradata'"):
         dags._connection_id({"connection_type": "postgres"})
+
+
+def test_an_unknown_log_level_fails_without_retry(monkeypatch, variable, raw):
+    from airflow.sdk.exceptions import AirflowFailException
+    with pytest.raises(AirflowFailException, match="log_level"):
+        _run_task(monkeypatch, raw, {"log_level": "LOUD"})

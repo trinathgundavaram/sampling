@@ -21,6 +21,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Iterator, Optional, Sequence
 
+# db: Teradata layer - connection wrapper, transactions, parameters, run ids, error text.
+
 log = logging.getLogger(__name__)
 
 try:
@@ -270,7 +272,26 @@ def generate_run_id(*label_parts, timestamp: Optional[datetime] = None) -> str:
     return run_id
 
 
+_DATABASE_ERROR = re.compile(r"\[Teradata Database\] \[Error (\d+)\].*")
+ERROR_TEXT_MAX = 1000
+
+
+def error_line(exc: BaseException) -> str:
+    """The database's own message in a driver exception (the driver puts its own lines first), else the first line."""
+    m = _DATABASE_ERROR.search(str(exc))
+    return m.group(0) if m else (str(exc).strip().splitlines() or [""])[0]
+
+
 def error_text(exc: BaseException) -> str:
-    """One line for logs and stored error text: the exception type and its first line."""
-    first = (str(exc).strip().splitlines() or [""])[0]
-    return f"{type(exc).__name__}: {first}"[:2000]
+    """One line for logs, reports and the stored Error_Txt: the exception type and the database's message."""
+    return f"{type(exc).__name__}: {error_line(exc)}"[:ERROR_TEXT_MAX]
+
+
+def log_sql(what: str, template: Optional[str], sql: str, params: Optional[dict] = None) -> None:
+    """Log a configured statement as it runs (as the framework does): the SQL as configured, each {name} / $name
+    parameter it uses with its value, and the statement as sent (run parameters only, never row data)."""
+    params = {str(k).lower(): v for k, v in (params or {}).items()}
+    names = dict.fromkeys(n for n in ((a or b).lower() for a, b in _TOKEN_RE.findall(template or "")) if n != "env")
+    shown = ", ".join(f"{n} = {params.get(n)!r}" for n in names) or "none"
+    log.info("%s\n    SQL:         %s\n    parameters:  %s\n    with values: %s", what,
+             " ".join(str(template or sql).split()), shown, " ".join(sql.split()))

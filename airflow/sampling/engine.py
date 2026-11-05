@@ -52,9 +52,12 @@ One run = one sample:
     target table              Tgt_Schema_Nm.Tgt_Table_Nm (created by another process): the selected cases'
                               source rows, every column, with the ETL_* audit and SMPL_* run columns set by sampling
     persist (one transaction) selections (+ excluded rows) with their bucket path, target table rows; earlier runs
-                              of the same sample and Run_Key -> Curr_Ind = 0; run row -> COMPLETED with the counts
-                              per rule and bucket (Run_Rpt_Txt)
-    on failure                run row -> ERROR with Error_Ty, message and traceback (nothing half written)
+                              of the same sample and Run_Key -> Curr_Ind = 0; run row -> COMPLETED with its counts
+    on failure                run row -> ERROR with Error_Ty and a one-line Error_Txt (nothing half written); the
+                              detail (every problem, the traceback) is in the task log only
+
+Logging follows the framework: 'SAMPLING | <project.table.run_ty> | <what>' at each stage of a run, each configured
+SQL with the parameters it uses (sampling.db.log_sql), counts only - never case data.
 
 Audit defensibility:
 
@@ -78,14 +81,15 @@ import logging
 import math
 import random
 import re
-import traceback
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from fnmatch import fnmatchcase
 from typing import Optional, Sequence
 
-from sampling.db import Connection, error_text, generate_run_id, substitute_params
+from sampling.db import ERROR_TEXT_MAX, Connection, error_text, generate_run_id, log_sql, substitute_params
 from sampling.settings import ConfigError, Settings
+
+# engine: config-driven stratified sampling - configuration, queries, selection, persistence.
 
 log = logging.getLogger(__name__)
 
@@ -131,8 +135,7 @@ _RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scop
                        "target_val", "min_target_cnt", "max_target_cnt", "smpl_method_cd", "rounding_cd",
                        "diversity_sql_txt", "diversity_cap_ty", "diversity_cap_val", "shortfall_cd",
                        "keep_excluded_ind", "tgt_schema_nm", "tgt_table_nm")
-RUN_REPORT_MAX = 16000      # Run_Rpt_Txt
-ERROR_DETAIL_MAX = 8000     # Error_Detail_Txt (the end of the traceback is kept)
+STEP = "SAMPLING"   # the step name the log lines start with (the framework's 'STEP | subject | what')
 # the optional GOVT_RGLTRY_SamplingRule columns each class reads (any other one set is reported)
 _RULE_COLUMNS = ("rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
                  "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd")
@@ -656,8 +659,11 @@ def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     key_queries = [(r, sql(r["rule_sql_txt"])) for r in query_rules(sample)]
     if _text(c, "diversity_sql_txt"):
         key_queries.append((DIVERSITY_RULE, sql(c["diversity_sql_txt"])))
+    configured_rows = _text(c, "scope_sql_txt") or f"SELECT * FROM {source}"
+    configured = f"FROM ({configured_rows}) {SCOPE_ALIAS} WHERE ({filters or '1=1'})"
     out = {"source": source, "scope": scope, "key_queries": key_queries,
-           "pull": f"SELECT {', '.join(keys)} {scope}", "output": None}
+           "pull": f"SELECT {', '.join(keys)} {scope}", "output": None,
+           "pull_template": f"SELECT {', '.join(keys)} {configured}"}   # as configured, for the log
     if _text(c, "tgt_table_nm"):
         out["tgt_table_nm"] = f"{sql(c.get('tgt_schema_nm'), identifier=True)}.{sql(c['tgt_table_nm'], identifier=True)}"
         out["output"] = f"SELECT * {scope}"
@@ -693,7 +699,8 @@ def query_rules(sample: Sample) -> list:
             if _is_query(r)]
 
 
-def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, key_queries: list) -> dict:
+def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, key_queries: list,
+                     params: Optional[dict] = None) -> dict:
     """Run each rule's SELECT and mark the pulled rows: 1 / 0 (the case is in its result or not), or the value
     it returns for the case (a PRIORITY EXPRESSION, a LEVEL by value; NULL for a case it does not return).
     Returns {rule_nm: cases returned}. A result without the key_columns, or a value SELECT without exactly one
@@ -703,7 +710,8 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
     for rule, text in key_queries:
         name, cls, value_rule = rule["rule_nm"], rule["rule_class_cd"], _is_value(rule)
         what = f"{cls} rule {name}"
-        log.info("%s (%s): %s", what, sample.label, text)
+        configured = sample.config.get("diversity_sql_txt") if rule is DIVERSITY_RULE else rule.get("rule_sql_txt")
+        log_sql(f"{STEP} | {sample.label} | {what}", configured, text, params)
         result = conn.stream(text, s.chunk_rows)
         found = {}
         try:
@@ -726,6 +734,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
         for row in rows:
             row[col] = found.get(row["_key"]) if value_rule else (1 if row["_key"] in found else 0)
         counts[str(name)] = len(found)
+        log.info("%s | %s | %s returned %d case(s)", STEP, sample.label, what, len(found))
     return counts
 
 
@@ -745,8 +754,16 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
         value = next(iter(rows[0].values()), None) if rows else None
         if value is None:
             raise LookupError(f"run parameter {name}: its rule_sql_txt returned no value")
-        params[name] = value.isoformat() if isinstance(value, date) else value
+        params[name] = _param_text(value)
     return params
+
+
+def _param_text(value):
+    """A looked-up value as the SQL it is substituted into reads it: a date YYYY-MM-DD, a timestamp
+    YYYY-MM-DD HH:MI:SS[.ffffff] (Teradata reads no 'T' between them); anything else as it is."""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    return value.isoformat() if isinstance(value, date) else value
 
 
 def gate_queries(sample: Sample, s: Settings, params: dict) -> list:
@@ -971,6 +988,11 @@ class Stratifier:
         if path in self.leaves and self.leaves[path] is not self.nodes.get(path):
             self.leaves[path]["selected"] -= 1
 
+    def _forget(self, path: str) -> None:
+        """Drop the notes about the buckets under `path` (it is about to be allocated again)."""
+        prefix = f"{path}/"
+        self.notes = [n for n in self.notes if not n.startswith(prefix)]
+
     def _group(self, level: dict, path: str) -> dict:
         """The level's bucket rows for this parent: the most specific matching parent_path_txt wins."""
         by_pattern = {}
@@ -1063,6 +1085,7 @@ class Stratifier:
                     if cap(k) is not None:
                         want = min(want, cap(k))
                     targets[k] = want
+                    self._forget(sub(k))   # the notes of an earlier pass under this bucket no longer hold
                     chosen[k] = self._allocate(buckets[k], want, index + 1, sub(k))
                     if len(chosen[k]) < want or (cap(k) is not None and want >= cap(k)):
                         full.append(k)
@@ -1103,10 +1126,17 @@ class Caps:
             self.rules.append((c, limit, _col(c), _up(c.get("rule_ty"), QUERY) == PER_VALUE))
         self.counts = [{} for _ in self.rules]
         self.report = {str(c["rule_nm"]): {"limit": limit, "over": 0, "replaced": 0} for c, limit, _, _ in self.rules}
+        self._groups = {}   # case key -> groups(): a case's bucket and values are fixed once stratified
 
     def groups(self, row: dict) -> list:
         """(cap index, group) of every cap the case counts toward: the cases a QUERY cap returns, or the value a
         PER_VALUE cap returns (a case it does not return, or NULL, is not limited), under its Parent_Path_Txt."""
+        known = self._groups.get(row["_key"])
+        if known is None:
+            known = self._groups[row["_key"]] = self._find_groups(row)
+        return known
+
+    def _find_groups(self, row: dict) -> list:
         out = []
         for i, (cap, _, col, per_value) in enumerate(self.rules):
             if not _under(row.get("_path"), cap.get("parent_path_txt")):
@@ -1210,36 +1240,22 @@ def _start_run(conn, s, run_id, run_key, sample: Sample, seed, as_of, params, tr
                      [[run_id, *(r.get(c) for c in _SNAPSHOT_RULE_COLUMNS), now, now] for r in rules], s.chunk_rows)
 
 
-def run_report(summary: dict) -> str:
-    """Run_Rpt_Txt: the counts per exclusion rule and bucket (JSON), within RUN_REPORT_MAX characters (the bucket
-    counts are left out when they do not fit)."""
-    report = {"exclusions": summary.get("exclusions"), "buckets": summary.get("buckets")}
-    if summary.get("notes"):
-        report["notes"] = summary["notes"]
-    if summary.get("caps"):
-        report["caps"] = summary["caps"]
-    text = json.dumps(report, default=str)
-    if len(text) > RUN_REPORT_MAX:
-        text = json.dumps({"exclusions": summary.get("exclusions"), "buckets": "too many to store: see the "
-                           "selections' Stratum_Path_Txt", "notes": summary.get("notes")}, default=str)[:RUN_REPORT_MAX]
-    return text
+def _stored_error(message: str) -> str:
+    """Error_Txt: one line, at most ERROR_TEXT_MAX characters (the task log has every problem and the traceback)."""
+    return " ".join(str(message or "").split())[:ERROR_TEXT_MAX]
 
 
-def _finish_run(conn, s, run_id, summary, sample: Sample, error_type=None, message=None, detail=None):
-    """Close the run row: COMPLETED (current, with its counts) or ERROR (error_type, message, the end of the
-    traceback)."""
-    detail = detail[-ERROR_DETAIL_MAX:] if detail else None
+def _finish_run(conn, s, run_id, summary, error_type=None, message=None):
+    """Close the run row: COMPLETED (current, with its counts) or ERROR (error_type and a one-line message)."""
     conn.execute(f"""
         UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun
         SET Run_Stat = ?, End_Dtts = ?, In_Scope_Cnt = ?, Excluded_Cnt = ?, Candidate_Cnt = ?, Selected_Cnt = ?,
-            Shortfall_Cnt = ?, Target_Cnt = ?, Error_Ty = ?, Error_Txt = ?, Error_Detail_Txt = ?, Run_Rpt_Txt = ?,
-            Curr_Ind = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER
+            Shortfall_Cnt = ?, Target_Cnt = ?, Error_Ty = ?, Error_Txt = ?, Curr_Ind = ?, LastUpdt_Dtts = ?,
+            LastUpdt_ID = USER
         WHERE Smpl_Run_ID = ?""",
         ["ERROR" if error_type else "COMPLETED", s.now(), summary.get("in_scope"), summary.get("excluded"),
          summary.get("candidates"), summary.get("selected"), summary.get("shortfall"), summary.get("target_cnt"),
-         error_type,
-         (message or None) and message[:4000], detail, None if error_type else run_report(summary),
-         0 if error_type else 1, s.now(), run_id])
+         error_type, _stored_error(message) if error_type else None, 0 if error_type else 1, s.now(), run_id])
 
 
 def _key_condition(keys: list, row: dict, params: list) -> str:
@@ -1337,6 +1353,25 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
         [now, *key, run_key, run_id])
 
 
+def _log_selection(label: str, summary: dict, topped: int) -> None:
+    """The selection stage in the log: exclusions, target, each bucket, caps, top-up, notes (counts only)."""
+    excluded = ", ".join(f"{k} {v}" for k, v in summary["exclusions"].items()) or "no exclusion rules"
+    log.info("%s | %s | excluded %s (%s) | %d candidate(s) | target %s", STEP, label, summary["excluded"], excluded,
+             summary["candidates"], summary["target_cnt"])
+    for path, n in summary["by_stratum"].items():
+        log.info("%s | %s | bucket %s | selected %d of %d candidate(s), target %d", STEP, label, path,
+                 n["selected"], n["candidates"], n["target"])
+    for name, c in (summary.get("caps") or {}).items():
+        log.info("%s | %s | cap %s | limit %s | over %d | replaced %d", STEP, label, name, c["limit"], c["over"],
+                 c["replaced"])
+    if topped:
+        log.info("%s | %s | topped up %d from the other candidates", STEP, label, topped)
+    for note in summary.get("notes") or []:
+        log.warning("%s | %s | %s", STEP, label, note)
+    if summary["shortfall"]:
+        log.warning("%s | %s | short of the target by %d", STEP, label, summary["shortfall"])
+
+
 # ---------------------------------------------------------------------------
 # One sample
 # ---------------------------------------------------------------------------
@@ -1398,19 +1433,27 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                "excluded": None, "candidates": 0, "selected": 0, "shortfall": None, "exclusions": {},
                "by_stratum": {}, "buckets": {}, "retired_runs": 0, "dry_run": dry_run,
                "config_hash": sample.config_hash}
-    log.info("sampling starting: sample=%s run_key=%s method=%s target=%s meta_db=%s host=%s%s",
-             label, run_key, method, target if target is not None else f"{config.get('target_val')} %",
-             s.meta_db, conn.host, " (dry run)" if dry_run else "")
+    log.info("%s | %s | starting | run_key %s | method %s | target %s | meta_db %s | host %s%s", STEP, label, run_key,
+             method, target if target is not None else f"{config.get('target_val')} %", s.meta_db, conn.host,
+             " | dry run" if dry_run else "")
 
-    def fail(kind: str, error_type: str, exc_or_text, detail=None) -> dict:
-        message = exc_or_text if isinstance(exc_or_text, str) else error_text(exc_or_text)
-        log.error("sampling %s %s: %s", label, error_type, message)
+    def fail(kind: str, error_type: str, error, exc_info: bool = False) -> dict:
+        """Close the run as ERROR: every problem (and the traceback of an unexpected failure) in the log, one line in
+        Error_Txt."""
+        problems = error if isinstance(error, list) else [error if isinstance(error, str) else error_text(error)]
+        message = "; ".join(problems)
+        if len(problems) > 1:
+            log.error("%s | %s | %s: %d problems\n    %s", STEP, label, error_type, len(problems),
+                      "\n    ".join(problems))
+        else:
+            log.error("%s | %s | %s: %s", STEP, label, error_type, message, exc_info=exc_info)
         summary.update(status="ERROR", error_kind=kind, error_type=error_type, error=message)
         if not dry_run:
+            stored = problems[0] + (f" (+{len(problems) - 1} more: see the task log)" if len(problems) > 1 else "")
             try:
-                _finish_run(conn, s, run_id, summary, sample, error_type, message, detail)
+                _finish_run(conn, s, run_id, summary, error_type, stored)
             except Exception as e:  # noqa: BLE001 - must not hide the real error
-                log.error("could not close the run row of %s: %s", run_id, e)
+                log.error("%s | %s | could not close the run row %s: %s", STEP, label, run_id, error_text(e))
         return summary
 
     final = None if early else current_run(conn, s, sample.key, run_key)
@@ -1429,11 +1472,11 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                                                f"at {final.get('finalized_dtts')}): rerun with a force reason to "
                                                f"replace it")
         if force_reason:
-            log.warning("replacing the FINAL sample %s of run_key %s: %s", final["smpl_run_id"], run_key,
-                        force_reason)
+            log.warning("%s | %s | replacing the FINAL sample %s of run_key %s: %s", STEP, label,
+                        final["smpl_run_id"], run_key, force_reason)
     problems = config_problems(sample)
     if problems:
-        return fail("config", "CONFIG_ERROR", "; ".join(problems))
+        return fail("config", "CONFIG_ERROR", problems)
     try:
         queries = build_queries(sample, s, params)
         summary["tgt_table_nm"] = queries.get("tgt_table_nm")
@@ -1443,15 +1486,18 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         waiting = unmet_gates(conn, s, sample, params)
     except Exception as e:  # noqa: BLE001
-        return fail("technical", "GATE_FAILURE", e, traceback.format_exc())
+        return fail("technical", "GATE_FAILURE", e, exc_info=True)
     if waiting:
         # technical: the data may be ready on a retry
         return fail("technical", "GATE_NOT_MET", "not ready yet: " + "; ".join(waiting))
+    if sample.gates:
+        log.info("%s | %s | %d gate(s) met", STEP, label, len(sample.gates))
 
     try:
-        log.info("pull (%s): %s", label, queries["pull"])
+        log_sql(f"{STEP} | {label} | pull", queries["pull_template"], queries["pull"], params)
         rows = conn.stream(queries["pull"], s.chunk_rows)
         in_scope = len(rows)
+        log.info("%s | %s | %d row(s) in scope", STEP, label, in_scope)
         history, cache = {}, {}
         for x in sample.exclusions:
             if _up(x.get("rule_ty"), QUERY) in HISTORY_TYPES:
@@ -1460,7 +1506,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             if _up(p.get("rule_ty"), QUERY) in HISTORY_TYPES:
                 history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache)
     except Exception as e:  # noqa: BLE001
-        return fail("technical", "PULL_FAILURE", e, traceback.format_exc())
+        return fail("technical", "PULL_FAILURE", e, exc_info=True)
 
     try:
         for r in rows:
@@ -1470,11 +1516,11 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     try:
-        summary["rule_queries"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"])
+        summary["rule_queries"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"], params)
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     except Exception as e:  # noqa: BLE001
-        return fail("technical", "QUERY_RULE_FAILURE", e, traceback.format_exc())
+        return fail("technical", "QUERY_RULE_FAILURE", e, exc_info=True)
 
     try:
         candidates, excluded, counts = apply_exclusions(rows, sample, history)
@@ -1484,10 +1530,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         strat = Stratifier(sample, run_seed, rounding)
         caps = Caps(sample, target, rounding)
         chosen = apply_caps(caps, strat, candidates, strat.run(candidates, target))
+        extra = []
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
             taken = {r["_key"] for r in chosen}
             rest = [r for r in candidates if r["_key"] not in taken]
-            extra = []
             for r in strat.top_up(rest, len(rest), chosen):
                 if len(extra) >= target - len(chosen):
                     break
@@ -1495,42 +1541,47 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                     caps.take(r)
                     extra.append(r)
             chosen += extra
+        for r in chosen[target:]:   # buckets rounded up past the target: their counts follow the cut
+            strat.unselect(r.get("_path"))
         chosen = sorted(chosen[:target], key=lambda r: r["_order"])
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     except Exception as e:  # noqa: BLE001
-        return fail("technical", "SELECT_FAILURE", e, traceback.format_exc())
+        return fail("technical", "SELECT_FAILURE", e, exc_info=True)
     summary.update(in_scope=in_scope, excluded=in_scope - len(candidates), candidates=len(candidates),
                    selected=len(chosen), shortfall=max(0, target - len(chosen)), exclusions=counts,
                    by_stratum=strat.leaves, buckets=strat.nodes, notes=strat.notes, caps=caps.report)
-    for note in strat.notes:
-        log.warning("%s: %s", label, note)
+    _log_selection(label, summary, len(extra))
 
     output = None
     if queries["output"]:
         try:
             queries["output_columns"] = target_table_columns(conn, queries, sample)
             output = fetch_output(conn, queries, sample, chosen)
+            log.info("%s | %s | %d source row(s) read for the target table %s", STEP, label, len(output),
+                     queries["tgt_table_nm"])
         except ConfigError as e:
             return fail("config", "CONFIG_ERROR", e)
         except Exception as e:  # noqa: BLE001
-            return fail("technical", "OUTPUT_FAILURE", e, traceback.format_exc())
+            return fail("technical", "OUTPUT_FAILURE", e, exc_info=True)
 
     if dry_run:
         summary["status"] = "COMPLETED"
+        log.info("%s | %s | dry run complete: nothing written", STEP, label)
         return summary
 
     try:
         with conn.transaction():
             summary["retired_runs"] = _persist(conn, s, run_id, run_key, sample, queries, candidates, excluded,
                                                chosen, output, as_of)
-            _finish_run(conn, s, run_id, summary, sample)
+            _finish_run(conn, s, run_id, summary)
     except Exception as e:  # noqa: BLE001
-        return fail("technical", "PERSIST_FAILURE", e, traceback.format_exc())
+        return fail("technical", "PERSIST_FAILURE", e, exc_info=True)
 
     summary["status"] = "COMPLETED"
-    log.info("sampling complete: %s in_scope=%s excluded=%s candidates=%d selected=%d/%d retired_runs=%d", run_id,
-             in_scope, summary["excluded"], len(candidates), len(chosen), target, summary["retired_runs"])
+    log.info("%s | %s | complete | run %s | in scope %s | excluded %s | candidates %d | selected %d of %d | "
+             "%d earlier run(s) retired", STEP, label, run_id, in_scope, summary["excluded"], len(candidates),
+             len(chosen), target, summary["retired_runs"])
     return summary
 
 
@@ -1550,7 +1601,7 @@ def finalize_run(conn: Connection, s: Settings, key, run_key: str, by: str) -> d
                  f"Finalized_Dtts = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
                  f"WHERE Smpl_Run_ID = ? AND Run_Stat = 'COMPLETED'",
                  [by, s.now(), s.now(), run["smpl_run_id"]])
-    log.info("run %s (%s run_key=%s) finalised by %s", run["smpl_run_id"], ".".join(key), run_key, by)
+    log.info("FINALIZE | %s | run_key %s | run %s finalised by %s", ".".join(key), run_key, run["smpl_run_id"], by)
     return {"smpl_run_id": run["smpl_run_id"], "project_cd": key[0], "table_nm": key[1], "run_ty": key[2],
             "run_key": run_key, "status": "FINAL", "finalized_by": by}
 
@@ -1636,7 +1687,8 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
                           [(new["case_key"], old["selection_order_nbr"], new["stratum_path_txt"])], now)
         conn.execute(f"UPDATE {db}.GOVT_RGLTRY_SamplingRun SET LastUpdt_Dtts = ?, LastUpdt_ID = USER "
                      f"WHERE Smpl_Run_ID = ?", [now, run_id])
-    log.info("run %s: %s replaced by %s (%s) by %s", run_id, old["case_key"], new["case_key"], reason, by)
+    log.info("REPLACE | %s | run_key %s | run %s | a case of bucket %s replaced by the next candidate of %s, by %s",
+             ".".join(key), run_key, run_id, old["stratum_path_txt"], new["stratum_path_txt"], by)
     return {"smpl_run_id": run_id, "replaced": old["case_key"], "replacement": new["case_key"],
             "stratum_path": new["stratum_path_txt"], "selection_order": old["selection_order_nbr"],
             "reason": reason, "by": by}

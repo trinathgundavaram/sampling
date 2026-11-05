@@ -103,3 +103,18 @@ def test_mark_failed(local_db, capsys):
     assert cli.main(["mark-failed", "--run-id", "stuck"]) == 1   # already closed
     capsys.readouterr()
     assert local_db.db.execute("SELECT Run_Stat, Error_Ty FROM GOVT_RGLTRY_SamplingRun").fetchall() == [("ERROR", "ABANDONED")]
+
+
+def test_show_config_lists_the_cap_rules(local_db, capsys):
+    from conftest import insert_rule
+    insert_rule(local_db.db, "CAP", 60, "OON", rule_sql_txt="SELECT case_id FROM main.case_source", max_ty="CNT",
+                max_val=10, raw_sql=True)
+    assert cli.main(["show-config", "--project", "UMCM", "--table", "T1", "--run-type", "WKLY"]) == 0
+    assert [c["rule_nm"] for c in json.loads(capsys.readouterr().out)["caps"]] == ["OON"]
+
+
+def test_an_unknown_log_level_could_not_run(capsys, monkeypatch):
+    monkeypatch.delenv("SAMPLING_LOG_LEVEL", raising=False)
+    assert cli.main(["--log-level", "LOUD", "test-connection"]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["result"] == "COULD NOT RUN" and "LOUD" in out["problem"]

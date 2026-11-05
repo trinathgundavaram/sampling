@@ -13,6 +13,8 @@ from sampling.db import Connection
 from sampling.engine import ALL_TABLES, HISTORY_TYPES, _up, discover_configs, sample_key
 from sampling.settings import ConfigError, Settings
 
+# admin: retention of the candidate rows.
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,6 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
             with conn.transaction():
                 for where, _ in parts:
                     conn.execute(f"DELETE FROM {db}.GOVT_RGLTRY_SampleSelection WHERE {where}", [*key, cutoff])
-            log.info("%s: deleted %s GOVT_RGLTRY_SampleSelection rows before %s", ".".join(key), counts, cutoff)
+            log.info("PURGE | %s | deleted %s GOVT_RGLTRY_SampleSelection row(s) of runs before %s", ".".join(key), counts, cutoff)
         out.append({**entry, "rows": counts, "deleted": apply and any(counts.values())})
     return {"apply": apply, "older_than_days": days, "configs": out}

@@ -1,6 +1,5 @@
 """CAP rules: a limit across the whole sample (or the buckets under a parent), not one bucket at a time - at most 3
 cases of one CPT code, at most 10 out-of-network denials."""
-import json
 from datetime import date
 
 from conftest import insert_bucket, insert_config, insert_rule, key, set_config
@@ -59,8 +58,6 @@ def test_at_most_3_of_one_code_across_every_bucket(raw, conn, settings):
     assert _count(raw, SELECTED_U + "u.cpt = 'C1'") == 3
     assert {k: v["selected"] for k, v in out["by_stratum"].items()} == {"A": 5, "B": 5}     # the mix holds
     assert out["caps"] == {"CPT_VARIETY": {"limit": 3, "over": 7, "replaced": 7}}
-    report = json.loads(raw.db.execute("SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun").fetchone()[0])
-    assert report["caps"] == out["caps"]
     # the highest in priority order stay: a000-a002, then the next of each bucket
     assert [k for (k,) in _selected(raw)] == [f"case_id={c}" for c in
                                              ("a000", "a001", "a002", "a005", "a006", "b005", "b006", "b007", "b008",

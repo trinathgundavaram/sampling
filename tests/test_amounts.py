@@ -1,6 +1,5 @@
 """A number or a percentage: the sample target, bucket quotas, bucket caps and the diversity cap; and every SQL column
 a whole SELECT (the scope, the diversity value)."""
-import json
 from datetime import date
 
 from conftest import insert_bucket, insert_config, insert_rule, key, set_config
@@ -95,8 +94,6 @@ def test_number_quotas_never_take_more_than_the_parents_target(raw, conn, settin
     out = _run(conn, settings, "OVER")
     assert _selected(out) == {"A": 3, "B": 1, "C": 0}                     # in Seq_Nbr order, until the target is used
     assert out["notes"] == ["B: quota CNT 3 (3) cut to 1: the quotas under the sample exceed its target of 4"]
-    report = json.loads(_rows(raw, "SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])
-    assert report["notes"] == out["notes"]
 
 
 def test_a_bucket_cap_as_a_number_or_a_percentage_of_its_candidates(raw, conn, settings):

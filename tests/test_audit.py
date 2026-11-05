@@ -67,7 +67,7 @@ def test_a_failed_run_keeps_its_snapshot_too(raw, conn, settings):
     _sample(raw.db, smpl_method_cd="BOGUS")
     out = _run(conn, settings)
     assert out["error_type"] == "CONFIG_ERROR"
-    assert _rows(raw, "SELECT Smpl_Method_Cd, Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun") == [("BOGUS", None)]
+    assert _rows(raw, "SELECT Smpl_Method_Cd FROM GOVT_RGLTRY_SamplingRun") == [("BOGUS",)]
     assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRunRule") == [(4,)]
 
 

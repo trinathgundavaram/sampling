@@ -168,9 +168,8 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRun (
                                                            -- PARAM_FAILURE | PULL_FAILURE | QUERY_RULE_FAILURE |
                                                            -- SELECT_FAILURE | OUTPUT_FAILURE | PERSIST_FAILURE |
                                                            -- ABANDONED
-  Error_Txt              VARCHAR(4000),
-  Error_Detail_Txt       VARCHAR(8000),                    -- the end of the traceback
-  Run_Rpt_Txt            VARCHAR(16000),                   -- counts per rule and bucket (JSON)
+  Error_Txt              VARCHAR(4000),                    -- one line: the error type and message (the task
+                                                           -- log has the detail)
   Config_Hash            CHAR(64),                         -- SHA-256 of the config and rule rows used
   Override_Rsn_Txt       VARCHAR(1000),                    -- why a FINAL sample was replaced
   Finalized_By           VARCHAR(100),

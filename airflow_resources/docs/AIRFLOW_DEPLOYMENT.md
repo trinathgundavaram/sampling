@@ -70,7 +70,8 @@ version).
    use the Airflow Connection `smtp_default`.
 3. Create the tables once, in the metadata database, from `sql/schema.sql` (replace `{{META_DB}}`), e.g. from a
    machine with the local version: `python local/run_sampling.py deploy-schema`. The engine never creates or alters
-   tables.
+   tables. A `GOVT_RGLTRY_SamplingRun` created before the run row lost its traceback and report columns needs
+   `ALTER TABLE <meta_db>.GOVT_RGLTRY_SamplingRun DROP Error_Detail_Txt, DROP Run_Rpt_Txt;` (or a redeploy).
 4. Enter the configuration rows (`GOVT_RGLTRY_SamplingConfig`, `GOVT_RGLTRY_SamplingRule`; there are no seed files:
    the rows are entered in the tables, see the runbook sections 4 and 7, and for ODAG1 OPEN_ITEMS.md section D), then run
    `python local/run_sampling.py validate --project UMCM --check-sql`.
@@ -297,10 +298,15 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
   `FINALIZED` without retry, and the final sample stays current. Replacing it needs `--force-reason` from the
   command line; there is no trigger key for it.
 - `Curr_Ind = 1` on `GOVT_RGLTRY_SamplingRun` and `GOVT_RGLTRY_SampleSelection` marks the current sample of each
-  project + table + run type and `Run_Key`. Errors are on the run row (`Error_Ty`, `Error_Txt`, the end of the
-  traceback in `Error_Detail_Txt`); the counts per exclusion rule and bucket are its `Run_Rpt_Txt` (JSON in a
-  VARCHAR(16000), e.g. `NEW JSON(Run_Rpt_Txt).JSONExtractValue('$.buckets.Denied.selected')`); the configuration a
-  run used is on its run row and its rules in `GOVT_RGLTRY_SamplingRunRule`.
+  project + table + run type and `Run_Key`. Errors are on the run row as the framework keeps them: `Error_Ty` and a
+  one-line `Error_Txt` (the error type and the database's message; with several configuration problems the first,
+  then how many more). Every problem and a technical error's traceback are in the task log only, as are the counts
+  per exclusion rule, bucket and cap (also in the task's report, its XCom); the configuration a run used is on its
+  run row and its rules in `GOVT_RGLTRY_SamplingRunRule`.
+- Logging follows the framework: `SAMPLING | <project.table.run_ty> | <what>` at each stage (parameters, gates, the
+  pull, each rule's SELECT with the parameters it uses and the cases it returned, exclusions, target, each bucket,
+  caps, top-up, target table, completion), then `SAMPLING report:` with the run's report. Counts and run
+  parameters only, never case data.
 - Reads use `LOCKING ROW FOR ACCESS` (no read lock on the source or the metadata tables; switch off with
   `access_lock: false`).
 - A run's writes (every candidate, the target table rows, retiring the earlier run, closing the run row) are **one
@@ -312,7 +318,7 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
 
 ## Validation status
 
-- The engine passes its test suite (133 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
+- The engine passes its test suite (145 tests, 14 of them one per configurable rule of gaps A-G) against a stand-in for `teradatasql` backed by DuckDB, including the
   frozen UM regression of `DQ_COMPLETE_REPO/sampling` (same per-bucket counts).
 - **Airflow 3.3.0** (installed with its official constraints: Task SDK 1.3.0, standard provider 1.15.0, smtp
   provider 3.0.1): the DAG file parses without import errors or warnings from this code, also with

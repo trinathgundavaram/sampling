@@ -72,12 +72,13 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 8a. Caps | Across the buckets: a case over a CAP rule (3 of one CPT code, 10 OON denials …) gives way to the next candidate of its own bucket within every cap; none left = the sample is short | CAP rules | |
 | 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap and the CAP rules still hold) | `Shortfall_Cd` | |
 | 10. Target table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-target-table)) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
-| 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts (`Run_Rpt_Txt`) | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
+| 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
 | Later | `finalize` makes the sample `FINAL`; `replace` swaps a case (see [10.8](#108-finalise-a-sample), [10.9](#109-replace-a-case)) | – | – |
 
-A failure closes the run row as `ERROR` with `Error_Ty`, `Error_Txt` and (technical errors) the end of the
-traceback in `Error_Detail_Txt`. A configuration problem fails the task at once; a technical one is retried
-(`retries`).
+A failure closes the run row as `ERROR` with `Error_Ty` and a one-line `Error_Txt` (the error type and the
+database's message; several configuration problems: the first, then `(+N more: see the task log)`). Every problem
+and a technical error's traceback are in the task log only. A configuration problem fails the task at once; a
+technical one is retried (`retries`).
 
 ## 3. Tables: map and roles
 
@@ -226,7 +227,7 @@ no key columns is a `CONFIG_ERROR`. The former condition form (`Rule_Ty` `SQL` /
 current run of another `Run_Key` within `Lookback_Days` (by `Smpl_Cycle_Dt_Key`), of this sample
 (`History_Scope_Cd` `SAMPLE`, default), of any run type of its table (`TABLE`: a monthly sample does not repeat the
 weekly samples' cases) or of any sample of the project (`PROJECT`). The first matching rule by `Seq_Nbr` is the
-reason; each rule's count is in the run's `Run_Rpt_Txt`.
+reason; each rule's count is in the task log and the run's report (`exclusions`).
 
 **PRIORITY** – `QUERY` (default): the cases the `SELECT` returns first. `EXPRESSION`: a `SELECT` of the key columns
 and a value, the cases ordered by it (`Sort_Dir_Cd`; cases it does not return, or NULL, last). `PRIOR_CANDIDATE`:
@@ -334,7 +335,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt`, `Error_Detail_Txt`, `Run_Rpt_Txt`, `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
+| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
@@ -347,9 +348,11 @@ two run types is two samples.
 (the resolved ones, with their own `Table_Nm` / `Run_Ty`: `*` for a shared rule). `Config_Hash` is the SHA-256 of
 the configuration and rules as loaded, without who changed a row and when: equal hashes = the same rules.
 
-**`Run_Rpt_Txt`** (JSON, VARCHAR(16000)): `{"exclusions": {Rule_Nm: count}, "buckets": {path: {"candidates",
-"target", "selected"}}, "notes": [...]}` – every bucket node, not only the leaves (`Denied` and `Denied/Part B`);
-`notes` (only when there are some) names each quota cut to fit its parent's target. A failed run has none. When the buckets do not fit, they are left out of it (the selections' `Stratum_Path_Txt` has them).
+**The run's report** (the task log's `SAMPLING report:`, the task's XCom, the local `run` output – not a table):
+`exclusions` {Rule_Nm: count}, `buckets` {path: candidates, target, selected} for every bucket node, not only the
+leaves (`Denied` and `Denied/Part B`), `caps` {Rule_Nm: limit, over, replaced}, and `notes` naming each quota cut to
+fit its parent's target. The selected cases per bucket can always be counted from the selections'
+`Stratum_Path_Txt`.
 
 **`Selection_Stat`**: `SELECTED` for the cases the run picked; `REPLACED` for a case taken out later
 (`Selected_Ind` back to 0) and `REPLACEMENT` for the case put in for it (`Selected_Ind` 1, the same
@@ -535,13 +538,14 @@ WHERE Project_Cd = 'UMCM' AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' AND Run_Key
   AND Curr_Ind = 1 AND Excluded_Ind = 1
 GROUP BY 1;
 ```
-The targets per bucket are in the run's `Run_Rpt_Txt` (`buckets.<path>.target`): a bucket with fewer candidates
+The targets per bucket are in the task log (`SAMPLING | <sample> | bucket <path> | selected n of m candidate(s),
+target t`) and the run's report (`buckets.<path>.target`): a bucket with fewer candidates
 than its target is short; with `TOPUP` the rest came from other buckets.
 
 ### 10.4 A run failed
 1. `errors --project P` (or `GOVT_RGLTRY_SamplingRun WHERE Run_Stat = 'ERROR'`).
 2. `CONFIG_ERROR`: fix the rows (`validate --check-sql`), then rerun. `PARAM_FAILURE`: is the load finished?
-   Others: `Error_Txt` and `Error_Detail_Txt` (the end of the traceback); rerun when the cause is gone.
+   Others: `Error_Txt` (one line), and the task log for the detail and the traceback; rerun when the cause is gone.
 3. Rerun with the same `run_key`: the new run becomes current, the failed attempt stays recorded.
 
 ### 10.4a The run is waiting for data (GATE_NOT_MET)

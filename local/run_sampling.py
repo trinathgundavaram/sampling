@@ -98,7 +98,7 @@ def configure_logging(level: str) -> Path:
     log_dir = Path(os.environ.get(PREFIX + "LOG_DIR") or _HERE / "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"sampling_{datetime.now():%Y%m%d_%H%M%S_%f}_{os.getpid()}.log"
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")   # the framework's format
     handlers = [logging.StreamHandler(sys.stderr), logging.FileHandler(path, encoding="utf-8")]
     for h in handlers:
         h.setFormatter(fmt)
@@ -181,7 +181,7 @@ def cmd_show_config(conn, s, args) -> tuple:
     sample = load_config(conn, s, _key(args))
     return {"config": sample.config, "params": sample.params, "gates": sample.gates,
             "exclusions": sample.exclusions, "priorities": sample.priorities, "levels": sample.levels,
-            "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
+            "caps": sample.caps, "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
 
 
 def cmd_runs(conn, s, args) -> tuple:
@@ -371,7 +371,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     env_file = load_env_file()
-    log_path = configure_logging(args.log_level or os.environ.get(PREFIX + "LOG_LEVEL") or "INFO")
+    level = str(args.log_level or os.environ.get(PREFIX + "LOG_LEVEL") or "INFO").strip().upper()
+    if not isinstance(logging.getLevelName(level), int):   # every name logging accepts (WARN too)
+        print(json.dumps({"command": args.command, "result": "COULD NOT RUN",
+                          "problem": f"ConfigError: log level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, "
+                                     f"got {level!r}"}, indent=2))
+        return 2
+    log_path = configure_logging(level)
     log.info("sampling %s | env file %s | log %s", __version__, env_file or "none", log_path)
     try:
         s = settings_from_env()

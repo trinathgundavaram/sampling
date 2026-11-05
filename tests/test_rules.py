@@ -214,8 +214,7 @@ def test_f_sql_exclusions_first_match_and_stats(raw, conn, settings):
         insert_rule(raw.db, "EXCLUSION", i, name, seq_nbr=i, rule_ty="SQL", rule_sql_txt=sql)
     out = _run(conn, settings)
     assert out["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and out["candidates"] == 5 and out["excluded"] == 10
-    report = json.loads(_rows(raw, "SELECT Run_Rpt_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])
-    assert report["exclusions"] == {"FLAGGED": 5, "CODE_Q": 5} and report["buckets"]["ALL"]["selected"] == 3
+    assert out["buckets"]["ALL"]["selected"] == 3
     reasons = _rows(raw, "SELECT Exclusion_Rsn_Txt, COUNT(*) FROM GOVT_RGLTRY_SampleSelection WHERE Excluded_Ind = 1 "
                          "GROUP BY 1 ORDER BY 1")
     assert reasons == [("CODE_Q", 5), ("FLAGGED", 5)]

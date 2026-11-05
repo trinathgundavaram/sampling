@@ -39,6 +39,8 @@ from sampling.admin import purge_selections
 from sampling.engine import run_scope
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
 
+# sampling_task: Airflow bridge - the Variable + the Teradata Connection -> the engine; the DAG factory.
+
 logger = logging.getLogger(__name__)
 
 # Airflow Connection id used when neither the task, the Variable's connection_id nor td_conn_var names one
@@ -288,7 +290,9 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
     try:
         config = resolve_config(variable_key, overrides, scope_index)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
-        level = str(config.get("log_level") or "INFO").upper()
+        level = str(config.get("log_level") or "INFO").strip().upper()
+        if not isinstance(logging.getLevelName(level), int):   # every name logging accepts (WARN too)
+            raise ConfigError(f"log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, got {level!r}")
         logging.getLogger("sampling").setLevel(level)
         _load_teradata_connection(_connection_id(config, connection_id))
         scope = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
@@ -299,7 +303,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
 
-    logger.info("sampling %s | settings %s | scope %s | run_key=%s as_of=%s extra_filters=%s%s", __version__,
+    logger.info("sampling %s | SAMPLING | settings %s | scope %s | run_key %s | as_of %s | extra_filters %s%s", __version__,
                 settings.describe(), scope or "none", kwargs["run_key"] or "(as_of date)", kwargs["as_of"],
                 kwargs["extra_filters"] or "none",
                 " | DRY RUN" if kwargs["dry_run"] else "")
@@ -318,17 +322,17 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
     failed = [r for r in outcome["runs"] if r.get("status") != "COMPLETED"]
     short = [r for r in outcome["runs"] if r.get("shortfall")]
     if failed:
-        logger.error("sampling report:\n%s", text)
+        logger.error("SAMPLING report:\n%s", text)
         message = f"{outcome['result']}: " + "; ".join(f"{_sample(r)}: {r.get('error_type')} {r.get('error')}"
                                                         for r in failed)
         if any(r.get("error_kind") != "config" for r in failed):
             raise RuntimeError(message)
         raise AirflowFailException(message)
     if short and _flag(config.get("fail_on_shortfall"), False):
-        logger.error("sampling report:\n%s", text)
+        logger.error("SAMPLING report:\n%s", text)
         raise AirflowFailException("sample(s) short of target_cnt: " + ", ".join(
             f"{_sample(r)} {r['selected']}/{r['target_cnt']}" for r in short))
-    (logger.warning if short else logger.info)("sampling report:\n%s", text)
+    (logger.warning if short else logger.info)("SAMPLING report:\n%s", text)
     return json.loads(text)
 
 
@@ -350,11 +354,11 @@ def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=
     runs, failed = [], []
     for index in chosen:
         entry = "the Variable's own scope" if index is None else f"runs entry {index + 1}"
-        logger.info("sampling with %s", entry)
+        logger.info("SAMPLING | %s", entry)
         try:
             runs += run_sampling_task(variable_key, overrides, index, dag_run, connection_id).get("runs", [])
         except Exception as e:  # noqa: BLE001
-            logger.error("sampling with %s failed: %s", entry, e)
+            logger.error("SAMPLING | %s | failed: %s", entry, e)
             failed.append((f"{entry}: {e}", isinstance(e, AirflowFailException)))
     if failed:
         text = f"{len(failed)} of {len(chosen)} run(s) failed: {'; '.join(t for t, _ in failed)}"
@@ -386,7 +390,7 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
         raise AirflowFailException(f"configuration: {e}") from e
     finally:
         conn.close()
-    logger.info("retention:\n%s", json.dumps(out, indent=2, default=str))
+    logger.info("PURGE report:\n%s", json.dumps(out, indent=2, default=str))
     return {"scopes": out}
 
 
