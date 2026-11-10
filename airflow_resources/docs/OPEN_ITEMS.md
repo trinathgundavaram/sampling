@@ -51,7 +51,7 @@ historic data requirement), and the concurrent review flag.
 
 ## D. The ODAG1 rows known so far (sample `UMCM` / `ODAG1` / `WKLY`, to enter with `Active_Ind = 0`)
 
-There are no seed files: these rows are entered in `GOVT_RGLTRY_SamplingConfig` / `GOVT_RGLTRY_SamplingRule` once
+The INSERT statements for all of them are in `ODAG1_WKLY_inserts.sql` (the config with `Active_Ind = 0`). These rows are entered in `GOVT_RGLTRY_SamplingConfig` / `GOVT_RGLTRY_SamplingRule` once
 their TODOs are answered, then `Active_Ind = 1` and `validate --project UMCM --table ODAG1 --run-type WKLY
 --check-sql`. `<ODAG1>` is `EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1`; `<CURRENT>` is
 `BTCH_ID = '{batch_id}' AND ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N'`; `<RT>` is
@@ -92,7 +92,7 @@ the same rows). The other rows are ODAG1 weekly only.
 | 242 | `ODAG1` / `WKLY` | BUCKET | 1 | `IPRF` | level 1, parent `IP PAC`, `REMAINDER` (equal, a short one's share goes to the others) | as 232, `AND <RT> = 'Inpatient' AND <C2> = 'Rehab'` |
 | 243 | `ODAG1` / `WKLY` | BUCKET | 2 | `LTAC` | as 242 | as 232, `AND <RT> = 'Inpatient' AND <C2> = 'LTAC'` |
 | 244 | `ODAG1` / `WKLY` | BUCKET | 3 | `SNF` | as 242 | as 232, `AND <RT> = 'Inpatient' AND <C2> LIKE 'SNF%'` |
-| 251 | `ODAG1` / `WKLY` | LEVEL | 3 | `determination` | level 2, parent `*`, `SKIP` | `SELECT AUTHZN_ID, SRC_DATA_KEY, CASE WHEN AUTHZN_REQ_DETRMTN_TY = 'Partially Approved' THEN 'Approved' ELSE AUTHZN_REQ_DETRMTN_TY END FROM <ODAG1> WHERE <CURRENT>` |
+| 251 | `ODAG1` / `WKLY` | LEVEL | 3 | `determination` | level 2, parent `*`, `SKIP` | `SELECT AUTHZN_ID, SRC_DATA_KEY, CASE WHEN AUTHZN_REQ_DETRMTN_TY = 'Partially Approved' THEN 'Approved' ELSE AUTHZN_REQ_DETRMTN_TY END AS DETRMTN_TY FROM <ODAG1> WHERE <CURRENT>` |
 | 252–254 | `ODAG1` / `WKLY` | BUCKET | 1–3 | `Dismissed`, `Approved`, `Denied` | level 2, `PCT` 12, `PCT` 8, `REMAINDER` | |
 | 260 | `ODAG1` / `WKLY` | CAP | 1 | `BH_MAX_8_PCT` | `QUERY`, parent `*`, `PCT` 8 (of the 150) | the BH SELECT of 233 |
 | 261 | `ODAG1` / `WKLY` | CAP | 2 | `PER_CPT_CODE` | `PER_VALUE`, parent `*`, `CNT` 3 | `SELECT AUTHZN_ID, SRC_DATA_KEY, CPT_PROC_CD FROM <ODAG1> WHERE <CURRENT>` |
