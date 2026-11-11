@@ -2,10 +2,7 @@ INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty
 VALUES ('UMCM', 'ODAG1', 'WKLY', 'ODAG1 weekly UM audit sample: 150 cases by functional area and determination', 'EXPORT_FEED_$ENV_T', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1', 'AUTHZN_ID, SRC_DATA_KEY', 'SELECT * FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N''', 'CNT', 150, 'RANKED', 'ROUND', 'TOPUP', 1, 'EXPORT_FEED_$ENV_T', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1_Sample', 0);
 
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Rule_Sql_Txt, Rule_Desc)
-VALUES (201, 'UMCM', '*', '*', 'PARAM', 1, 'batch_id', 'SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM HSABC_$ENV.ComplianceRequestControl WHERE Project_Cd = ''{project_cd}'' AND Table_Nm = ''{table_nm}'' AND Run_Ty = ''{run_ty}'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) closed_batches', 'The latest batch of the sample''s project, table and run type with every source closed');
-
-INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Rule_Sql_Txt, Rule_Desc)
-VALUES (205, 'UMCM', '*', '*', 'GATE', 1, 'BATCH_CLOSED', 'SELECT 1 FROM HSABC_$ENV.ComplianceRequestControl WHERE Btch_ID = ''{batch_id}'' AND Project_Cd = ''{project_cd}'' AND Table_Nm = ''{table_nm}'' AND Run_Ty = ''{run_ty}'' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1', 'Samples a batch only when every source of it is closed');
+VALUES (201, 'UMCM', '*', '*', 'PARAM', 1, 'batch_id', 'SELECT TOP 1 Btch_ID FROM HSABC_$ENV.GOVT_RGLTRY_RequestControl WHERE Project_Cd = ''{project_cd}'' AND Table_Nm = ''{table_nm}'' AND Run_Ty = ''{run_ty}'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1 ORDER BY SUBSTR(Btch_ID, 1, 8) DESC, CHARACTER_LENGTH(Btch_ID) DESC, Btch_ID DESC', 'The latest batch of the sample''s project, table and run type with every source closed');
 
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Rule_Ty, Lookback_Days, History_Scope_Cd, Rule_Desc)
 VALUES (210, 'UMCM', 'ODAG1', 'WKLY', 'EXCLUSION', 0, 'SELECTED_IN_LAST_90_DAYS', 'PRIOR_SELECTION', 90, 'SAMPLE', 'Not a case this sample selected in the last 90 days');

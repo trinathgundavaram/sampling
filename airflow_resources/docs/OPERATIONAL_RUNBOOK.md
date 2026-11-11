@@ -62,7 +62,6 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 0. Rules | The rule rows of the project whose `Table_Nm` is the sample's table or `*` and whose `Run_Ty` is its run type or `*`; of rows with the same class, `Rule_Nm`, `Level_Nbr` and `Parent_Path_Txt`, the most specific wins ([4.2](#42-govt_rgltry_samplingrule--one-row-per-rule)) | `GOVT_RGLTRY_SamplingRule` | |
 | 1. Parameters | Each PARAM rule runs in `Seq_Nbr` order; the first column of the first row becomes `{Rule_Nm}`. Values passed with the run win. `{as_of_date}`, `{project_cd}`, `{table_nm}`, `{run_ty}` are always there. The `run_key` template is filled (`{batch_id}` → `B42`). The run's `extra_filters` are kept with the parameters | PARAM rules, the run's `run_params`, `extra_filters`, `run_key` | `PARAM_FAILURE` (technical, retried) – usually "data not loaded yet" |
 | 2. Run row | `GOVT_RGLTRY_SamplingRun` row, `Run_Stat` `RUNNING`, with the configuration it uses, its `Config_Hash`, and its rules in `GOVT_RGLTRY_SamplingRunRule`. If the cycle's current sample is `FINAL`, the run stops here unless it was given a force reason | – | `FINALIZED` (not retried) |
-| 3a. Gates | Every GATE rule's `SELECT` must return a row (e.g. "the batch is closed"), else the run waits: it fails and Airflow retries it after `retry_delay_minutes` | GATE rules | `GATE_NOT_MET` (retried), `GATE_FAILURE` |
 | 3. Check | Every row is checked (classes, types, numbers and percentages, names, columns a class does not use, every SQL a `SELECT`) | both configuration tables | `CONFIG_ERROR` (not retried) |
 | 4. Pull | The key columns of the rows `Scope_Sql_Txt` returns (NULL: every source row), the run's `extra_filters` applied to them | `GOVT_RGLTRY_SamplingConfig`, `extra_filters` | `PULL_FAILURE` |
 | 4a. Rule queries | Each EXCLUSION / PRIORITY / LEVEL / BUCKET rule's `SELECT` runs on its own; the pulled cases it returns (by `Key_Columns_Txt`) match it, or get its value. Cases it returns outside the scope are ignored | the rules | `QUERY_RULE_FAILURE` (technical, retried); no key columns in the result: `CONFIG_ERROR` |
@@ -92,7 +91,7 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 | Table | Role | Who writes |
 |---|---|---|
 | `GOVT_RGLTRY_SamplingConfig` | One row per sample (project + table + run type) | you |
-| `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, GATE, EXCLUSION, PRIORITY, LEVEL, BUCKET, CAP; of one sample, or shared (`*`) | you |
+| `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, EXCLUSION, PRIORITY, LEVEL, BUCKET, CAP; of one sample, or shared (`*`) | you |
 | `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, the configuration it used | engine |
 | `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
@@ -115,7 +114,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
   table (e.g. 1–99 for one sample, 101–199 for the next).
 - **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the target table's columns are
   matched without regard to case (`umcm` = `UMCM`).
-- **SQL text**: every SQL column is a whole `SELECT`: every rule's `Rule_Sql_Txt` (PARAM, GATE, EXCLUSION,
+- **SQL text**: every SQL column is a whole `SELECT`: every rule's `Rule_Sql_Txt` (PARAM, EXCLUSION,
   PRIORITY, LEVEL, BUCKET, 4.2), and the config's `Scope_Sql_Txt` (the run's source rows) and `Diversity_Sql_Txt`
   (the key columns and a value) (4.1). Only `extra_filters`, given when a run is triggered, is a condition. Quotes are
   doubled inside an `INSERT` literal.
@@ -131,7 +130,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 - **Only reading SQL**: every SQL column is checked before a run (and by `validate`). Refused:
   a statement word (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `DROP`, `CREATE`, `ALTER`, `REPLACE`, `RENAME`, `GRANT`,
   `REVOKE`, `CALL`, `EXEC`, `COLLECT`, `COMMIT` …), a `;`, a `--` comment (it would comment out the rest of the
-  query built around the fragment: use `/* */`), unbalanced parentheses or quotes; PARAM and GATE must be a
+  query built around the fragment: use `/* */`), unbalanced parentheses or quotes; PARAM must be a
   `SELECT` (`WITH …` and `LOCKING ROW FOR ACCESS SELECT …` are fine). Text inside quotes is not checked:
   `disp = 'DELETE'` is a value. The rows run under the service account: this stops a pasted script or a slip,
   it is not a permission (who may write `GOVT_RGLTRY_SamplingRule` is).
@@ -177,23 +176,24 @@ of a table share a rule by `*`, and one run type changes it with its own row of 
 
 The others, by class:
 
-| Column | PARAM | GATE | EXCLUSION | PRIORITY | LEVEL | BUCKET |
-|---|---|---|---|---|---|---|
-| `Rule_Nm` | the `{token}` | name (in the message) | the reason stored | name | name | the value / bucket name (no `/`) |
-| `Rule_Ty` | | | `QUERY` (default) / `PRIOR_SELECTION` | `QUERY` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | `QUERY` (default) |
-| `Rule_Sql_Txt` | a `SELECT` | a `SELECT`: a row = ready | QUERY: a `SELECT` of the key columns | QUERY: a `SELECT` of the key columns; EXPRESSION: of the key columns and a value | a `SELECT` of the key columns and the value, or NULL (buckets by their `SELECT`s) | bucket level: a `SELECT` of the key columns, or NULL (the rest) |
-| `Level_Nbr` | | | | | 0, 1, … | its level |
-| `Parent_Path_Txt` | | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) |
-| `Unlisted_Cd` | | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | |
-| `Quota_Cd` | | | | | | `PCT` (default) / `CNT` / `ALL` / `REMAINDER` |
-| `Quota_Val` | | | | | | PCT: 0 to 100 (% of the parent's target); CNT: a number of cases |
-| `Max_Ty`, `Max_Val` | | | | | | optional cap: `CNT` a number, or `PCT` a % of the bucket's candidates |
-| `Sort_Dir_Cd` | | | | EXPRESSION: `ASC` (default) / `DESC` | | |
-| `Lookback_Days`, `History_Scope_Cd` | | | PRIOR_SELECTION | PRIOR_* | | |
+| Column | PARAM | EXCLUSION | PRIORITY | LEVEL | BUCKET |
+|---|---|---|---|---|---|
+| `Rule_Nm` | the `{token}` | the reason stored | name | name | the value / bucket name (no `/`) |
+| `Rule_Ty` | | `QUERY` (default) / `PRIOR_SELECTION` | `QUERY` (default) / `EXPRESSION` / `PRIOR_CANDIDATE` / `PRIOR_SELECTION` | | `QUERY` (default) |
+| `Rule_Sql_Txt` | a `SELECT` | QUERY: a `SELECT` of the key columns | QUERY: a `SELECT` of the key columns; EXPRESSION: of the key columns and a value | a `SELECT` of the key columns and the value, or NULL (buckets by their `SELECT`s) | bucket level: a `SELECT` of the key columns, or NULL (the rest) |
+| `Level_Nbr` | | | | 0, 1, … | its level |
+| `Parent_Path_Txt` | | | | the parents it splits (default `*`) | the parents it applies under (default `*`) |
+| `Unlisted_Cd` | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | |
+| `Quota_Cd` | | | | | `PCT` (default) / `CNT` / `ALL` / `REMAINDER` |
+| `Quota_Val` | | | | | PCT: 0 to 100 (% of the parent's target); CNT: a number of cases |
+| `Max_Ty`, `Max_Val` | | | | | optional cap: `CNT` a number, or `PCT` a % of the bucket's candidates |
+| `Sort_Dir_Cd` | | | EXPRESSION: `ASC` (default) / `DESC` | | |
+| `Lookback_Days`, `History_Scope_Cd` | | PRIOR_SELECTION | PRIOR_* | | |
 
 **PARAM** – a run parameter. The first column of the first row of `Rule_Sql_Txt` becomes `{Rule_Nm}`; a later
 PARAM may use an earlier one. No value (no row, or NULL) fails the run as `PARAM_FAILURE`, which is retried:
-typically the load has not finished. A value passed with the run (`run_params`) is used instead of the lookup.
+typically the load has not finished. A value passed with the run (`run_params`) is used instead of the lookup; a null or blank one is not, and the
+lookup runs.
 Example – the latest closed batch of the sample's own project, table and run type, one row (`*` / `*`) for the
 whole project (the control table is configuration: name yours):
 `SELECT MAX(Btch_ID) FROM <control table> WHERE Project_Cd = '{project_cd}' AND Table_Nm = '{table_nm}' AND
@@ -209,11 +209,6 @@ so a later case replacement reads it too. It is checked like any configured SQL 
 When the filters leave two rows with the same key columns, the run stops with "key_columns_txt do not identify a
 case uniquely": add the filter that picks one version. (A rule's own `SELECT` reads its tables itself: give a value
 `SELECT` the same version filter, or it returns a case twice.)
-
-**GATE** – a readiness check, run after the PARAM rules (so it may use `{batch_id}`). Its `SELECT` returning no
-row means "not ready": the run ends as `GATE_NOT_MET` and Airflow retries it (`retries`, `retry_delay_minutes`).
-Nothing is pulled or written but the run row. Example – sample only a closed batch:
-`SELECT 1 FROM <control table> WHERE <batch column> = '{batch_id}' AND <status column> = '<closed>'`.
 
 **Every selection rule is a SQL statement**: a whole `SELECT` returning the key columns of the cases it matches
 (same column names, any case; joins, subqueries, `WITH`, any table – anything that reads). Each runs on its own
@@ -339,7 +334,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 |---|---|---|
 | `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
-| `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
+| `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
 **Current sample** of a cycle: `Curr_Ind = 1` for its sample (project, table, run type) and `Run_Key`, on the run row
 and on its selections. A successful rerun turns the earlier rows to 0 (with `LastUpdt_Dtts`, `LastUpdt_ID`) in the
@@ -361,6 +356,12 @@ fit its parent's target. The selected cases per bucket can always be counted fro
 `Selection_Order_Nbr`); `Linked_Case_Key` points from each to the other. The current sample is always
 `Selected_Ind = 1`.
 
+**`Selection_Order_Nbr`** numbers the selected cases, 1 to the target, across every bucket. **`Bucket_Rank_Nbr`**
+numbers every case that was not excluded within its bucket (`Stratum_Path_Txt`) from 1: the bucket's selected cases
+first, then the rest in priority order, so the next cases of a bucket to take by hand are its lowest
+`Bucket_Rank_Nbr` with `Selected_Ind = 0`. Excluded rows have neither. A replacement from the same bucket swaps
+`Bucket_Rank_Nbr` with the case it replaces; one from another bucket (`--any-bucket`) keeps its own.
+
 **`Stratum_Path_Txt`** is the case's bucket at every level, `/` separated: the group per level of any candidate,
 and counts per bucket, are a `GROUP BY` on it.
 
@@ -379,7 +380,7 @@ and counts per bucket, are a `GROUP BY` on it.
 ### 6.2 Rule classes and their values
 | Column | Values |
 |---|---|
-| `GOVT_RGLTRY_SamplingRule.Rule_Class_Cd` | `PARAM`, `GATE`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `CAP` |
+| `GOVT_RGLTRY_SamplingRule.Rule_Class_Cd` | `PARAM`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `CAP` |
 | `Rule_Ty` (CAP) | `QUERY` (default), `PER_VALUE` |
 | `Table_Nm`, `Run_Ty` (rule) | a table / run type, or `*` = all of them |
 | `Rule_Ty` (EXCLUSION) | `QUERY` (default), `PRIOR_SELECTION` |
@@ -396,7 +397,7 @@ and counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `GOVT_RGLTRY_SamplingRun.Run_Stat` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
-| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `GATE_NOT_MET` (data not ready, retried) · `GATE_FAILURE` · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
 | `GOVT_RGLTRY_SampleSelection.Selection_Stat` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
@@ -438,9 +439,9 @@ section D.
 
 | Requirement | Rows |
 |---|---|
-| Sample only after the batch is closed | GATE: `SELECT 1 FROM <control table> WHERE … = '{batch_id}' AND <closed>` |
+| Sample only after the batch is closed | the PARAM `batch_id` lookup takes only closed batches: `… GROUP BY Btch_ID HAVING MIN(<closed>) = 1` |
 | Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `Scope_Sql_Txt` `SELECT * FROM <source> WHERE BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
-| One batch lookup for every table and run type | PARAM and GATE rows with `Table_Nm` / `Run_Ty` `*` whose SQL uses `{project_cd}`, `{table_nm}`, `{run_ty}` |
+| One batch lookup for every table and run type | a PARAM row with `Table_Nm` / `Run_Ty` `*` whose SQL uses `{project_cd}`, `{table_nm}`, `{run_ty}` |
 | A daily, a weekly and a monthly sample of one table | three config rows (`Run_Ty` `DLY`, `WKLY`, `MNT`); shared rules `Run_Ty` `*`, the differences a row per run type; Variable `runs` entries with their own `schedule_interval` |
 | The monthly sample has its own mix | its LEVEL / BUCKET rows with `Run_Ty` `MNT` (the same `Rule_Nm` replaces the shared row) |
 | Never audit auto-approvals | EXCLUSION: `SELECT <keys> FROM <source> WHERE <auto-approved>` |
@@ -550,13 +551,6 @@ than its target is short; with `TOPUP` the rest came from other buckets.
    Others: `Error_Txt` (one line), and the task log for the detail and the traceback; rerun when the cause is gone.
 3. Rerun with the same `run_key`: the new run becomes current, the failed attempt stays recorded.
 
-### 10.4a The run is waiting for data (GATE_NOT_MET)
-The message names the GATE rules not met. Airflow retries the task `retries` times, `retry_delay_minutes` apart;
-each attempt is a run row. When the retries run out the task fails: check the load, then clear the task (or
-rerun locally) once the data is there. With the Variable's `gate_wait_minutes`, a `wait_for_gates` sensor waits for
-the gates before the runs start instead (its log names the gates still not met, `GATES | waiting for: ...`); it
-fails when that time is up.
-
 ### 10.5 A run is stuck in RUNNING
 The worker was killed mid-run (nothing of the run was written: the writes are one transaction).
 `mark-failed --run-id <run_id>`, then rerun.
@@ -642,7 +636,7 @@ The draw.io source is [diagrams/sampling.drawio](diagrams/sampling.drawio) (ever
 |---|---|---|---|
 | 01 | Architecture: Airflow DAG and local CLI, one engine, Teradata tables, source and target | 2, 3, 8, 9 | [png](diagrams/png/01_architecture.png) · [drawio](diagrams/pages/01_architecture.drawio) |
 | 02 | A DAG run: checks, run_scope, how a task ends (retry, fail, incident, emails) | 2, 8, 10 | [png](diagrams/png/02_dag_run_and_result.png) · [drawio](diagrams/pages/02_dag_run_and_result.drawio) |
-| 03 | One sample end to end: params, gate, pull, exclusions, priority, select, persist | 2 | [png](diagrams/png/03_one_run.png) · [drawio](diagrams/pages/03_one_run.drawio) |
+| 03 | One sample end to end: params, pull, exclusions, priority, select, persist | 2 | [png](diagrams/png/03_one_run.png) · [drawio](diagrams/pages/03_one_run.drawio) |
 | 04 | Levels and buckets: quotas, water-filling, unlisted values, priority order | 2, 4 | [png](diagrams/png/04_stratify_and_select.png) · [drawio](diagrams/pages/04_stratify_and_select.drawio) |
 | 05 | CAP rules, replacements within caps, top-up and shortfall | 2, 4 | [png](diagrams/png/05_caps_and_top_up.png) · [drawio](diagrams/pages/05_caps_and_top_up.drawio) |
 | 06 | Finalise, replace a case, rerun a cycle, purge | 10.6–10.9, 12 | [png](diagrams/png/06_after_a_run.png) · [drawio](diagrams/pages/06_after_a_run.drawio) |

@@ -278,25 +278,3 @@ def test_a_trigger_sets_sql_text_only_when_the_variable_allows_it(variable):
     assert config["run_key"] == "rk"
     variable({**BASE, "trigger_keys": ["run_params"]})
     assert dags.resolve_config(VAR_KEY, {"run_params": '{"batch_id": "X"}'})["run_params"] == '{"batch_id": "X"}'
-
-
-def test_the_gate_sensor_waits_until_every_gate_is_met(monkeypatch, variable, raw):
-    from conftest import insert_config, insert_rule
-    from sampling.db import Connection
-    variable({**BASE, "gate_wait_minutes": 60, "gate_poke_minutes": 5})
-    dag = dags.build_sampling_dag("GATED", VAR_KEY)
-    sensor = dag.get_task("wait_for_gates")
-    assert sensor.mode == "reschedule" and sensor.poke_interval == 300 and sensor.timeout == 3600
-    assert {t.task_id for t in sensor.downstream_list} == {"run_sampling"}
-    raw.db.execute("CREATE TABLE ready (ok INTEGER)")
-    insert_config(raw.db, src_table_nm="ready", key_columns="ok", exclusion_sql=None, scope_sql_txt=None,
-                  order_by=None)
-    insert_rule(raw.db, "GATE", 70, "LOADED", seq_nbr=1, rule_sql_txt="SELECT 1 FROM main.ready")
-    monkeypatch.setattr(raw, "close", lambda: None)
-    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb",
-                                                                                   access_lock=False))
-    assert dags.gates_task(VAR_KEY) is False
-    raw.db.execute("INSERT INTO ready VALUES (1)")
-    assert dags.gates_task(VAR_KEY) is True
-    variable(BASE)
-    assert "wait_for_gates" not in dags.build_sampling_dag("PLAIN", VAR_KEY).task_ids

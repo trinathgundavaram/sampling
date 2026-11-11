@@ -39,7 +39,7 @@ def test_configured_sql_must_only_read(text, found):
     assert (not problems) if found is None else any(found in p for p in problems), problems
 
 
-def test_param_and_gate_sql_must_be_a_select():
+def test_param_sql_must_be_a_select():
     assert sql_problems("SELECT MAX(b) FROM t", "p", select=True) == []
     assert sql_problems("LOCKING ROW FOR ACCESS SELECT MAX(b) FROM t", "p", select=True) == []
     assert sql_problems("WITH x AS (SELECT 1 AS a) SELECT a FROM x", "p", select=True) == []
@@ -54,21 +54,17 @@ def test_a_run_refuses_writing_sql(raw, conn, settings):
     assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection") == [(0,)]
 
 
-BATCH_SQL = (
-    "SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM {db}.Batch_Control_Example WHERE Project_Cd = '{{project_cd}}' "
-    "AND Table_Nm = '{{table_nm}}' AND Run_Ty = '{{run_ty}}' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) "
-    "closed_batches",
-    "SELECT 1 FROM {db}.Batch_Control_Example WHERE Btch_ID = '{{batch_id}}' AND Project_Cd = '{{project_cd}}' "
-    "AND Table_Nm = '{{table_nm}}' AND Run_Ty = '{{run_ty}}' HAVING COUNT(*) > 0 AND MIN(Batch_Close_Ind) = 1",
-)
+BATCH_SQL = ("SELECT MAX(Btch_ID) FROM (SELECT Btch_ID FROM {db}.Batch_Control_Example WHERE Project_Cd = '{{project_cd}}' "
+             "AND Table_Nm = '{{table_nm}}' AND Run_Ty = '{{run_ty}}' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1) "
+             "closed_batches")
 
 
 def test_a_batch_lookup_reads_and_follows_the_environment():
-    for text in (t.format(db="HSABC_$ENV") for t in BATCH_SQL):
-        assert sql_problems(text, "batch", select=True) == []
-        for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
-            resolved = Settings(meta_db="M", environment=env).resolve_env(text, identifier=False)
-            assert f" {db}.Batch_Control_Example " in resolved and "$" not in resolved
+    text = BATCH_SQL.format(db="HSABC_$ENV")
+    assert sql_problems(text, "batch", select=True) == []
+    for env, db in (("DEV", "HSABC_DEV"), ("QA", "HSABC_QA"), ("UAT", "HSABC"), ("PROD", "HSABC")):
+        resolved = Settings(meta_db="M", environment=env).resolve_env(text, identifier=False)
+        assert f" {db}.Batch_Control_Example " in resolved and "$" not in resolved
 
 
 def test_shared_batch_rules_use_each_samples_project_table_and_run_type(raw, conn, settings):
@@ -79,8 +75,7 @@ def test_shared_batch_rules_use_each_samples_project_table_and_run_type(raw, con
                    "Btch_ID VARCHAR, Batch_Close_Ind INTEGER)")
     raw.db.executemany("INSERT INTO Batch_Control_Example VALUES ('UMCM', 'T1', ?, ?, ?)",
                        [("WKLY", "W1", 1), ("WKLY", "W2", 1), ("WKLY", "W3", 0), ("MNT", "M1", 1)])
-    insert_rule(raw.db, "PARAM", 31, "batch_id", table_nm="*", run_ty="*", rule_sql_txt=BATCH_SQL[0].format(db="main"))
-    insert_rule(raw.db, "GATE", 32, "closed", table_nm="*", run_ty="*", rule_sql_txt=BATCH_SQL[1].format(db="main"))
+    insert_rule(raw.db, "PARAM", 31, "batch_id", table_nm="*", run_ty="*", rule_sql_txt=BATCH_SQL.format(db="main"))
     weekly = run_sampling(conn, settings, key(1), run_key="{batch_id}", as_of=AS_OF)
     assert (weekly["status"], weekly["run_key"]) == ("COMPLETED", "W2")
     monthly = run_sampling(conn, settings, key(1, run_ty="MNT"), run_key="{batch_id}", as_of=AS_OF)

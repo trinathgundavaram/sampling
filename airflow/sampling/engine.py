@@ -39,7 +39,7 @@ SAMPLE_RUN_COLS = ("smpl_run_id", "smpl_run_key", "smpl_run_ty", "smpl_cycle_dt"
                    "smpl_stratum_path")
 SAMPLE_REQUIRED = ("smpl_run_key", "etl_is_curr_ind")
 OUTPUT_KEY_CHUNK = 50
-RULE_CLASSES = ("PARAM", "GATE", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "CAP")
+RULE_CLASSES = ("PARAM", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "CAP")
 _AUDIT_COLUMNS = ("load_dtts", "loaduser_id", "lastupdt_dtts", "lastupdt_id")
 SAMPLE_KEY = ("project_cd", "table_nm", "run_ty")
 ALL_TABLES = "*"
@@ -55,7 +55,6 @@ STEP = "SAMPLING"
 _RULE_COLUMNS = ("rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
                  "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd")
 _USED = {"PARAM": {"rule_sql_txt"},
-         "GATE": {"rule_sql_txt"},
          "EXCLUSION": {"rule_ty", "rule_sql_txt", "lookback_days", "history_scope_cd"},
          "PRIORITY": {"rule_ty", "rule_sql_txt", "sort_dir_cd", "lookback_days", "history_scope_cd"},
          "LEVEL": {"rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd"},
@@ -108,7 +107,6 @@ def _specificity(pattern: str) -> tuple:
 class Sample:
     config: dict
     params: list = field(default_factory=list)
-    gates: list = field(default_factory=list)
     exclusions: list = field(default_factory=list)
     priorities: list = field(default_factory=list)
     levels: list = field(default_factory=list)
@@ -192,7 +190,7 @@ def build_sample(config: dict, rules: list) -> Sample:
     for r in ordered:
         r["rule_class_cd"] = _up(r.get("rule_class_cd"))
         by_class.get(r["rule_class_cd"], sample.stray).append(r)
-    sample.params, sample.gates, sample.exclusions = by_class["PARAM"], by_class["GATE"], by_class["EXCLUSION"]
+    sample.params, sample.exclusions = by_class["PARAM"], by_class["EXCLUSION"]
     sample.priorities, sample.caps = by_class["PRIORITY"], by_class["CAP"]
     levels = sorted(by_class["LEVEL"], key=lambda r: (r.get("level_nbr") is None, r.get("level_nbr") or 0,
                                                       r["rule_id"]))
@@ -260,10 +258,6 @@ def config_problems(sample: Sample) -> list:
             problems.append(f"PARAM rule {p.get('rule_id')}: rule_nm must be a plain name")
         if not _text(p):
             problems.append(f"PARAM rule {p.get('rule_nm')}: rule_sql_txt is empty")
-
-    for g in sample.gates:
-        if not _text(g):
-            problems.append(f"GATE rule {g.get('rule_nm')}: rule_sql_txt is empty")
 
     for x in sample.exclusions:
         name, kind = x.get("rule_nm"), _up(x.get("rule_ty"), QUERY)
@@ -423,7 +417,7 @@ def _sql_problems(sample: Sample) -> list:
     for cls in RULE_CLASSES:
         for r in _rules_of(sample, cls):
             out += sql_problems(r.get("rule_sql_txt"), f"{cls} rule {r.get('rule_nm')}",
-                                select=cls in ("PARAM", "GATE") or _is_query(r))
+                                select=cls == "PARAM" or _is_query(r))
     return out
 
 
@@ -443,7 +437,7 @@ def _is_value(rule: dict) -> bool:
 def _rules_of(sample: Sample, cls: str) -> list:
     if cls == "BUCKET":
         return [b for lvl in sample.levels for b in lvl["buckets"]]
-    return {"PARAM": sample.params, "GATE": sample.gates, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
+    return {"PARAM": sample.params, "EXCLUSION": sample.exclusions, "PRIORITY": sample.priorities,
             "LEVEL": sample.levels, "CAP": sample.caps}[cls]
 
 
@@ -600,6 +594,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
 def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
     project, table, run_type = sample.key
     given_names = {str(k).lower() for k in (given or {})}
+    passed = {str(k).lower() for k, v in (given or {}).items() if v is not None and str(v).strip() != ""}
     reserved = sorted(given_names & BUILT_IN_PARAMS)
     if reserved:
         raise ValueError(f"run_params {reserved} are set by the engine and cannot be passed with the run")
@@ -609,7 +604,7 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
         name = str(p["rule_nm"])
         if name.lower() in BUILT_IN_PARAMS:
             raise ValueError(f"PARAM rule {name}: {name.lower()} is set by the engine, give the rule another name")
-        if name.lower() in given_names:
+        if name.lower() in passed:
             continue
         text = substitute_params(s.resolve_env(_text(p), identifier=False), params)
         rows = conn.query(text)
@@ -624,18 +619,6 @@ def _param_text(value):
     if isinstance(value, datetime):
         return value.isoformat(sep=" ")
     return value.isoformat() if isinstance(value, date) else value
-
-
-def gate_queries(sample: Sample, s: Settings, params: dict) -> list:
-    return [(g, substitute_params(s.resolve_env(_text(g), identifier=False), params)) for g in sample.gates]
-
-
-def unmet_gates(conn: Connection, s: Settings, sample: Sample, params: dict) -> list:
-    out = []
-    for gate, text in gate_queries(sample, s, params):
-        if not conn.query(text):
-            out.append(f"{gate['rule_nm']}" + (f" ({gate['rule_desc']})" if gate.get("rule_desc") else ""))
-    return out
 
 
 def case_key(row: dict, keys: list) -> str:
@@ -1158,18 +1141,22 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
                                  f"{live['smpl_run_id']}, by {live.get('finalized_by')}): rerun with a force reason "
                                  f"to replace it")
     order = {r["_key"]: i + 1 for i, r in enumerate(chosen)}
+    ranks, seen = {}, {}
+    for r in sorted(candidates, key=lambda r: (order.get(r["_key"]) is None, order.get(r["_key"]) or 0, r["_order"])):
+        seen[r.get("_path")] = seen.get(r.get("_path"), 0) + 1
+        ranks[r["_key"]] = seen[r.get("_path")]
     rows = [[run_id, *key, run_key, as_of, r["_key"], r["_order"] + 1,
-             1 if r["_key"] in order else 0, order.get(r["_key"]), 0, None, r.get("_path"),
+             1 if r["_key"] in order else 0, order.get(r["_key"]), ranks[r["_key"]], 0, None, r.get("_path"),
              "SELECTED" if r["_key"] in order else None, now, now] for r in candidates]
     if _up(c.get("keep_excluded_ind"), "1") not in ("0", "N", "FALSE"):
-        rows += [[run_id, *key, run_key, as_of, r["_key"], None, 0, None, 1, r["_reason"], None,
+        rows += [[run_id, *key, run_key, as_of, r["_key"], None, 0, None, None, 1, r["_reason"], None,
                   None, now, now] for r in excluded]
     conn.executemany(f"""
         INSERT INTO {s.meta_db}.GOVT_RGLTRY_SampleSelection (
             Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Smpl_Cycle_Dt_Key, Case_Key, Priority_Rank_Nbr,
-            Selected_Ind, Selection_Order_Nbr, Excluded_Ind, Exclusion_Rsn_Txt, Stratum_Path_Txt, Selection_Stat,
-            Curr_Ind, Load_Dtts, LastUpdt_Dtts
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
+            Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr, Excluded_Ind, Exclusion_Rsn_Txt, Stratum_Path_Txt,
+            Selection_Stat, Curr_Ind, Load_Dtts, LastUpdt_Dtts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
     if output is not None:
         _retire_output(conn, queries, run_key, now)
         _write_output(conn, s, queries, run_id, run_key, key[2], as_of, output,
@@ -1308,17 +1295,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         queries = build_queries(sample, s, params)
         summary["tgt_table_nm"] = queries.get("tgt_table_nm")
-        gate_queries(sample, s, params)
     except (ValueError, KeyError) as e:
         return fail("config", "CONFIG_ERROR", e)
-    try:
-        waiting = unmet_gates(conn, s, sample, params)
-    except Exception as e:  # noqa: BLE001
-        return fail("technical", "GATE_FAILURE", e, exc_info=True)
-    if waiting:
-        return fail("technical", "GATE_NOT_MET", "not ready yet: " + "; ".join(waiting))
-    if sample.gates:
-        log.info("%s | %s | %d gate(s) met", STEP, label, len(sample.gates))
 
     try:
         log_sql(f"{STEP} | {label} | pull", queries["pull_template"], queries["pull"], params)
@@ -1486,7 +1464,8 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
     if not run or _up(run["run_stat"]) not in ("COMPLETED", "FINAL"):
         raise ConfigError(f"{'.'.join(key)} has no completed current sample for run_key {run_key!r}")
     db, run_id = s.meta_db, run["smpl_run_id"]
-    rows = conn.query(f"SELECT Case_Key, Selected_Ind, Selection_Order_Nbr, Priority_Rank_Nbr, Excluded_Ind, "
+    rows = conn.query(f"SELECT Case_Key, Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr, Priority_Rank_Nbr, "
+                      f"Excluded_Ind, "
                       f"Stratum_Path_Txt, Selection_Stat FROM {db}.GOVT_RGLTRY_SampleSelection "
                       f"WHERE Smpl_Run_ID = ?", [run_id])
     old = next((r for r in rows if r["case_key"] == case_key_text), None)
@@ -1521,15 +1500,19 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
 
     now = s.now()
     with conn.transaction():
-        for case, flag, order, status, linked in ((old["case_key"], 0, None, "REPLACED", new["case_key"]),
-                                                  (new["case_key"], 1, old["selection_order_nbr"], "REPLACEMENT",
-                                                   old["case_key"])):
+        same = old["stratum_path_txt"] == new["stratum_path_txt"]
+        for case, flag, order, rank, status, linked in (
+                (old["case_key"], 0, None, new["bucket_rank_nbr"] if same else old["bucket_rank_nbr"], "REPLACED",
+                 new["case_key"]),
+                (new["case_key"], 1, old["selection_order_nbr"], old["bucket_rank_nbr"] if same else
+                 new["bucket_rank_nbr"], "REPLACEMENT", old["case_key"])):
             conn.execute(f"""
                 UPDATE {db}.GOVT_RGLTRY_SampleSelection
-                SET Selected_Ind = ?, Selection_Order_Nbr = ?, Selection_Stat = ?, Linked_Case_Key = ?,
-                    Stat_Rsn_Txt = ?, Stat_By = ?, Stat_Dtts = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER
+                SET Selected_Ind = ?, Selection_Order_Nbr = ?, Bucket_Rank_Nbr = ?, Selection_Stat = ?,
+                    Linked_Case_Key = ?, Stat_Rsn_Txt = ?, Stat_By = ?, Stat_Dtts = ?, LastUpdt_Dtts = ?,
+                    LastUpdt_ID = USER
                 WHERE Smpl_Run_ID = ? AND Case_Key = ?""",
-                [flag, order, status, linked, reason[:1000], by, now, now, run_id, case])
+                [flag, order, rank, status, linked, reason[:1000], by, now, now, run_id, case])
         if output is not None:
             where = []
             _retire_output(conn, queries, run_key, now,
@@ -1586,25 +1569,6 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
     return {"result": result, "scope": scope, "runs": runs, "failed": len(failed)}
 
 
-def pending_gates(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
-                  run_type: Optional[str] = None, run_key: Optional[str] = None, run_params: Optional[dict] = None,
-                  as_of: Optional[date] = None) -> list:
-    as_of = as_of or s.today()
-    out = []
-    for key in discover_configs(conn, s, project, table, run_type):
-        sample = load_config(conn, s, key)
-        if not sample.gates:
-            continue
-        try:
-            params = resolve_params(conn, s, sample, run_params, as_of)
-            params["run_key"] = substitute_params(str(run_key or "{as_of_date}"), params, escape=False)
-        except LookupError as e:
-            out.append(f"{sample.label}: {e}")
-            continue
-        out += [f"{sample.label}: {g}" for g in unmet_gates(conn, s, sample, params)]
-    return out
-
-
 def validate(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
              run_type: Optional[str] = None, run_params: Optional[dict] = None,
              check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[str] = None) -> dict:
@@ -1630,7 +1594,7 @@ def validate(conn: Connection, s: Settings, project: Optional[str] = None, table
                         conn.query("EXPLAIN " + queries[name] + (" AND 1=0" if name == "output" else ""))
                 if queries.get("output"):
                     target_table_columns(conn, queries, sample)
-                for _, text in [*gate_queries(sample, s, params), *queries["key_queries"]]:
+                for _, text in queries["key_queries"]:
                     conn.query("EXPLAIN " + text)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"SQL check failed: {error_text(e)}")

@@ -2,7 +2,7 @@ import json
 from datetime import date, timedelta
 
 from conftest import insert_bucket, insert_config, insert_rule, insert_strata, key, set_config
-from sampling.engine import config_problems, load_config, run_sampling, validate
+from sampling.engine import config_problems, load_config, replace_case, run_sampling, validate
 
 AS_OF = date(2026, 8, 7)
 
@@ -209,6 +209,25 @@ def test_priority_conditions_and_expressions_in_order(raw, conn, settings):
     assert [r[0] for r in order] == ["case_id=p2", "case_id=p3", "case_id=p4", "case_id=p1"]
 
 
+def test_every_candidate_is_ranked_within_its_bucket(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 4, "D", area="A") + _cases("b", 3, "D", area="B")
+                 + [("x1", "D", "A", "X", 0, "B1", "Y")])
+    _config(raw.db, 4)
+    insert_strata(raw.db, 1, 1, 0, "area", "area", {"A": 50, "B": 50})
+    insert_rule(raw.db, "EXCLUSION", 1, "FLAGGED", seq_nbr=1, rule_sql_txt="flag = 'Y'")
+    _run(conn, settings, run_key="K1")
+    sql = ("SELECT Case_Key, Stratum_Path_Txt, Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr, Excluded_Ind "
+           "FROM GOVT_RGLTRY_SampleSelection ORDER BY Case_Key")
+    assert _rows(raw, sql) == [
+        ("case_id=a000", "A", 1, 1, 1, 0), ("case_id=a001", "A", 1, 2, 2, 0), ("case_id=a002", "A", 0, None, 3, 0),
+        ("case_id=a003", "A", 0, None, 4, 0), ("case_id=b000", "B", 1, 3, 1, 0), ("case_id=b001", "B", 1, 4, 2, 0),
+        ("case_id=b002", "B", 0, None, 3, 0), ("case_id=x1", None, 0, None, None, 1)]
+    replace_case(conn, settings, key(1), "K1", "case_id=a000", "no record", "auditor")
+    swapped = _rows(raw, "SELECT Case_Key, Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr FROM "
+                         "GOVT_RGLTRY_SampleSelection WHERE Case_Key IN ('case_id=a000', 'case_id=a002') ORDER BY 1")
+    assert swapped == [("case_id=a000", 0, None, 3), ("case_id=a002", 1, 1, 1)]
+
+
 def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):
     _cases_table(raw.db, _cases("o", 10, "D", batch="B1") + _cases("n", 6, "D", batch="B2"))
     _config(raw.db, 4)
@@ -219,6 +238,16 @@ def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):
     assert json.loads(_rows(raw, "SELECT Run_Parm_Txt FROM GOVT_RGLTRY_SamplingRun")[0][0])["batch_id"] == "B2"
     given = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": "B1"})
     assert given["run_key"] == "B1" and given["in_scope"] == 10
+
+
+def test_g_param_given_null_or_blank_falls_back_to_its_query(raw, conn, settings):
+    _cases_table(raw.db, _cases("o", 10, "D", batch="B1") + _cases("n", 6, "D", batch="B2"))
+    _config(raw.db, 4)
+    set_config(raw.db, scope_sql_txt="batch = '{batch_id}'")
+    insert_rule(raw.db, "PARAM", 1, "batch_id", seq_nbr=1, rule_sql_txt="SELECT MAX(batch) FROM u")
+    for value in (None, "", "  "):
+        out = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": value})
+        assert out["status"] == "COMPLETED" and out["run_key"] == "B2" and out["in_scope"] == 6
 
 
 def test_g_param_without_a_value_is_a_technical_failure(raw, conn, settings):
@@ -247,32 +276,12 @@ def test_rule_rows_are_validated(raw, conn, settings):
         assert text in problems, (text, problems)
 
 
-def test_gate_waits_until_its_select_returns_a_row(raw, conn, settings):
-    _cases_table(raw.db, _cases("o", 5, "D", batch="B1"))
-    raw.db.execute("CREATE TABLE batch_control (batch VARCHAR, status VARCHAR)")
-    raw.db.execute("INSERT INTO batch_control VALUES ('B1', 'OPEN')")
-    _config(raw.db, 2)
-    set_config(raw.db, scope_sql_txt="batch = '{batch_id}'")
-    insert_rule(raw.db, "PARAM", 1, "batch_id", seq_nbr=1, rule_sql_txt="SELECT MAX(batch) FROM u")
-    insert_rule(raw.db, "GATE", 2, "BATCH_CLOSED", rule_sql_txt="SELECT 1 FROM batch_control WHERE batch = '{batch_id}' "
-                                                            "AND status = 'CLOSED'", rule_desc="batch closed")
-    out = _run(conn, settings, run_key="{batch_id}")
-    assert out["error_type"] == "GATE_NOT_MET" and out["error_kind"] == "technical"
-    assert "BATCH_CLOSED (batch closed)" in out["error"]
-    assert _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection")[0][0] == 0
-    raw.db.execute("UPDATE batch_control SET status = 'CLOSED'")
-    again = _run(conn, settings, run_key="{batch_id}")
-    assert again["status"] == "COMPLETED" and again["run_key"] == "B1" and again["selected"] == 2
-    assert _rows(raw, "SELECT Run_Stat FROM GOVT_RGLTRY_SamplingRun ORDER BY Start_Dtts") == [("ERROR",), ("COMPLETED",)]
-
-
-def test_a_broken_gate_is_reported(raw, conn, settings):
+def test_a_gate_row_is_no_longer_a_rule_class(raw, conn, settings):
     _cases_table(raw.db, _cases("o", 3, "D"))
     _config(raw.db, 2)
-    insert_rule(raw.db, "GATE", 1, "BROKEN", rule_sql_txt="SELECT 1 FROM no_such_table")
-    assert _run(conn, settings)["error_type"] == "GATE_FAILURE"
-    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingRule SET rule_sql_txt = NULL")
-    assert _run(conn, settings)["error_type"] == "CONFIG_ERROR"
+    insert_rule(raw.db, "GATE", 1, "BATCH_CLOSED", rule_sql_txt="SELECT 1")
+    out = _run(conn, settings)
+    assert out["error_type"] == "CONFIG_ERROR" and "rule_class_cd 'GATE' is not one of" in out["error"]
 
 
 def test_shared_rules_and_the_most_specific_row_wins(raw, conn, settings):

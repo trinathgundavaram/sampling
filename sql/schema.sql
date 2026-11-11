@@ -147,6 +147,7 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SampleSelection (
   Priority_Rank_Nbr      INTEGER,
   Selected_Ind           SMALLINT       DEFAULT 0 NOT NULL,
   Selection_Order_Nbr    INTEGER,
+  Bucket_Rank_Nbr        INTEGER,
   Excluded_Ind           SMALLINT       DEFAULT 0 NOT NULL,
   Exclusion_Rsn_Txt      VARCHAR(200),
   Stratum_Path_Txt       VARCHAR(1000),

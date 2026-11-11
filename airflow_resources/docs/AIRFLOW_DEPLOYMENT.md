@@ -132,7 +132,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
 | `project` / `table` / `run_type` | **The scope**: every active sample of the project (required), optionally only one table and / or one run type. Matched against `GOVT_RGLTRY_SamplingConfig` (`Project_Cd`, `Table_Nm`, `Run_Ty`) in any case |
 | `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
-| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name. `{run_key}`, `{as_of_date}`, `{project_cd}`, `{table_nm}` and `{run_ty}` (the sample's own) are always available |
+| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name; a null or blank value counts as not given, so the PARAM rule's query runs. `{run_key}`, `{as_of_date}`, `{project_cd}`, `{table_nm}` and `{run_ty}` (the sample's own) are always available |
 | `extra_filters` | Optional SQL condition (or a list of them) on the rows `Scope_Sql_Txt` returns, for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `As_Of_Dt_Key`, `Smpl_Cycle_Dt_Key` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
@@ -141,10 +141,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `schedule_timezone` | Default `America/Chicago` |
 | `timezone` | Business time zone for the as-of date and the timestamps written (default `America/Chicago`) |
 | `log_level` | `INFO` (default) or `DEBUG` (adds every SQL statement's text and row count; never data) |
-| `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried. A GATE rule not met (`GATE_NOT_MET`, the data is not ready) is retried the same way |
-| `retry_delay_minutes` | Minutes between retries (default 5). With GATE rules and no `gate_wait_minutes`, `retries` × `retry_delay_minutes` is how long a run waits for the data |
-| `gate_wait_minutes` | Optional. Adds a `wait_for_gates` sensor before the runs: it checks every sample's GATE rules every `gate_poke_minutes` (default 15) and frees the worker in between, for up to this many minutes; then it fails (fail_email, incident). The runs start once every gate is met, so `retries` stay for technical failures. Not used on a DAG with timed runs |
-| `gate_poke_minutes` | Minutes between gate checks of `wait_for_gates` (default 15) |
+| `retries` | Retries after a technical error (default 1, 0 = never). A configuration problem is never retried |
+| `retry_delay_minutes` | Minutes between retries (default 5). With a PARAM lookup that finds no batch yet (`PARAM_FAILURE`), `retries` × `retry_delay_minutes` is how long a run waits for the data |
 | `execution_timeout_minutes` / `dagrun_timeout_minutes` | Task limit (default 120) / DAG run limit (default 480) |
 | `fail_on_shortfall` | true = fail the task when a sample has fewer cases than its target (`Target_Val`, or the percentage resolved: the run row's `Target_Cnt`) (default false: a warning) |
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
@@ -199,8 +197,8 @@ DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no cod
    its own, not this DAG's scope), and `"trigger_run_params": [...]` for any of its values the rules use.
 3. Give the samples a PARAM rule for the batch (e.g. the latest closed batch of the framework's control table for
    `{project_cd}` / `{table_nm}` / `{run_ty}`: one row with `Table_Nm` / `Run_Ty` `*` serves every sample of the
-   project) and `"run_key": "{batch_id}"`, and a GATE rule that returns a row only when that batch is ready, with
-   `retries` and `retry_delay_minutes` covering how late it can be. The control table's name is configuration (the
+   project) and `"run_key": "{batch_id}"`, with `retries` and `retry_delay_minutes` covering how late the batch
+   can be. The control table's name is configuration (the
    rule's SQL), never code.
 
 ```json
@@ -303,8 +301,8 @@ and `UMCM_T` in UAT and PROD. The token keeps its casing (`$env` -> `dev`,
   then how many more). Every problem and a technical error's traceback are in the task log only, as are the counts
   per exclusion rule, bucket and cap (also in the task's report, its XCom); the configuration a run used is on its
   run row and its rules in `GOVT_RGLTRY_SamplingRunRule`.
-- Logging follows the framework: `SAMPLING | <project.table.run_ty> | <what>` at each stage (parameters, gates, the
-  pull, each rule's SELECT with the parameters it uses and the cases it returned, exclusions, target, each bucket,
+- Logging follows the framework: `SAMPLING | <project.table.run_ty> | <what>` at each stage (parameters, the pull,
+  each rule's SELECT with the parameters it uses and the cases it returned, exclusions, target, each bucket,
   caps, top-up, target table, completion), then `SAMPLING report:` with the run's report. Counts and run
   parameters only, never case data.
 - Reads use `LOCKING ROW FOR ACCESS` (no read lock on the source or the metadata tables; switch off with

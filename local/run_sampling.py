@@ -146,7 +146,7 @@ def cmd_validate(conn, s, args) -> tuple:
 
 def cmd_show_config(conn, s, args) -> tuple:
     sample = load_config(conn, s, _key(args))
-    return {"config": sample.config, "params": sample.params, "gates": sample.gates,
+    return {"config": sample.config, "params": sample.params,
             "exclusions": sample.exclusions, "priorities": sample.priorities, "levels": sample.levels,
             "caps": sample.caps, "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
 
