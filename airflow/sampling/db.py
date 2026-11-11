@@ -153,7 +153,7 @@ class Connection:
             self._depth = 0
             try:
                 self._raw.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug("rollback failed", exc_info=True)
             finally:
                 self._autocommit(True)

@@ -6,9 +6,9 @@ import pytest
 
 pytest.importorskip("airflow.sdk")
 
-from conftest import ROOT, build_source, insert_config, key, um_config  # noqa: E402
-from sampling import dags  # noqa: E402
-from sampling.settings import ConfigError  # noqa: E402
+from conftest import ROOT, build_source, insert_config, key, um_config
+from sampling import dags
+from sampling.settings import ConfigError
 
 VAR_KEY = "govt_rgltry_umcm_sampling_config_var"
 BASE = {"td_conn_var": "DEV", "meta_db": "main", "load_env": "DEV", "project": "UMCM", "run_type": "WKLY",

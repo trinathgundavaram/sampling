@@ -41,7 +41,7 @@ class Settings:
             raise ConfigError(f"meta_db {self.meta_db!r} must be a plain Teradata database name")
         try:
             ZoneInfo(self.timezone)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             raise ConfigError(f"timezone {self.timezone!r} is not a known time zone") from e
         if int(self.chunk_rows) < 1:
             raise ConfigError("chunk_rows must be >= 1")

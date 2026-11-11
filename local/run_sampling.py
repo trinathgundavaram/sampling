@@ -14,12 +14,12 @@ _ENGINE_DIR = _HERE.parent / "airflow"
 if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
 
-from sampling import __version__  # noqa: E402
-from sampling.admin import purge_selections  # noqa: E402
-from sampling.db import connect_teradata, error_text  # noqa: E402
-from sampling.engine import (config_problems, finalize_run, load_config, replace_case, run_scope,  # noqa: E402
+from sampling import __version__
+from sampling.admin import purge_selections
+from sampling.db import connect_teradata, error_text
+from sampling.engine import (config_problems, finalize_run, load_config, replace_case, run_scope,
                              validate)
-from sampling.settings import ConfigError, Settings  # noqa: E402
+from sampling.settings import ConfigError, Settings
 
 log = logging.getLogger("sampling.cli")
 PREFIX = "SAMPLING_"
@@ -297,7 +297,7 @@ def main(argv=None) -> int:
             out, code = COMMANDS[args.command](conn, s, args)
     except (ConfigError, ValueError, EnvironmentError, ImportError) as e:
         out, code = {"command": args.command, "result": "COULD NOT RUN", "problem": error_text(e)}, 2
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("%s failed", args.command)
         out, code = {"command": args.command, "result": "COULD NOT RUN", "problem": error_text(e)}, 2
     print(json.dumps(out, indent=2, default=str))

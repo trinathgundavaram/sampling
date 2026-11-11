@@ -1,0 +1,4 @@
+[lint.per-file-ignores]
+"airflow/govt_rgltry_umcm_sampling.py" = ["E402"]
+"local/run_sampling.py" = ["E402"]
+"tests/*" = ["E402"]

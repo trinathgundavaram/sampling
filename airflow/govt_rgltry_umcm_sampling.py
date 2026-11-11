@@ -5,7 +5,7 @@ _DAG_DIR = os.path.dirname(os.path.abspath(__file__))
 if _DAG_DIR not in sys.path:
     sys.path.insert(0, _DAG_DIR)
 
-from sampling.dags import build_sampling_dag  # noqa: E402
+from sampling.dags import build_sampling_dag
 
 dag_id = "GOVT_RGLTRY_UMCM_SAMPLING"
 variable_key = "govt_rgltry_umcm_sampling_config_var"

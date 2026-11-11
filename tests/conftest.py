@@ -10,8 +10,8 @@ sys.path.insert(0, str(ROOT / "airflow"))
 
 duckdb = pytest.importorskip("duckdb")
 
-from sampling.db import Connection  # noqa: E402
-from sampling.settings import Settings  # noqa: E402
+from sampling.db import Connection
+from sampling.settings import Settings
 
 META_DB = "main"
 

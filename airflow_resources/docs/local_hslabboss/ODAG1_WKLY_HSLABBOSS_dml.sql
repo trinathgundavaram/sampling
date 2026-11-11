@@ -1,5 +1,9 @@
+DELETE FROM HSLABBOSS.GOVT_RGLTRY_SamplingRule WHERE Rule_ID BETWEEN 200 AND 299;
+
+DELETE FROM HSLABBOSS.GOVT_RGLTRY_SamplingConfig WHERE Project_Cd = 'UMCM' AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY';
+
 INSERT INTO HSLABBOSS.GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty, Smpl_Desc, Src_Schema_Nm, Src_Table_Nm, Key_Columns_Txt, Scope_Sql_Txt, Target_Ty, Target_Val, Smpl_Method_Cd, Rounding_Cd, Shortfall_Cd, Keep_Excluded_Ind, Tgt_Schema_Nm, Tgt_Table_Nm, Active_Ind)
-VALUES ('UMCM', 'ODAG1', 'WKLY', 'ODAG1 weekly UM audit sample: 150 cases by functional area and determination', 'HSLABBOSS', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1', 'AUTHZN_ID, SRC_DATA_KEY', 'SELECT * FROM HSLABBOSS.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N''', 'CNT', 150, 'RANKED', 'ROUND', 'TOPUP', 1, 'HSLABBOSS', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1_Sample', 0);
+VALUES ('UMCM', 'ODAG1', 'WKLY', 'ODAG1 weekly UM audit sample: 150 cases by functional area and determination', 'HSLABBOSS', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1', 'AUTHZN_ID, SRC_DATA_KEY', 'SELECT * FROM HSLABBOSS.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND ETL_IS_DEL_IND = ''N''', 'CNT', 150, 'RANKED', 'ROUND', 'TOPUP', 1, 'HSLABBOSS', 'SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1_Sample', 1);
 
 INSERT INTO HSLABBOSS.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Rule_Sql_Txt, Rule_Desc)
 VALUES (201, 'UMCM', '*', '*', 'PARAM', 1, 'batch_id', 'SELECT TOP 1 Btch_ID FROM HSLABBOSS.GOVT_RGLTRY_RequestControl WHERE Project_Cd = ''{project_cd}'' AND Table_Nm = ''{table_nm}'' AND Run_Ty = ''{run_ty}'' GROUP BY Btch_ID HAVING MIN(Batch_Close_Ind) = 1 ORDER BY SUBSTR(Btch_ID, 1, 8) DESC, CHARACTER_LENGTH(Btch_ID) DESC, Btch_ID DESC', 'The latest batch of the sample''s project, table and run type with every source closed');

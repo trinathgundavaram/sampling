@@ -1215,7 +1215,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         run_key = substitute_params(template, params, escape=False)
     except ValueError as e:
         early, params = ("config", "CONFIG_ERROR", e), dict(run_params or {})
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         early, params = ("technical", "PARAM_FAILURE", e), dict(run_params or {})
     if early:
         known = {**(run_params or {}), "as_of_date": as_of.isoformat(), "project_cd": project, "table_nm": table,
@@ -1264,7 +1264,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             stored = problems[0] + (f" (+{len(problems) - 1} more: see the task log)" if len(problems) > 1 else "")
             try:
                 _finish_run(conn, s, run_id, summary, error_type, stored)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.error("%s | %s | could not close the run row %s: %s", STEP, label, run_id, error_text(e))
         return summary
 
@@ -1275,7 +1275,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         if not dry_run:
             _start_run(conn, s, run_id, run_key, sample, run_seed, as_of, params_text, triggered_by, started,
                        force_reason if final else None)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return fail("technical", "START_FAILURE", e, exc_info=True)
     if early:
         return fail(early[0], early[1], early[2])
@@ -1310,7 +1310,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         for p in sample.priorities:
             if _up(p.get("rule_ty"), QUERY) in HISTORY_TYPES:
                 history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return fail("technical", "PULL_FAILURE", e, exc_info=True)
 
     try:
@@ -1324,7 +1324,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         summary["rule_queries"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"], params)
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return fail("technical", "QUERY_RULE_FAILURE", e, exc_info=True)
 
     try:
@@ -1351,7 +1351,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         chosen = sorted(chosen[:target], key=lambda r: r["_order"])
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return fail("technical", "SELECT_FAILURE", e, exc_info=True)
     summary.update(in_scope=in_scope, excluded=in_scope - len(candidates), candidates=len(candidates),
                    selected=len(chosen), shortfall=max(0, target - len(chosen)), exclusions=counts,
@@ -1367,7 +1367,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                      queries["tgt_table_nm"])
         except ConfigError as e:
             return fail("config", "CONFIG_ERROR", e)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return fail("technical", "OUTPUT_FAILURE", e, exc_info=True)
 
     if dry_run:
@@ -1382,7 +1382,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             _finish_run(conn, s, run_id, summary)
     except FinalizedMeanwhile as e:
         return fail("config", "FINALIZED", str(e))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return fail("technical", "PERSIST_FAILURE", e, exc_info=True)
 
     summary["status"] = "COMPLETED"
@@ -1561,7 +1561,7 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
             runs.append(run_sampling(conn, s, key, **kwargs))
         except ConfigError as e:
             runs.append({**failed, "error_kind": "config", "error_type": "CONFIG_ERROR", "error": str(e)})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("%s | %s | START_FAILURE: %s", STEP, ".".join(key), error_text(e), exc_info=True)
             runs.append({**failed, "error_kind": "technical", "error_type": "START_FAILURE", "error": error_text(e)})
     failed = [r for r in runs if r.get("status") != "COMPLETED"]
@@ -1596,7 +1596,7 @@ def validate(conn: Connection, s: Settings, project: Optional[str] = None, table
                     target_table_columns(conn, queries, sample)
                 for _, text in queries["key_queries"]:
                     conn.query("EXPLAIN " + text)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 problems.append(f"SQL check failed: {error_text(e)}")
         out.append({**entry, "smpl_desc": sample.config.get("smpl_desc"), "problems": problems})
     bad = sum(1 for c in out if c["problems"])

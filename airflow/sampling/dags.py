@@ -83,7 +83,7 @@ def _load_variable(variable_key: str) -> dict:
 def load_dag_config(variable_key: str) -> dict:
     try:
         return _load_variable(variable_key)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("sampling DAG configuration: %s", e)
         return {}
 
@@ -255,7 +255,7 @@ def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope
                 " | DRY RUN" if kwargs["dry_run"] else "")
     try:
         conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     try:
         outcome = run_scope(conn, settings, **scope, **kwargs)
@@ -301,7 +301,7 @@ def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=
         logger.info("SAMPLING | %s", entry)
         try:
             runs += run_sampling_task(variable_key, overrides, index, dag_run, connection_id).get("runs", [])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.error("SAMPLING | %s | failed: %s", entry, e)
             failed.append((f"{entry}: {e}", isinstance(e, AirflowFailException)))
     if failed:
@@ -321,7 +321,7 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
         raise AirflowFailException(f"configuration: {e}") from e
     try:
         conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     out = []
     try:
@@ -415,7 +415,7 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     tz = dag_config.get("schedule_timezone") or dag_config.get("timezone") or DEFAULT_TIMEZONE
     try:
         start_date = pendulum.datetime(2026, 1, 1, tz=tz)
-    except Exception:  # noqa: BLE001
+    except Exception:
         tz = DEFAULT_TIMEZONE
         start_date = pendulum.datetime(2026, 1, 1, tz=tz)
     default_args = {
