@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, tzinfo
+from functools import lru_cache
 from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 
@@ -14,8 +16,65 @@ _ENV_TOKEN = re.compile(r"\$env", re.IGNORECASE)
 _IDENT = re.compile(r"^[A-Za-z_$#][A-Za-z0-9_$#]{0,127}$")
 
 
+log = logging.getLogger(__name__)
+
+
 class ConfigError(ValueError):
     pass
+
+
+def _nth_sunday(year: int, month: int, n: int) -> datetime:
+    first = datetime(year, month, 1)
+    return first + timedelta(days=(6 - first.weekday()) % 7 + 7 * (n - 1))
+
+
+class CentralTime(tzinfo):
+    _STD = timedelta(hours=-6)
+    _HOUR = timedelta(hours=1)
+
+    def _dst_span(self, year: int) -> tuple:
+        return _nth_sunday(year, 3, 2) + timedelta(hours=2), _nth_sunday(year, 11, 1) + timedelta(hours=1)
+
+    def dst(self, dt):
+        if dt is None:
+            return timedelta(0)
+        start, end = self._dst_span(dt.year)
+        local = dt.replace(tzinfo=None)
+        if start <= local < end or (end <= local < end + self._HOUR and not dt.fold):
+            return self._HOUR
+        return timedelta(0)
+
+    def utcoffset(self, dt):
+        return self._STD + self.dst(dt)
+
+    def tzname(self, dt):
+        return "CDT" if self.dst(dt) else "CST"
+
+    def fromutc(self, dt):
+        standard = dt.replace(tzinfo=None) + self._STD
+        start, end = self._dst_span(standard.year)
+        if start <= standard < end:
+            return (standard + self._HOUR).replace(tzinfo=self)
+        if end <= standard < end + self._HOUR:
+            return standard.replace(tzinfo=self, fold=1)
+        return standard.replace(tzinfo=self)
+
+    def __repr__(self):
+        return "CentralTime()"
+
+
+@lru_cache(maxsize=None)
+def zone(name: str) -> tzinfo:
+    try:
+        return ZoneInfo(name)
+    except Exception as e:
+        try:
+            ZoneInfo(DEFAULT_TIMEZONE)
+        except Exception:
+            log.warning("this server has no time zone database: %s is used for %r (US daylight saving rules)",
+                        DEFAULT_TIMEZONE, name)
+            return CentralTime()
+        raise ConfigError(f"timezone {name!r} is not a known time zone") from e
 
 
 def _flag(value: Any, default: bool) -> bool:
@@ -89,10 +148,7 @@ class Settings:
         object.__setattr__(self, "meta_db", self.resolve_env(str(self.meta_db or "").strip()))
         if not self.meta_db or not _IDENT.match(self.meta_db):
             raise ConfigError(f"meta_db {self.meta_db!r} must be a plain Teradata database name")
-        try:
-            ZoneInfo(self.timezone)
-        except Exception as e:
-            raise ConfigError(f"timezone {self.timezone!r} is not a known time zone") from e
+        zone(self.timezone)
         if int(self.chunk_rows) < 1:
             raise ConfigError("chunk_rows must be >= 1")
 
@@ -113,7 +169,7 @@ class Settings:
                    access_lock=_flag(v.get("access_lock"), True))
 
     def now(self) -> datetime:
-        return datetime.now(ZoneInfo(self.timezone)).replace(tzinfo=None)
+        return datetime.now(zone(self.timezone)).replace(tzinfo=None)
 
     def today(self) -> date:
         return self.now().date()

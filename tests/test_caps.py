@@ -124,7 +124,7 @@ def test_caps_with_the_same_sql_run_it_once(raw, conn, settings, monkeypatch, ca
     _table(raw.db, rows)
     _config(raw.db, 10, {"Denied": 80, "Approved": 20})
     _cap(raw.db, 51, "OON_DENIALS", OON_CAP, 2, parent="Denied")
-    _cap(raw.db, 52, "OON_APPROVED", "  " + OON_CAP.replace(" FROM", "\n FROM"), 1, parent="Approved")
+    _cap(raw.db, 52, "OON_APPROVED", OON_CAP, 1, parent="Approved")
     caplog.set_level("INFO", "sampling")
     calls = []
     stream = type(conn).stream
@@ -135,3 +135,16 @@ def test_caps_with_the_same_sql_run_it_once(raw, conn, settings, monkeypatch, ca
     assert "has the same SQL as CAP rule OON_DENIALS" in caplog.text
     assert _count(raw, SELECTED_U + "u.oon = 'Y' AND u.disp = 'Denied'") == 2
     assert _count(raw, SELECTED_U + "u.oon = 'Y' AND u.disp = 'Approved'") == 1
+
+
+def test_a_replacement_keeps_the_caps(raw, conn, settings):
+    from sampling.engine import replace_case
+    rows = [(f"a{i:03d}", "A", "C1" if i < 4 else f"A{i}", "N") for i in range(8)]
+    _table(raw.db, rows)
+    _config(raw.db, 4, {"A": 100})
+    _cap(raw.db, 50, "CPT", CPT_CAP, 3, rule_ty="PER_VALUE")
+    assert _run(conn, settings)["status"] == "COMPLETED"
+    assert [k for (k,) in _selected(raw)] == ["case_id=a000", "case_id=a001", "case_id=a002", "case_id=a004"]
+    out = replace_case(conn, settings, key(1), "K", "case_id=a004", "no record", "auditor")
+    assert out["replacement"] == "case_id=a005"
+    assert _count(raw, SELECTED_U + "u.cpt = 'C1'") == 3

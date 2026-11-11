@@ -50,10 +50,10 @@ def test_stratify_any_number_of_levels_shares_equally():
 
 
 FROZEN_BY_STRATUM = {
-    "Approved/Area A": (6, 1), "Approved/Area B": (7, 0), "Approved/Area C": (59, 9),
+    "Approved/Area A": (6, 1), "Approved/Area B": (7, 1), "Approved/Area C": (59, 9),
     "Denied/Area A": (96, 15), "Denied/Area B": (71, 9), "Denied/Area C": (610, 94),
     "Dismissed/Area A": (3, 0), "Dismissed/Area B": (4, 0), "Dismissed/Area C": (14, 2),
-    "Withdrawn/Area A": (7, 1), "Withdrawn/Area B": (9, 1), "Withdrawn/Area C": (94, 11),
+    "Withdrawn/Area A": (7, 1), "Withdrawn/Area B": (9, 2), "Withdrawn/Area C": (94, 16),
 }
 
 
@@ -280,3 +280,38 @@ def test_cron_match_without_croniter():
         cron_match("0 8 * *", friday_8)
     with pytest.raises(ConfigError, match="outside"):
         cron_match("0 25 * * *", friday_8)
+
+
+def test_central_time_matches_the_time_zone_database():
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    from sampling.settings import CentralTime
+    real, ours = ZoneInfo("America/Chicago"), CentralTime()
+    at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    while at < datetime(2028, 1, 1, tzinfo=timezone.utc):
+        a, b = at.astimezone(real), at.astimezone(ours)
+        assert (a.replace(tzinfo=None), a.utcoffset(), a.fold) == (b.replace(tzinfo=None), b.utcoffset(), b.fold), at
+        assert b.astimezone(timezone.utc) == at
+        at += timedelta(minutes=30)
+
+
+def test_no_time_zone_database_falls_back_to_central(monkeypatch, caplog):
+    from sampling import settings as st
+
+    def missing(name):
+        raise KeyError(name)
+    st.zone.cache_clear()
+    monkeypatch.setattr(st, "ZoneInfo", missing)
+    try:
+        s = Settings.from_mapping({"meta_db": "M", "timezone": "America/New_York"})
+        assert isinstance(st.zone(s.timezone), st.CentralTime) and s.now()
+        assert "no time zone database" in caplog.text
+    finally:
+        st.zone.cache_clear()
+
+
+def test_a_wrong_time_zone_name_is_still_a_config_error():
+    from sampling import settings as st
+    st.zone.cache_clear()
+    with pytest.raises(ConfigError, match="not a known time zone"):
+        Settings.from_mapping({"meta_db": "M", "timezone": "America/Chicagoo"})

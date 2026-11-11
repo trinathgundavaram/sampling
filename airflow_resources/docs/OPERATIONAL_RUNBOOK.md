@@ -261,7 +261,7 @@ BUCKET rows' `SELECT`s, tried in `Seq_Nbr` order, the first that returned the ca
 `Parent_Path_Txt`: the parents this level splits – `*` = all, `Denied` = only within Denied, `Denied/*` … (`*` and
 `?` wildcards, not case specific); under other parents the level is skipped. `Unlisted_Cd`: what happens to a value
 with no BUCKET row, or to `OTHER` – `SHARE` = share what the PCT and CNT buckets leave equally, `REMAINDER` = as `Quota_Cd`
-REMAINDER, `SKIP` = never selected, even when the sample is short (top-up) or a case is replaced. No LEVEL rules = no stratification: the whole pool is one bucket (`ALL`).
+REMAINDER, `SKIP` = never selected, even when the sample is short (top-up) or a case is replaced. A bucket with `Quota_Cd` `CNT` and `Quota_Val` 0 is never selected either, and the top-up never takes a bucket past its `Max_Val`. A replacement stays within the CAP rules. No LEVEL rules = no stratification: the whole pool is one bucket (`ALL`).
 
 **BUCKET** – a bucket of the LEVEL with the same `Level_Nbr`. `Parent_Path_Txt`: when several patterns match a
 parent, the most specific wins (fewest wildcards, then longest), so one level can have a different mix per parent.
@@ -351,8 +351,8 @@ leaves (`Denied` and `Denied/Part B`), `caps` {Rule_Nm: limit, over, replaced}, 
 fit its parent's target. The selected cases per bucket can always be counted from the selections'
 `Stratum_Path_Txt`.
 
-**`Selection_Stat`**: `SELECTED` for the cases the run picked; `SKIPPED` for a case in a `SKIP` bucket (never
-selected, not by the top-up and not as a replacement); `REPLACED` for a case taken out later
+**`Selection_Stat`**: `SELECTED` for the cases the run picked; `SKIPPED` for a case in a `SKIP` bucket or a `CNT` 0 bucket
+(never selected, not by the top-up and not as a replacement); `REPLACED` for a case taken out later
 (`Selected_Ind` back to 0) and `REPLACEMENT` for the case put in for it (`Selected_Ind` 1, the same
 `Selection_Order_Nbr`); `Linked_Case_Key` points from each to the other. The current sample is always
 `Selected_Ind = 1`.

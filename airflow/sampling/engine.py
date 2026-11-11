@@ -563,7 +563,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
     for rule, text in key_queries:
         name, cls, value_rule = rule["rule_nm"], rule["rule_class_cd"], _is_value(rule)
         what = f"{cls} rule {name}"
-        same = done.get((" ".join(text.split()), value_rule))
+        same = done.get((text.strip(), value_rule))
         if same:
             found = same[1]
             log.info("%s | %s | %s has the same SQL as %s: its %d case(s) are reused", STEP, sample.label, what,
@@ -592,7 +592,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
             need = " and one value column" if value_rule else ""
             raise ConfigError(f"{what} must return the key_columns {', '.join(sample.keys)}{need}: {e}") from None
         _set_rule_column(rows, rule, found, value_rule)
-        done[(" ".join(text.split()), value_rule)] = (what, found)
+        done[(text.strip(), value_rule)] = (what, found)
         counts[str(name)] = len(found)
         log.info("%s | %s | %s returned %d case(s)", STEP, sample.label, what, len(found))
     return counts
@@ -611,8 +611,8 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
     reserved = sorted(given_names & BUILT_IN_PARAMS)
     if reserved:
         raise ValueError(f"run_params {reserved} are set by the engine and cannot be passed with the run")
-    params = {**(given or {}), "as_of_date": as_of.isoformat(), "project_cd": project, "table_nm": table,
-              "run_ty": run_type}
+    params = {k: v for k, v in (given or {}).items() if str(k).lower() in passed}
+    params.update(as_of_date=as_of.isoformat(), project_cd=project, table_nm=table, run_ty=run_type)
     for p in sample.params:
         name = str(p["rule_nm"])
         if name.lower() in BUILT_IN_PARAMS:
@@ -783,6 +783,7 @@ class Stratifier:
         self.target = 0
         self.leaves = {}
         self.nodes = {}
+        self.ceilings = {}
         self.notes = []
 
     def rng(self, path: str) -> random.Random:
@@ -818,13 +819,28 @@ class Stratifier:
         return out
 
     def unselect(self, path: str) -> None:
+        self._count(path, -1)
+
+    def add(self, path: str) -> None:
+        self._count(path, 1)
+
+    def _count(self, path: str, step: int) -> None:
         parts = path.split("/")
         for i in range(1, len(parts) + 1):
             node = self.nodes.get("/".join(parts[:i]))
             if node:
-                node["selected"] -= 1
+                node["selected"] += step
         if path in self.leaves and self.leaves[path] is not self.nodes.get(path):
-            self.leaves[path]["selected"] -= 1
+            self.leaves[path]["selected"] += step
+
+    def room(self, path: str) -> bool:
+        parts = path.split("/")
+        for i in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:i])
+            ceiling = self.ceilings.get(prefix)
+            if ceiling is not None and (self.nodes.get(prefix) or {}).get("selected", 0) >= ceiling:
+                return False
+        return True
 
     def _forget(self, path: str) -> None:
         prefix = f"{path}/"
@@ -937,9 +953,13 @@ class Stratifier:
             if mode(key) == "SKIP":
                 targets[key] = 0
                 chosen[key] = self._allocate(buckets[key], 0, index + 1, sub(key))
+            if mode(key) == "SKIP" or (mode(key) == "CNT" and not _number(group[key].get("quota_val"))):
                 for r in buckets[key]:
                     r["_skip"] = True
 
+        for key in buckets:
+            if cap(key) is not None:
+                self.ceilings[sub(key)] = cap(key)
         picked = [r for key in sorted(buckets) for r in chosen[key]]
         if path:
             self.nodes[path] = {"candidates": len(rows), "target": target, "selected": len(picked)}
@@ -1358,8 +1378,9 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             for r in strat.top_up(rest, len(rest), chosen):
                 if len(extra) >= target - len(chosen):
                     break
-                if caps.blocking(r) is None:
+                if caps.blocking(r) is None and strat.room(r.get("_path")):
                     caps.take(r)
+                    strat.add(r.get("_path"))
                     extra.append(r)
             chosen += extra
         for r in chosen[target:]:
@@ -1471,6 +1492,22 @@ def run_sample(conn: Connection, s: Settings, run: dict) -> Sample:
     return build_sample(config, [{k: v for k, v in r.items() if k != "smpl_run_id"} for r in rules])
 
 
+def _within_caps(conn: Connection, s: Settings, sample: Sample, params: dict, run: dict, rows: list, old: dict,
+                 pool: list) -> list:
+    kept = [r for r in rows if int(r["selected_ind"] or 0) == 1 and r["case_key"] != old["case_key"]]
+    cases = {r["case_key"]: {"_key": r["case_key"], "_path": r["stratum_path_txt"]} for r in (*kept, *pool)}
+    key_queries = [(r, text) for r, text in build_queries(sample, s, params)["key_queries"]
+                   if r["rule_class_cd"] == "CAP"]
+    mark_query_rules(conn, s, sample, list(cases.values()), key_queries, params)
+    caps = Caps(sample, int(run.get("target_cnt") or len(kept) + 1), _up(run.get("rounding_cd"), "FLOOR"))
+    for r in kept:
+        caps.take(cases[r["case_key"]])
+    out = [r for r in pool if caps.blocking(cases[r["case_key"]]) is None]
+    if len(out) < len(pool):
+        log.info("REPLACE | %s | %d candidate(s) left out: over a CAP rule", sample.label, len(pool) - len(out))
+    return out
+
+
 def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text: str, reason: str, by: str,
                  any_bucket: bool = False) -> dict:
     if not str(reason or "").strip():
@@ -1499,15 +1536,20 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
         raise ConfigError(f"no candidate left to replace {case_key_text!r}"
                           + ("" if any_bucket else f" in bucket {old['stratum_path_txt']!r} (allow any bucket)"))
     pool.sort(key=lambda r: (r["priority_rank_nbr"] is None, r["priority_rank_nbr"] or 0, r["case_key"]))
+    sample = run_sample(conn, s, run)
+    params = json.loads(run.get("run_parm_txt") or "{}")
+    if sample.caps:
+        pool = _within_caps(conn, s, sample, params, run, rows, old, pool)
+        if not pool:
+            raise ConfigError(f"no candidate left to replace {case_key_text!r} within the CAP rules"
+                              + ("" if any_bucket else f" in bucket {old['stratum_path_txt']!r} (allow any bucket)"))
     if _up(run.get("smpl_method_cd")) == "RANDOM":
         new = random.Random(f"{run.get('random_seed_nbr')}|{run_id}|{case_key_text}").choice(pool)
     else:
         new = pool[0]
 
-    output = queries = sample = gone = None
+    output = queries = gone = None
     if _text(run, "tgt_table_nm"):
-        sample = run_sample(conn, s, run)
-        params = json.loads(run.get("run_parm_txt") or "{}")
         queries = build_queries(sample, s, params)
         queries["output_columns"] = target_table_columns(conn, queries, sample)
         row = {**parse_case_key(new["case_key"], sample.keys), "_key": new["case_key"]}

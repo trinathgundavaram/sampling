@@ -67,7 +67,11 @@ version).
    folder, side by side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK `airflow.sdk`,
    the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), validated on **3.3.0**. No croniter or
-   pendulum: the schedule check and dates use the standard library (`datetime`, `zoneinfo`). The email tasks
+   pendulum: the schedule check and dates use the standard library (`datetime`, `zoneinfo`). No tzdata either:
+   `zoneinfo` reads the server's own time zone database (`/usr/share/zoneinfo` on Linux). If a server has none,
+   the engine logs a warning and uses its built-in America/Chicago time (US daylight saving rules: CDT from the
+   second Sunday of March to the first Sunday of November).
+   The email tasks
    use the Airflow Connection `smtp_default`.
 3. Create the tables by hand (DBA), in the metadata database, from the DDL in `sql/schema.sql` (replace
    `{{META_DB}}`). A deployment is fresh: drop any existing `GOVT_RGLTRY_Sampl*` table first and create all five

@@ -353,3 +353,44 @@ def test_names_and_columns_in_any_case(raw, conn, settings):
                       "ORDER BY 5") == [("m0", "K", "Y", "R1", 1), ("m1", "K", "Y", "R1", 2)]
     run_sampling(conn, settings, ("Umcm", "t1", "Wkly"), run_key="R1", as_of=AS_OF)
     assert _rows(raw, "SELECT etl_is_curr_ind, COUNT(*) FROM smpl_mixed GROUP BY 1 ORDER BY 1") == [("N", 2), ("Y", 2)]
+
+
+def test_top_up_keeps_a_bucket_within_its_max(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 2, "D", area="A") + _cases("b", 20, "D", area="B") + _cases("c", 20, "D", area="C"))
+    _config(raw.db, 10)
+    insert_strata(raw.db, 1, 1, 0, "area", "area",
+                  {"A": 40, "B": {"quota_val": 30, "max_ty": "CNT", "max_val": 3}, "C": 30})
+    out = _run(conn, settings, run_key="K")
+    assert out["selected"] == 10 and _selected(out) == {"A": 2, "B": 3, "C": 5}
+    stored = dict(_rows(raw, "SELECT Stratum_Path_Txt, SUM(Selected_Ind) FROM GOVT_RGLTRY_SampleSelection "
+                             "GROUP BY 1"))
+    assert {k: int(v) for k, v in stored.items()} == {"A": 2, "B": 3, "C": 5}
+
+
+def test_a_count_0_bucket_is_never_picked(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 2, "D", area="A") + _cases("b", 20, "D", area="B"))
+    _config(raw.db, 10)
+    insert_strata(raw.db, 1, 1, 0, "area", "area", {"A": 100, "B": {"quota_cd": "CNT", "quota_val": 0}})
+    out = _run(conn, settings, run_key="K")
+    assert out["selected"] == 2 and out["shortfall"] == 8
+    assert _rows(raw, "SELECT DISTINCT Selected_Ind, Selection_Stat FROM GOVT_RGLTRY_SampleSelection "
+                      "WHERE Stratum_Path_Txt = 'B'") == [(0, "SKIPPED")]
+
+
+def test_rules_whose_sql_differs_only_inside_a_literal_both_run(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 5, "D", code="X  Y") + _cases("b", 5, "D", code="X Y"))
+    _config(raw.db, 10)
+    insert_rule(raw.db, "EXCLUSION", 1, "TWO", seq_nbr=1, raw_sql=True,
+                rule_sql_txt="SELECT case_id FROM main.u WHERE code = 'X  Y'")
+    insert_rule(raw.db, "EXCLUSION", 2, "ONE", seq_nbr=2, raw_sql=True,
+                rule_sql_txt="SELECT case_id FROM main.u WHERE code = 'X Y'")
+    out = _run(conn, settings, run_key="K")
+    assert out["exclusions"] == {"TWO": 5, "ONE": 5}
+
+
+def test_g_blank_param_without_a_param_rule_is_a_config_error(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 5, "D", batch="B1"))
+    _config(raw.db, 3)
+    set_config(raw.db, scope_sql_txt="SELECT * FROM main.u WHERE batch = '{batch_id}'")
+    out = _run(conn, settings, run_key="K", run_params={"batch_id": " "})
+    assert out["status"] == "ERROR" and out["error_type"] == "CONFIG_ERROR" and "batch_id" in out["error"]

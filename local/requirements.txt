@@ -1,5 +1,4 @@
 teradatasql>=17.20.0.0
-tzdata>=2023.3
 
 pytest>=7.4.0
 duckdb>=0.10.0

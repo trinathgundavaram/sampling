@@ -6,7 +6,6 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
@@ -22,7 +21,7 @@ from sampling import __version__
 from sampling.db import connect_teradata, error_text
 from sampling.admin import purge_selections
 from sampling.engine import run_scope
-from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag, cron_match
+from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag, cron_match, zone
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +113,7 @@ def chosen_runs(variable: dict, dag_run, tz: str = DEFAULT_TIMEZONE) -> list:
         return [by_name[n] for n in names]
     if str(getattr(dag_run.run_type, "value", dag_run.run_type)) != "scheduled":
         return [None]
-    when = (getattr(dag_run, "run_after", None) or dag_run.logical_date).astimezone(ZoneInfo(tz)).replace(tzinfo=None)
+    when = (getattr(dag_run, "run_after", None) or dag_run.logical_date).astimezone(zone(tz)).replace(tzinfo=None)
     picked = [i for i, r in enumerate(runs) if r.get("schedule_interval") and cron_match(r["schedule_interval"], when)]
     own = variable.get("schedule_interval")
     if own and cron_match(own, when):
@@ -217,8 +216,8 @@ def _as_of(config: dict, dag_run, tz: str) -> date:
         except ValueError as e:
             raise ConfigError(f"as_of must be YYYY-MM-DD, got {config['as_of']!r}") from e
     when = getattr(dag_run, "run_after", None) or getattr(dag_run, "logical_date", None)
-    when = when or datetime.now(ZoneInfo(tz))
-    return when.astimezone(ZoneInfo(tz)).date()
+    when = when or datetime.now(zone(tz))
+    return when.astimezone(zone(tz)).date()
 
 
 def _triggered_by(dag_run) -> str:
@@ -298,7 +297,7 @@ def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=
                    connection_id: Optional[str] = None) -> dict:
     try:
         variable = _load_variable(variable_key)
-        tz = variable.get("timezone") or DEFAULT_TIMEZONE
+        tz = variable.get("schedule_timezone") or variable.get("timezone") or DEFAULT_TIMEZONE
         chosen = chosen_runs(variable, dag_run, tz)
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
@@ -422,11 +421,11 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     dag_config = load_dag_config(variable_key)
     tz = dag_config.get("schedule_timezone") or dag_config.get("timezone") or DEFAULT_TIMEZONE
     try:
-        start_date = datetime(2026, 1, 1, tzinfo=ZoneInfo(tz))
+        start_date = datetime(2026, 1, 1, tzinfo=zone(tz))
     except Exception:
         logger.warning("timezone %r is not valid; %s is used", tz, DEFAULT_TIMEZONE)
         tz = DEFAULT_TIMEZONE
-        start_date = datetime(2026, 1, 1, tzinfo=ZoneInfo(tz))
+        start_date = datetime(2026, 1, 1, tzinfo=zone(tz))
     default_args = {
         "owner": dag_config.get("owner") or "oss",
         "depends_on_past": False,
