@@ -1,8 +1,11 @@
 import json
 from datetime import date, timedelta
 
+import pytest
+
 from conftest import insert_bucket, insert_config, insert_rule, insert_strata, key, set_config
 from sampling.engine import config_problems, load_config, replace_case, run_sampling, validate
+from sampling.settings import ConfigError
 
 AS_OF = date(2026, 8, 7)
 
@@ -226,6 +229,20 @@ def test_every_candidate_is_ranked_within_its_bucket(raw, conn, settings):
     swapped = _rows(raw, "SELECT Case_Key, Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr FROM "
                          "GOVT_RGLTRY_SampleSelection WHERE Case_Key IN ('case_id=a000', 'case_id=a002') ORDER BY 1")
     assert swapped == [("case_id=a000", 0, None, 3), ("case_id=a002", 1, 1, 1)]
+
+
+def test_skip_cases_are_never_topped_up_or_replaced_in(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 2, "D", area="A") + _cases("z", 5, "D", area="Z"))
+    _config(raw.db, 4)
+    insert_strata(raw.db, 1, 1, 0, "area", "area", {"A": 100}, unlisted_cd="SKIP")
+    out = _run(conn, settings, run_key="K1")
+    assert out["status"] == "COMPLETED" and out["selected"] == 2 and out["shortfall"] == 2
+    picked = _rows(raw, "SELECT Case_Key FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1 ORDER BY 1")
+    assert picked == [("case_id=a000",), ("case_id=a001",)]
+    assert _rows(raw, "SELECT DISTINCT Selection_Stat FROM GOVT_RGLTRY_SampleSelection WHERE Case_Key LIKE "
+                      "'case_id=z%'") == [("SKIPPED",)]
+    with pytest.raises(ConfigError, match="no candidate left"):
+        replace_case(conn, settings, key(1), "K1", "case_id=a000", "no record", "auditor", any_bucket=True)
 
 
 def test_g_param_lookup_scopes_the_run_and_names_it(raw, conn, settings):

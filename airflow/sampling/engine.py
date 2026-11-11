@@ -559,10 +559,18 @@ def query_rules(sample: Sample) -> list:
 def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, key_queries: list,
                      params: Optional[dict] = None) -> dict:
     keys_lower = [k.lower() for k in sample.keys]
-    counts = {}
+    counts, done = {}, {}
     for rule, text in key_queries:
         name, cls, value_rule = rule["rule_nm"], rule["rule_class_cd"], _is_value(rule)
         what = f"{cls} rule {name}"
+        same = done.get((" ".join(text.split()), value_rule))
+        if same:
+            found = same[1]
+            log.info("%s | %s | %s has the same SQL as %s: its %d case(s) are reused", STEP, sample.label, what,
+                     same[0], len(found))
+            _set_rule_column(rows, rule, found, value_rule)
+            counts[str(name)] = len(found)
+            continue
         configured = sample.config.get("diversity_sql_txt") if rule is DIVERSITY_RULE else rule.get("rule_sql_txt")
         log_sql(f"{STEP} | {sample.label} | {what}", configured, text, params)
         result = conn.stream(text, s.chunk_rows)
@@ -583,12 +591,17 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
         except ConfigError as e:
             need = " and one value column" if value_rule else ""
             raise ConfigError(f"{what} must return the key_columns {', '.join(sample.keys)}{need}: {e}") from None
-        col = _col(rule)
-        for row in rows:
-            row[col] = found.get(row["_key"]) if value_rule else (1 if row["_key"] in found else 0)
+        _set_rule_column(rows, rule, found, value_rule)
+        done[(" ".join(text.split()), value_rule)] = (what, found)
         counts[str(name)] = len(found)
         log.info("%s | %s | %s returned %d case(s)", STEP, sample.label, what, len(found))
     return counts
+
+
+def _set_rule_column(rows: list, rule: dict, found: dict, value_rule: bool) -> None:
+    col = _col(rule)
+    for row in rows:
+        row[col] = found.get(row["_key"]) if value_rule else (1 if row["_key"] in found else 0)
 
 
 def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
@@ -924,6 +937,8 @@ class Stratifier:
             if mode(key) == "SKIP":
                 targets[key] = 0
                 chosen[key] = self._allocate(buckets[key], 0, index + 1, sub(key))
+                for r in buckets[key]:
+                    r["_skip"] = True
 
         picked = [r for key in sorted(buckets) for r in chosen[key]]
         if path:
@@ -1147,7 +1162,8 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
         ranks[r["_key"]] = seen[r.get("_path")]
     rows = [[run_id, *key, run_key, as_of, r["_key"], r["_order"] + 1,
              1 if r["_key"] in order else 0, order.get(r["_key"]), ranks[r["_key"]], 0, None, r.get("_path"),
-             "SELECTED" if r["_key"] in order else None, now, now] for r in candidates]
+             "SELECTED" if r["_key"] in order else "SKIPPED" if r.get("_skip") else None, now, now]
+            for r in candidates]
     if _up(c.get("keep_excluded_ind"), "1") not in ("0", "N", "FALSE"):
         rows += [[run_id, *key, run_key, as_of, r["_key"], None, 0, None, None, 1, r["_reason"], None,
                   None, now, now] for r in excluded]
@@ -1338,7 +1354,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         extra = []
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
             taken = {r["_key"] for r in chosen}
-            rest = [r for r in candidates if r["_key"] not in taken]
+            rest = [r for r in candidates if r["_key"] not in taken and not r.get("_skip")]
             for r in strat.top_up(rest, len(rest), chosen):
                 if len(extra) >= target - len(chosen):
                     break
@@ -1386,9 +1402,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         return fail("technical", "PERSIST_FAILURE", e, exc_info=True)
 
     summary["status"] = "COMPLETED"
-    log.info("%s | %s | complete | run %s | in scope %s | excluded %s | candidates %d | selected %d of %d | "
-             "%d earlier run(s) retired", STEP, label, run_id, in_scope, summary["excluded"], len(candidates),
-             len(chosen), target, summary["retired_runs"])
+    log.info("%s | %s | complete | run %s | run_key %s | in scope %s | excluded %s | candidates %d | selected %d "
+             "of %d | shortfall %d | %d earlier run(s) retired | %.1fs", STEP, label, run_id, run_key, in_scope,
+             summary["excluded"], len(candidates), len(chosen), target, summary["shortfall"],
+             summary["retired_runs"], (s.now() - started).total_seconds())
     return summary
 
 
@@ -1560,12 +1577,14 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
         try:
             runs.append(run_sampling(conn, s, key, **kwargs))
         except ConfigError as e:
+            log.error("%s | %s | CONFIG_ERROR: %s", STEP, ".".join(key), e)
             runs.append({**failed, "error_kind": "config", "error_type": "CONFIG_ERROR", "error": str(e)})
         except Exception as e:
             log.error("%s | %s | START_FAILURE: %s", STEP, ".".join(key), error_text(e), exc_info=True)
             runs.append({**failed, "error_kind": "technical", "error_type": "START_FAILURE", "error": error_text(e)})
     failed = [r for r in runs if r.get("status") != "COMPLETED"]
     result = "ALL SAMPLES COMPLETED" if not failed else f"{len(failed)} OF {len(runs)} SAMPLE(S) FAILED"
+    (log.error if failed else log.info)("%s | %s | %s", STEP, scope or "all", result)
     return {"result": result, "scope": scope, "runs": runs, "failed": len(failed)}
 
 

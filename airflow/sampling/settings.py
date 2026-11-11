@@ -25,6 +25,56 @@ def _flag(value: Any, default: bool) -> bool:
     return True if text in ("true", "yes", "y", "1") else False if text in ("false", "no", "n", "0") else default
 
 
+_CRON_ALIASES = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *",
+                 "@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+_CRON_NAMES = {**{m: i + 1 for i, m in enumerate("JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split())},
+               **{d: i for i, d in enumerate("SUN MON TUE WED THU FRI SAT".split())}}
+_CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+
+def _cron_field(text: str, low: int, high: int) -> set:
+    def number(part: str) -> int:
+        value = _CRON_NAMES.get(part.upper())
+        value = int(part) if value is None else value
+        if not low <= value <= high:
+            raise ValueError(f"{part} is outside {low}-{high}")
+        return value
+
+    out = set()
+    for item in text.split(","):
+        span, _, step = item.partition("/")
+        step = int(step) if step else 1
+        if step < 1:
+            raise ValueError(f"step {step} must be 1 or more")
+        if span == "*":
+            start, end = low, high
+        elif "-" in span:
+            start, end = (number(p) for p in span.split("-", 1))
+        else:
+            start = number(span)
+            end = high if step > 1 else start
+        out.update(range(start, end + 1, step))
+    return out
+
+
+def cron_match(expression: str, when: datetime) -> bool:
+    text = _CRON_ALIASES.get(str(expression).strip().lower(), str(expression).strip())
+    fields = text.split()
+    if len(fields) != 5:
+        raise ConfigError(f"schedule {expression!r} must have 5 fields: minute hour day month weekday")
+    try:
+        minute, hour, day, month, weekday = (_cron_field(f, *r) for f, r in zip(fields, _CRON_RANGES))
+    except ValueError as e:
+        raise ConfigError(f"schedule {expression!r} is not a valid cron: {e}") from None
+    weekday = {0 if d == 7 else d for d in weekday}
+    if when.minute not in minute or when.hour not in hour or when.month not in month:
+        return False
+    day_ok, weekday_ok = when.day in day, (when.weekday() + 1) % 7 in weekday
+    if fields[2] != "*" and fields[4] != "*":
+        return day_ok or weekday_ok
+    return day_ok and weekday_ok
+
+
 @dataclass(frozen=True)
 class Settings:
     meta_db: str

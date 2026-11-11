@@ -8,13 +8,11 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import pendulum
 from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG, BaseHook, Param, Variable
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
-from croniter import croniter
 try:
     from airflow.sdk.exceptions import AirflowFailException
 except ImportError:
@@ -24,7 +22,7 @@ from sampling import __version__
 from sampling.db import connect_teradata, error_text
 from sampling.admin import purge_selections
 from sampling.engine import run_scope
-from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag
+from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag, cron_match
 
 
 logger = logging.getLogger(__name__)
@@ -117,9 +115,9 @@ def chosen_runs(variable: dict, dag_run, tz: str = DEFAULT_TIMEZONE) -> list:
     if str(getattr(dag_run.run_type, "value", dag_run.run_type)) != "scheduled":
         return [None]
     when = (getattr(dag_run, "run_after", None) or dag_run.logical_date).astimezone(ZoneInfo(tz)).replace(tzinfo=None)
-    picked = [i for i, r in enumerate(runs) if r.get("schedule_interval") and croniter.match(r["schedule_interval"], when)]
+    picked = [i for i, r in enumerate(runs) if r.get("schedule_interval") and cron_match(r["schedule_interval"], when)]
     own = variable.get("schedule_interval")
-    if own and croniter.match(own, when):
+    if own and cron_match(own, when):
         picked.append(None)
     if not picked:
         logger.warning("no runs entry is scheduled at %s; the Variable's own scope is used", when)
@@ -233,6 +231,16 @@ def _triggered_by(dag_run) -> str:
 
 def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope_index: Optional[int] = None,
                       dag_run=None, connection_id: Optional[str] = None) -> dict:
+    sampling_log = logging.getLogger("sampling")
+    previous = sampling_log.level
+    try:
+        return _run_sampling_task(variable_key, overrides, scope_index, dag_run, connection_id)
+    finally:
+        sampling_log.setLevel(previous)
+
+
+def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index: Optional[int], dag_run,
+                       connection_id: Optional[str]) -> dict:
     try:
         config = resolve_config(variable_key, overrides, scope_index)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
@@ -414,10 +422,11 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
     dag_config = load_dag_config(variable_key)
     tz = dag_config.get("schedule_timezone") or dag_config.get("timezone") or DEFAULT_TIMEZONE
     try:
-        start_date = pendulum.datetime(2026, 1, 1, tz=tz)
+        start_date = datetime(2026, 1, 1, tzinfo=ZoneInfo(tz))
     except Exception:
+        logger.warning("timezone %r is not valid; %s is used", tz, DEFAULT_TIMEZONE)
         tz = DEFAULT_TIMEZONE
-        start_date = pendulum.datetime(2026, 1, 1, tz=tz)
+        start_date = datetime(2026, 1, 1, tzinfo=ZoneInfo(tz))
     default_args = {
         "owner": dag_config.get("owner") or "oss",
         "depends_on_past": False,

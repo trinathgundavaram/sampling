@@ -66,7 +66,8 @@ version).
 1. Copy `govt_rgltry_umcm_sampling.py` and the `sampling/` folder (with its `.airflowignore`) into the DAGs
    folder, side by side.
 2. Install `airflow_resources/requirements.txt` in the workers' environment. **Airflow 3** (Task SDK `airflow.sdk`,
-   the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), validated on **3.3.0**. The email tasks
+   the `standard` and `smtp` providers; no Airflow 2 or deprecated imports), validated on **3.3.0**. No croniter or
+   pendulum: the schedule check and dates use the standard library (`datetime`, `zoneinfo`). The email tasks
    use the Airflow Connection `smtp_default`.
 3. Create the tables by hand (DBA), in the metadata database, from the DDL in `sql/schema.sql` (replace
    `{{META_DB}}`). A deployment is fresh: drop any existing `GOVT_RGLTRY_Sampl*` table first and create all five
@@ -268,6 +269,7 @@ python run_sampling.py mark-failed --run-id <run_id>
 | `load_env` / `env_value` | `SAMPLING_ENVIRONMENT` / `SAMPLING_ENV_VALUE` |
 | `timezone`, `chunk_rows`, `access_lock` | `SAMPLING_TIMEZONE`, `SAMPLING_CHUNK_ROWS`, `SAMPLING_ACCESS_LOCK` |
 | `log_level` | `SAMPLING_LOG_LEVEL` (console plus one file per run in `local/logs`, or `SAMPLING_LOG_DIR`) |
+| `run_key` | `--run-key`, else `SAMPLING_RUN_KEY` (set it to `{batch_id}` for ODAG1), else the as-of date |
 | scope (`--project`, `--table`, `--run-type`), `run_key`, `run_params`, `extra_filters`, `as_of`, `seed`, `dry_run` | command options (`--filter "SQL"`, repeat, for `extra_filters`) |
 
 Exit codes: 0 = done, 1 = done with problems (a sample failed or fell short, validation found problems),

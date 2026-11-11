@@ -261,7 +261,7 @@ BUCKET rows' `SELECT`s, tried in `Seq_Nbr` order, the first that returned the ca
 `Parent_Path_Txt`: the parents this level splits – `*` = all, `Denied` = only within Denied, `Denied/*` … (`*` and
 `?` wildcards, not case specific); under other parents the level is skipped. `Unlisted_Cd`: what happens to a value
 with no BUCKET row, or to `OTHER` – `SHARE` = share what the PCT and CNT buckets leave equally, `REMAINDER` = as `Quota_Cd`
-REMAINDER, `SKIP` = never selected. No LEVEL rules = no stratification: the whole pool is one bucket (`ALL`).
+REMAINDER, `SKIP` = never selected, even when the sample is short (top-up) or a case is replaced. No LEVEL rules = no stratification: the whole pool is one bucket (`ALL`).
 
 **BUCKET** – a bucket of the LEVEL with the same `Level_Nbr`. `Parent_Path_Txt`: when several patterns match a
 parent, the most specific wins (fewest wildcards, then longest), so one level can have a different mix per parent.
@@ -351,7 +351,8 @@ leaves (`Denied` and `Denied/Part B`), `caps` {Rule_Nm: limit, over, replaced}, 
 fit its parent's target. The selected cases per bucket can always be counted from the selections'
 `Stratum_Path_Txt`.
 
-**`Selection_Stat`**: `SELECTED` for the cases the run picked; `REPLACED` for a case taken out later
+**`Selection_Stat`**: `SELECTED` for the cases the run picked; `SKIPPED` for a case in a `SKIP` bucket (never
+selected, not by the top-up and not as a replacement); `REPLACED` for a case taken out later
 (`Selected_Ind` back to 0) and `REPLACEMENT` for the case put in for it (`Selected_Ind` 1, the same
 `Selection_Order_Nbr`); `Linked_Case_Key` points from each to the other. The current sample is always
 `Selected_Ind = 1`.
@@ -398,7 +399,7 @@ and counts per bucket, are a `GROUP BY` on it.
 |---|---|
 | `GOVT_RGLTRY_SamplingRun.Run_Stat` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
 | `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
-| `GOVT_RGLTRY_SampleSelection.Selection_Stat` | `SELECTED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
+| `GOVT_RGLTRY_SampleSelection.Selection_Stat` | `SELECTED`, `SKIPPED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
 | Token | Value |
@@ -496,7 +497,7 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | `test-connection` | Logs in, shows the session and which sampling tables exist | – |
 | `validate <scope> [--check-sql] [--run-param k=v]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
 | `show-config <sample>` | The config and the rules it uses, by class, and its problems (JSON) | – |
-| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
+| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--run-key` defaults to `SAMPLING_RUN_KEY`, then the as-of date; `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
 | `finalize <sample> --run-key K [--by U]` | Makes the current sample of the cycle `FINAL` | run row |
 | `replace <sample> --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, target table |
 | `runs [<scope>] [--run-key K] [--status S]` | Recent run rows (with `Config_Hash`, `Finalized_By`, `Override_Rsn_Txt`) | – |
@@ -629,8 +630,8 @@ retention decision (OPEN_ITEMS.md Q14): until it is made, leave `retention_days`
 
 ## 13. Diagrams
 
-The draw.io source is [diagrams/sampling.drawio](diagrams/sampling.drawio) (every page); each page is also in
-`diagrams/pages/` and exported as a PNG in `diagrams/png/`. Open them in draw.io (desktop or app.diagrams.net).
+Each page is a draw.io file in `diagrams/pages/` and exported as a PNG in `diagrams/png/`. Open them in draw.io
+(desktop or app.diagrams.net).
 
 | Page | What it shows | Runbook sections | Files |
 |---|---|---|---|

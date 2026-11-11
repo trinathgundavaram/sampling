@@ -117,7 +117,8 @@ def _filter_sample(args, where: list, params: list) -> None:
 
 def cmd_run(conn, s, args) -> tuple:
     as_of = date.fromisoformat(args.as_of) if args.as_of else None
-    out = run_scope(conn, s, **_scope(args), run_key=args.run_key, run_params=_run_params(args),
+    run_key = args.run_key or os.environ.get(PREFIX + "RUN_KEY") or None
+    out = run_scope(conn, s, **_scope(args), run_key=run_key, run_params=_run_params(args),
                     extra_filters=_filters(args), seed=args.seed,
                     as_of=as_of, triggered_by=args.triggered_by or f"local-{getpass.getuser()}",
                     dry_run=args.dry_run, force_reason=args.force_reason)
@@ -229,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run the samples of a scope (a project, a table, a run type)")
     scope(r)
     params(r)
-    r.add_argument("--run-key", help="which logical run (default: the as-of date)")
+    r.add_argument("--run-key", help="which logical run (default: SAMPLING_RUN_KEY, else the as-of date)")
     r.add_argument("--as-of", help="business date YYYY-MM-DD (default: today in SAMPLING_TIMEZONE)")
     r.add_argument("--seed", type=int, help="RANDOM / SYSTEMATIC seed (default: a new one)")
     r.add_argument("--triggered-by", help="recorded on the run row (default local-<user>)")

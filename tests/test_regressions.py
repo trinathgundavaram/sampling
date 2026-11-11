@@ -2,11 +2,12 @@ from datetime import date, datetime
 
 import pytest
 
-from conftest import insert_config, insert_rule, key, set_config
+from conftest import insert_bucket, insert_config, insert_rule, key, set_config
 from sampling import engine
 from sampling.db import generate_run_id, substitute_params
 from sampling.admin import purge_selections
-from sampling.engine import (DIVERSITY, Caps, Sample, Stratifier, _typed_keys, apply_caps, config_problems,
+from sampling.engine import (DIVERSITY, Caps, Sample, Stratifier, _param_text, _typed_keys, apply_caps,
+                             config_problems,
                              finalize_run, load_config, order_candidates, replace_case, run_sampling, run_scope,
                              sql_problems)
 from sampling.settings import ConfigError
@@ -14,8 +15,15 @@ from sampling.settings import ConfigError
 AS_OF = date(2026, 8, 7)
 
 
+@pytest.fixture
+def own_table():
+    pass
+
+
 @pytest.fixture(autouse=True)
-def _data(raw):
+def _data(raw, request):
+    if "own_table" in request.fixturenames:
+        return
     db = raw.db
     db.execute("CREATE TABLE u (case_id VARCHAR, n INTEGER, d DATE)")
     db.executemany("INSERT INTO u VALUES (?, ?, ?)", [(f"c{i:02d}", i, date(2026, 8, 1 + i % 5)) for i in range(30)])
@@ -219,3 +227,67 @@ def test_water_filling_reallocates_only_buckets_whose_share_changed(raw, conn, s
     out = run_sampling(conn, settings, key(2), run_key="K", as_of=AS_OF)
     assert out["selected"] == 30 and out["by_stratum"]["A"]["selected"] == 2
     assert calls.count("A") == 1 and calls.count("B") == 2
+
+
+def _ab_table(db, rows):
+    db.execute("CREATE TABLE u (case_id VARCHAR, a VARCHAR, b VARCHAR)")
+    db.executemany("INSERT INTO u VALUES (?, ?, ?)", rows)
+
+
+def _ab_config(db, target, **kw):
+    insert_config(db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=target,
+                  order_by="case_id", **kw)
+
+
+def _ab_run(conn, settings):
+    out = run_sampling(conn, settings, key(1), run_key="K", as_of=AS_OF)
+    assert out["status"] == "COMPLETED", out.get("error")
+    return out
+
+
+def test_a_bucket_shared_again_keeps_only_its_last_notes(raw, conn, settings, own_table):
+    _ab_table(raw.db, [(f"x{i:03d}", "A1", "B") for i in range(2)] + [(f"y{i:03d}", "A2", "B") for i in range(20)])
+    _ab_config(raw.db, 10)
+    insert_rule(raw.db, "LEVEL", 1000, "a", seq_nbr=1, level_nbr=0, rule_sql_txt="a")
+    insert_bucket(raw.db, 1001, 0, "A1", seq_nbr=1, quota_cd="ALL")
+    insert_bucket(raw.db, 1002, 0, "A2", seq_nbr=2, quota_cd="ALL")
+    insert_rule(raw.db, "LEVEL", 2000, "b", seq_nbr=2, level_nbr=1, rule_sql_txt="b")
+    insert_bucket(raw.db, 2001, 1, "B", seq_nbr=1, quota_cd="CNT", quota_val=50)
+    notes = _ab_run(conn, settings)["notes"]
+    assert [n.split(":")[0] for n in notes] == ["A1/B", "A2/B"] and "cut to 8" in notes[1]
+
+
+def test_bucket_counts_follow_the_cut_to_the_target(raw, conn, settings, own_table):
+    _ab_table(raw.db, [(f"{v}{i:03d}", v, "B") for v in "PQR" for i in range(10)])
+    _ab_config(raw.db, 10)
+    set_config(raw.db, rounding_cd="CEIL")
+    insert_rule(raw.db, "LEVEL", 1000, "a", seq_nbr=1, level_nbr=0, rule_sql_txt="a")
+    out = _ab_run(conn, settings)
+    by = {k: v["selected"] for k, v in out["by_stratum"].items()}
+    assert out["selected"] == 10 and sum(by.values()) == 10
+    picked = raw.db.execute("SELECT Stratum_Path_Txt, COUNT(*) FROM GOVT_RGLTRY_SampleSelection "
+                            "WHERE Selected_Ind = 1 GROUP BY 1").fetchall()
+    assert dict(picked) == by
+
+
+def test_a_timestamp_parameter_reads_as_teradata_does(raw, conn, settings, own_table):
+    assert _param_text(datetime(2026, 1, 1, 10, 0, 0)) == "2026-01-01 10:00:00"
+    assert _param_text(date(2026, 1, 1)) == "2026-01-01" and _param_text(7) == 7
+    _ab_table(raw.db, [("x", "A", "B")])
+    _ab_config(raw.db, 1)
+    insert_rule(raw.db, "PARAM", 201, "ts", seq_nbr=1, rule_sql_txt="SELECT TIMESTAMP '2026-01-01 10:00:00' AS v")
+    assert _ab_run(conn, settings)["params"]["ts"] == "2026-01-01 10:00:00"
+
+
+def test_cap_groups_are_worked_out_once_per_case(monkeypatch):
+    from sampling.engine import Sample
+    cap = {"rule_id": 50, "rule_nm": "OON", "rule_class_cd": "CAP", "max_ty": "CNT", "max_val": 1,
+           "parent_path_txt": "*"}
+    caps = Caps(Sample(config={}, caps=[cap]), 10, "FLOOR")
+    calls = []
+    real = caps._find_groups
+    monkeypatch.setattr(caps, "_find_groups", lambda row: calls.append(row["_key"]) or real(row))
+    row = {"_key": "k=1", "_path": "Denied", "smp_r_50": 1}
+    assert caps.blocking(row) is None
+    caps.take(row)
+    assert caps.blocking(row) == "OON" and calls == ["k=1"]

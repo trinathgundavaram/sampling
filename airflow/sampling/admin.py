@@ -45,7 +45,7 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
                f"AND Run_Stat <> 'FINAL' AND As_Of_Dt_Key < ?")
     current = (f"SELECT Smpl_Run_ID FROM {db}.GOVT_RGLTRY_SamplingRun WHERE {same} AND Curr_Ind = 1 "
                f"AND Run_Stat = 'COMPLETED' AND As_Of_Dt_Key < ?")
-    unused = "(Excluded_Ind = 1 OR (Selected_Ind = 0 AND Selection_Stat IS NULL))"
+    unused = "(Excluded_Ind = 1 OR (Selected_Ind = 0 AND (Selection_Stat IS NULL OR Selection_Stat = 'SKIPPED')))"
     out = []
     for key in discover_configs(conn, s, project, table, run_type):
         entry = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "cutoff": cutoff.isoformat()}

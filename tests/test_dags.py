@@ -1,6 +1,7 @@
 import importlib.util
 import json
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -61,9 +62,8 @@ TIMED = {**BASE, "runs": [{"name": "daily", "run_type": "DLY", "schedule_interva
 
 class _DagRun:
     def __init__(self, run_type="scheduled", when=None, conf=None):
-        import pendulum
         self.run_type, self.conf = run_type, conf or {}
-        self.run_after = self.logical_date = when or pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")
+        self.run_after = self.logical_date = when or datetime(2026, 8, 7, 8, tzinfo=ZoneInfo("America/Chicago"))
 
 
 def test_timed_runs_one_task_scheduled_at_every_time(variable):
@@ -71,10 +71,9 @@ def test_timed_runs_one_task_scheduled_at_every_time(variable):
     dag = _load_dag_file()
     assert list(dag.task_dict) == ["run_sampling"] and "run" in dag.params
     assert type(dag.timetable).__name__ == "MultipleCronTriggerTimetable"
-    import pendulum
-    friday_8 = pendulum.datetime(2026, 8, 7, 8, tz="America/Chicago")
+    friday_8 = datetime(2026, 8, 7, 8, tzinfo=ZoneInfo("America/Chicago"))
     assert dags.chosen_runs(TIMED, _DagRun(when=friday_8)) == [1]
-    first_6 = pendulum.datetime(2026, 9, 1, 6, tz="America/Chicago")
+    first_6 = datetime(2026, 9, 1, 6, tzinfo=ZoneInfo("America/Chicago"))
     assert dags.chosen_runs(TIMED, _DagRun(when=first_6)) == [0]
     assert dags.chosen_runs(TIMED, _DagRun("manual", conf={"run": "Monthly, daily"})) == [2, 0]
     assert dags.chosen_runs(TIMED, _DagRun("manual")) == [None]

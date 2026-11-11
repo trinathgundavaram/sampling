@@ -116,3 +116,22 @@ def test_cap_rules_are_checked(raw, conn, settings):
     for text in ("CAP rule no_limit: max_val is empty", "CAP rule bad_type: rule_ty must be one of QUERY, PER_VALUE",
                  "CAP rule no_sql: rule_sql_txt is empty"):
         assert text in problems, (text, problems)
+
+
+def test_caps_with_the_same_sql_run_it_once(raw, conn, settings, monkeypatch, caplog):
+    rows = [(f"d{i:03d}", "Denied", f"D{i}", "Y" if i < 10 else "N") for i in range(20)]
+    rows += [(f"p{i:03d}", "Approved", f"P{i}", "Y" if i < 5 else "N") for i in range(10)]
+    _table(raw.db, rows)
+    _config(raw.db, 10, {"Denied": 80, "Approved": 20})
+    _cap(raw.db, 51, "OON_DENIALS", OON_CAP, 2, parent="Denied")
+    _cap(raw.db, 52, "OON_APPROVED", "  " + OON_CAP.replace(" FROM", "\n FROM"), 1, parent="Approved")
+    caplog.set_level("INFO", "sampling")
+    calls = []
+    stream = type(conn).stream
+    monkeypatch.setattr(type(conn), "stream", lambda self, sql, n: calls.append(sql) or stream(self, sql, n))
+    out = _run(conn, settings)
+    assert out["status"] == "COMPLETED", out.get("error")
+    assert sum("oon = 'Y'" in sql for sql in calls) == 1
+    assert "has the same SQL as CAP rule OON_DENIALS" in caplog.text
+    assert _count(raw, SELECTED_U + "u.oon = 'Y' AND u.disp = 'Denied'") == 2
+    assert _count(raw, SELECTED_U + "u.oon = 'Y' AND u.disp = 'Approved'") == 1

@@ -264,3 +264,19 @@ def test_settings_validation():
     assert (s.environment, s.access_lock) == ("QA", False)
     assert [Settings.from_mapping({"meta_db": "HSABC_$ENV", "environment": e}).meta_db
             for e in ("DEV", "QA", "UAT", "PROD")] == ["HSABC_DEV", "HSABC_QA", "HSABC", "HSABC"]
+
+
+def test_cron_match_without_croniter():
+    from datetime import datetime
+    from sampling.settings import cron_match
+    friday_8 = datetime(2026, 8, 7, 8, 0)
+    assert cron_match("0 8 * * 5", friday_8) and cron_match("0 8 * * FRI", friday_8)
+    assert not cron_match("0 8 * * 1-4", friday_8)
+    assert cron_match("*/15 6-9 * * *", datetime(2026, 8, 7, 9, 45))
+    assert cron_match("0 9 1 * *", datetime(2026, 9, 1, 9)) and not cron_match("0 9 1 * *", datetime(2026, 9, 2, 9))
+    assert cron_match("0 0 * * 7", datetime(2026, 8, 9)) and cron_match("@weekly", datetime(2026, 8, 9))
+    assert cron_match("0 6 1 * 1", datetime(2026, 8, 3, 6))
+    with pytest.raises(ConfigError, match="5 fields"):
+        cron_match("0 8 * *", friday_8)
+    with pytest.raises(ConfigError, match="outside"):
+        cron_match("0 25 * * *", friday_8)

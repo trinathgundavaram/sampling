@@ -82,6 +82,14 @@ def test_runs_and_errors_commands(local_db, capsys):
     assert json.loads(capsys.readouterr().out)["errors"] == []
 
 
+def test_run_key_from_the_environment(local_db, capsys, monkeypatch):
+    monkeypatch.setenv("SAMPLING_RUN_KEY", "ENV_{batch_id}")
+    cli.main(["run", "--project", "UMCM", "--run-param", "batch_id=2026-08-01"])
+    cli.main(["run", "--project", "UMCM", "--run-key", "K9", "--run-param", "batch_id=2026-08-01"])
+    capsys.readouterr()
+    cli.main(["runs", "--project", "UMCM", "--table", "T1", "--run-type", "WKLY"])
+    assert {r["run_key"] for r in json.loads(capsys.readouterr().out)["runs"]} == {"ENV_2026-08-01", "K9"}
+
 def test_mark_failed(local_db, capsys):
     local_db.db.execute("INSERT INTO GOVT_RGLTRY_SamplingRun (Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, "
                         "As_Of_Dt_Key, Run_Stat) VALUES ('stuck', 'UMCM', 'T1', 'WKLY', 'K', DATE '2026-08-01', 'RUNNING')")
