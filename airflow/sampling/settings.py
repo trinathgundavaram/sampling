@@ -109,9 +109,11 @@ def _cron_field(text: str, low: int, high: int) -> set:
             start, end = low, high
         elif "-" in span:
             start, end = (number(p) for p in span.split("-", 1))
+            if start > end:
+                raise ValueError(f"range {span} runs backwards")
         else:
             start = number(span)
-            end = high if step > 1 else start
+            end = high if "/" in item else start
         out.update(range(start, end + 1, step))
     return out
 

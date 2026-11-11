@@ -19,6 +19,11 @@ def test_env_file_fills_but_never_overrides_the_shell(tmp_path, monkeypatch):
     assert "EMPTY" not in os.environ
 
 
+def test_env_file_values(tmp_path):
+    f = tmp_path / "e.env"
+    f.write_text('A=1\nexport B="two # words"\nC=x  # note\nD=\'q\'\n#E=5\nF=p#ss\n')
+    assert cli.read_env_file(f) == {"A": "1", "B": "two # words", "C": "x", "D": "q", "F": "p#ss"}
+
 def test_the_schema_has_the_five_tables():
     schema = (ROOT / "sql" / "schema.sql").read_text()
     tables = [s.split()[3] for s in schema.split(";") if s.strip().startswith("CREATE MULTISET TABLE")]

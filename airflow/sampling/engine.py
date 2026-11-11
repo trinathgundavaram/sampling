@@ -645,15 +645,16 @@ def case_key(row: dict, keys: list) -> str:
 
 
 def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key: str, as_of: date,
-             cache: dict) -> dict:
+             cache: dict, ahead: bool = False) -> dict:
     scope = _up(rule.get("history_scope_cd"), "SAMPLE")
     days = int(rule.get("lookback_days") or 0)
-    if (scope, days) in cache:
-        return cache[(scope, days)]
+    if (scope, days, ahead) in cache:
+        return cache[(scope, days, ahead)]
     project, table, run_type = sample.key
     where = ["Curr_Ind = 1", "Excluded_Ind = 0", "Smpl_Cycle_Dt_Key >= ?", "Smpl_Cycle_Dt_Key <= ?",
              f"NOT ({_same_sample()} AND Run_Key = ?)", "UPPER(Project_Cd) = ?"]
-    params = [as_of - timedelta(days=days), as_of, project, table, run_type, run_key, project]
+    params = [as_of - timedelta(days=days), as_of + timedelta(days=days if ahead else 0), project, table, run_type,
+              run_key, project]
     if scope in ("SAMPLE", "TABLE"):
         where.append("UPPER(Table_Nm) = ?")
         params.append(table)
@@ -661,12 +662,12 @@ def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key:
         where.append("UPPER(Run_Ty) = ?")
         params.append(run_type)
     rows = conn.query(f"SELECT Case_Key, MAX(Selected_Ind) AS sel, "
-                      f"MAX(CASE WHEN Selection_Stat = 'REPLACED' THEN 1 ELSE 0 END) AS replaced "
+                      f"MAX(CASE WHEN Selection_Stat IN ('REPLACED', 'SKIPPED') THEN 1 ELSE 0 END) AS left_out "
                       f"FROM {s.meta_db}.GOVT_RGLTRY_SampleSelection WHERE {' AND '.join(where)} GROUP BY Case_Key",
                       params)
     out = {"selected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 1},
-           "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["replaced"] or 0) == 0}}
-    cache[(scope, days)] = out
+           "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["left_out"] or 0) == 0}}
+    cache[(scope, days, ahead)] = out
     return out
 
 
@@ -976,6 +977,8 @@ class Caps:
         self.rules = []
         for c in sample.caps:
             limit = amount(c, "max_ty", "max_val", target, rounding_cd)
+            if limit == 0 and _up(c.get("max_ty"), "CNT") == "PCT" and (_number(c.get("max_val")) or 0) > 0:
+                limit = 1
             self.rules.append((c, limit, _col(c), _up(c.get("rule_ty"), QUERY) == PER_VALUE))
         self.counts = [{} for _ in self.rules]
         self.report = {str(c["rule_nm"]): {"limit": limit, "over": 0, "replaced": 0} for c, limit, _, _ in self.rules}
@@ -1538,6 +1541,19 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
     pool.sort(key=lambda r: (r["priority_rank_nbr"] is None, r["priority_rank_nbr"] or 0, r["case_key"]))
     sample = run_sample(conn, s, run)
     params = json.loads(run.get("run_parm_txt") or "{}")
+    seen, cache = set(), {}
+    for x in sample.exclusions:
+        if _up(x.get("rule_ty")) == "PRIOR_SELECTION":
+            seen |= _history(conn, s, sample, x, run_key, run["as_of_dt_key"], cache, ahead=True)["selected"]
+    if seen:
+        kept = [r for r in pool if r["case_key"] not in seen]
+        if len(kept) < len(pool):
+            log.info("REPLACE | %s | %d candidate(s) left out: selected by another cycle", sample.label,
+                     len(pool) - len(kept))
+        pool = kept
+        if not pool:
+            raise ConfigError(f"no candidate left to replace {case_key_text!r}: the rest were selected by another "
+                              f"cycle (PRIOR_SELECTION)")
     if sample.caps:
         pool = _within_caps(conn, s, sample, params, run, rows, old, pool)
         if not pool:

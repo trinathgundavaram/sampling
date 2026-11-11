@@ -291,3 +291,37 @@ def test_cap_groups_are_worked_out_once_per_case(monkeypatch):
     assert caps.blocking(row) is None
     caps.take(row)
     assert caps.blocking(row) == "OON" and calls == ["k=1"]
+
+
+def test_a_small_pct_cap_still_allows_one_case(raw, conn, settings, own_table):
+    raw.db.execute("CREATE TABLE u (case_id VARCHAR, code VARCHAR)")
+    raw.db.executemany("INSERT INTO u VALUES (?, ?)", [(f"a{i:02d}", "C1" if i < 5 else f"X{i}") for i in range(10)])
+    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=3, order_by="case_id")
+    insert_rule(raw.db, "CAP", 50, "CPT", seq_nbr=50, rule_ty="PER_VALUE", raw_sql=True,
+                rule_sql_txt="SELECT case_id, code FROM main.u", max_ty="PCT", max_val=10)
+    out = _run(conn, settings)
+    assert out["caps"]["CPT"]["limit"] == 1 and out["selected"] == 3
+    assert [k for (k,) in raw.db.execute("SELECT Case_Key FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1 "
+                                         "ORDER BY 1").fetchall()] == ["case_id=a00", "case_id=a05", "case_id=a06"]
+
+
+def test_a_replacement_is_never_a_case_another_cycle_selected(raw, conn, settings):
+    insert_rule(raw.db, "EXCLUSION", 1, "SEEN", seq_nbr=1, rule_ty="PRIOR_SELECTION", lookback_days=30)
+    set_config(raw.db, target_cnt=2)
+    run_sampling(conn, settings, key(1), run_key="W1", as_of=date(2026, 8, 1))
+    run_sampling(conn, settings, key(1), run_key="W2", as_of=date(2026, 8, 8))
+    out = replace_case(conn, settings, key(1), "W1", "case_id=c00", "no record", "auditor")
+    assert out["replacement"] == "case_id=c04"
+
+
+def test_skipped_cases_get_no_carry_over_priority(raw, conn, settings, own_table):
+    raw.db.execute("CREATE TABLE u (case_id VARCHAR, area VARCHAR)")
+    raw.db.executemany("INSERT INTO u VALUES (?, ?)", [("a1", "A"), ("a2", "A"), ("z1", "Z")])
+    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=1, order_by="case_id")
+    insert_rule(raw.db, "PRIORITY", 1, "CARRY", seq_nbr=1, rule_ty="PRIOR_CANDIDATE", lookback_days=14)
+    insert_rule(raw.db, "LEVEL", 1000, "area", seq_nbr=1, level_nbr=0, rule_sql_txt="area", unlisted_cd="SKIP")
+    insert_bucket(raw.db, 1001, 0, "A", seq_nbr=1, quota_val=100)
+    run_sampling(conn, settings, key(1), run_key="W1", as_of=date(2026, 8, 1))
+    history = engine._history(conn, settings, load_config(conn, settings, key(1)), {"history_scope_cd": "SAMPLE",
+                              "lookback_days": 14}, "W2", date(2026, 8, 8), {})
+    assert history["unselected"] == {"case_id=a2"}

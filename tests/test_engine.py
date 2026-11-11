@@ -280,6 +280,10 @@ def test_cron_match_without_croniter():
         cron_match("0 8 * *", friday_8)
     with pytest.raises(ConfigError, match="outside"):
         cron_match("0 25 * * *", friday_8)
+    assert cron_match("5/1 * * * *", datetime(2026, 8, 7, 8, 30)) and not cron_match("5/1 * * * *", datetime(2026, 8, 7, 8, 4))
+    assert cron_match("5/20 * * * *", datetime(2026, 8, 7, 8, 45))
+    with pytest.raises(ConfigError, match="runs backwards"):
+        cron_match("0 8 * * 5-1", friday_8)
 
 
 def test_central_time_matches_the_time_zone_database():
