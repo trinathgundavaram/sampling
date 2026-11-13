@@ -10,6 +10,7 @@ from sampling.settings import ConfigError, Settings
 
 
 log = logging.getLogger(__name__)
+REPLAY_MONTHS = 6
 
 
 def history_days(conn: Connection, s: Settings, key, as_of: Optional[date] = None) -> int:
@@ -32,13 +33,15 @@ def history_days(conn: Connection, s: Settings, key, as_of: Optional[date] = Non
 
 def purge_selections(conn: Connection, s: Settings, older_than_days: int, project: Optional[str] = None,
                      table: Optional[str] = None, run_type: Optional[str] = None, apply: bool = False,
-                     as_of: Optional[date] = None) -> dict:
+                     as_of: Optional[date] = None, replay_months: int = REPLAY_MONTHS) -> dict:
     try:
         days = int(older_than_days)
     except (TypeError, ValueError):
         raise ConfigError(f"older_than_days must be a whole number, got {older_than_days!r}") from None
     if days < 1:
         raise ConfigError("older_than_days must be >= 1")
+    if not isinstance(replay_months, int) or replay_months < 0:
+        raise ConfigError(f"replay_months must be a whole number >= 0, got {replay_months!r}")
     day = as_of or s.today()
     cutoff = day - timedelta(days=days)
     db = s.meta_db
@@ -51,9 +54,11 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
     out = []
     for key in discover_configs(conn, s, project, table, run_type):
         entry = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "cutoff": cutoff.isoformat()}
-        needed = history_days(conn, s, key, day)
+        lookback = history_days(conn, s, key, day)
+        needed = lookback + 31 * replay_months if lookback else 0
         if days < needed:
-            out.append({**entry, "skipped": f"history rules look back {needed} days: keep at least that many"})
+            out.append({**entry, "skipped": f"history rules look back {lookback} days and a replay can go back "
+                                            f"{replay_months} months: keep at least {needed} days"})
             continue
         parts = ((f"Smpl_Run_ID IN ({retired})", "retired_runs"),
                  (f"Smpl_Run_ID IN ({current}) AND {unused}", "unselected_of_current_runs"))

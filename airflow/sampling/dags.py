@@ -20,7 +20,8 @@ except ImportError:
 from sampling import __version__
 from sampling.db import connect_teradata, error_text
 from sampling.admin import purge_selections
-from sampling.engine import (REFINE_KINDS, REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_RUNS, REVAL_STATUSES,
+from sampling.engine import (REFINE_KINDS, REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_MIN, REFINE_SWING_RUNS,
+                             REVAL_STATUSES,
                              refinement_report, revalidate_since, run_scope)
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag, cron_match, zone
 
@@ -381,6 +382,7 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
     try:
         for scope in scopes:
             out.append(purge_selections(conn, settings, config.get("retention_days"), apply=True,
+                                        replay_months=_revalidate_months(config),
                                         **{k: scope.get(k) for k in SCOPE_KEYS if scope.get(k) not in (None, "")}))
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
@@ -415,7 +417,8 @@ def _refine_thresholds(config: dict) -> dict:
     out = {}
     for key, name, kind, default in (("refine_short_runs", "short_runs", int, REFINE_SHORT_RUNS),
                                      ("refine_swing", "swing", float, REFINE_SWING),
-                                     ("refine_swing_runs", "swing_runs", int, REFINE_SWING_RUNS)):
+                                     ("refine_swing_runs", "swing_runs", int, REFINE_SWING_RUNS),
+                                     ("refine_swing_min", "swing_min", int, REFINE_SWING_MIN)):
         value = config.get(key)
         try:
             out[name] = kind(value) if value not in (None, "") else default
@@ -434,7 +437,6 @@ def _each_scope(variable_key: str, connection_id: Optional[str], months, work) -
         runs = _load_variable(variable_key).get("runs")
         scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
         since = months_back(settings.today(), months(config))
-        thresholds = _refine_thresholds(config) if months is _refine_months else {}
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
     try:
@@ -448,7 +450,7 @@ def _each_scope(variable_key: str, connection_id: Optional[str], months, work) -
             if where in seen:
                 continue
             seen.add(where)
-            out.append(work(conn, settings, since, thresholds,
+            out.append(work(conn, settings, since, config,
                             {k: scope.get(k) for k in SCOPE_KEYS if scope.get(k) not in (None, "")}))
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
@@ -473,8 +475,9 @@ def revalidate_task(variable_key: str, dag_run=None, connection_id: Optional[str
 
 def refine_task(variable_key: str, dag_run=None, connection_id: Optional[str] = None) -> dict:
     since, out = _each_scope(variable_key, connection_id, _refine_months,
-                             lambda conn, settings, since, thresholds, scope: refinement_report(
-                                 conn, settings, since, triggered_by=_triggered_by(dag_run), **scope, **thresholds))
+                             lambda conn, settings, since, config, scope: refinement_report(
+                                 conn, settings, since, triggered_by=_triggered_by(dag_run), **scope,
+                                 **_refine_thresholds(config)))
     logger.info("REFINE report:\n%s", json.dumps(out, indent=2, default=str))
     counts = {k: sum(o["counts"][k] for o in out) for k in REFINE_KINDS}
     ids = [smp["refine_id"] for o in out for smp in o["samples"]]

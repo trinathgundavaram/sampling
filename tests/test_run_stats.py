@@ -94,7 +94,8 @@ def _three_weeks(raw, conn, settings):
 
 def test_the_refinement_report_lists_what_to_look_at(raw, conn, settings):
     days = _three_weeks(raw, conn, settings)
-    report = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), project="umcm", record=False)
+    report = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), project="umcm", record=False,
+                               swing_runs=2, swing_min=1)
     sample = report["samples"][0]
     found = {(f["kind"], f["name"]): f for f in sample["findings"]}
     assert set(found) == {("SHORT_BUCKET", "B"), ("CAP_BLOCKS", "CPT_VARIETY"), ("DEAD_RULE", "EXCLUSION NEVER"),
@@ -110,7 +111,12 @@ def test_the_refinement_report_lists_what_to_look_at(raw, conn, settings):
     assert {k for k, _ in totals} == {"NOT_PICKED", "TOPUP", "REPLACED"}
     assert _refinement_rows(raw) == []
     assert refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), short_runs=4,
-                             record=False)["counts"]["SHORT_BUCKET"] == 0
+                             record=False)["counts"] == {"SHORT_BUCKET": 0, "CAP_BLOCKS": 1, "DEAD_RULE": 0,
+                                                         "EXCLUSION_SWING": 0}
+    defaults = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), record=False)
+    assert defaults["counts"]["EXCLUSION_SWING"] == 0
+    assert refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), record=False, swing_runs=2,
+                             swing_min=5)["counts"]["EXCLUSION_SWING"] == 0
     assert refinement_report(conn, settings, date(2026, 6, 1), table="T9")["samples"] == []
     with pytest.raises(ConfigError, match="above 0"):
         refinement_report(conn, settings, date(2026, 6, 1), swing=0)
@@ -118,7 +124,8 @@ def test_the_refinement_report_lists_what_to_look_at(raw, conn, settings):
 
 def test_the_refinement_report_is_recorded_and_reviewed(raw, conn, settings):
     _three_weeks(raw, conn, settings)
-    report = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), triggered_by="tester")
+    report = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 7, 31), triggered_by="tester",
+                               swing_runs=2, swing_min=1)
     sample = report["samples"][0]
     rows = _refinement_rows(raw)
     assert [r["finding_seq_nbr"] for r in rows] == list(range(1, len(rows) + 1))
@@ -126,7 +133,7 @@ def test_the_refinement_report_is_recorded_and_reviewed(raw, conn, settings):
     assert {(r["refine_id"], r["project_cd"], r["table_nm"], r["run_ty"], r["window_start_dt"], r["window_end_dt"],
              r["run_cnt"], r["triggered_by"], r["engine_version_txt"], r["threshold_txt"]) for r in rows} == \
         {(sample["refine_id"], "UMCM", "T1", "WKLY", date(2026, 6, 1), date(2026, 7, 31), 3, "tester", "0.1.0",
-          "short runs 3, swing 0.5, swing runs 4")}
+          "short runs 3, swing 0.5, swing runs 2, swing min 1")}
     by = {(r["finding_ty"], r["finding_nm"]): r for r in rows}
     short = by["SHORT_BUCKET", "B"]
     assert (short["short_run_cnt"], short["missing_cnt"], short["finding_txt"]) == \
@@ -149,6 +156,9 @@ def test_the_refinement_report_is_recorded_and_reviewed(raw, conn, settings):
         review_refinement(conn, settings, rid, "lead", "again")
     with pytest.raises(ConfigError, match="no refinement"):
         review_refinement(conn, settings, "nope", "lead", "x")
+    later = refinement_report(conn, settings, date(2026, 6, 1), date(2026, 8, 31), swing_runs=2, swing_min=1)
+    assert later["samples"][0]["swings_after"] == date(2026, 7, 31)
+    assert later["counts"] == {"SHORT_BUCKET": 1, "CAP_BLOCKS": 1, "DEAD_RULE": 1, "EXCLUSION_SWING": 0}
 
 
 def test_cli_refine_and_review(raw, conn, settings):

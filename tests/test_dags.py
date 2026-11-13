@@ -91,7 +91,8 @@ def test_a_timed_run_samples_the_entries_due(monkeypatch, variable, raw):
     monkeypatch.setattr(raw, "close", lambda: None)
     report = dags.run_timed_task(VAR_KEY, {}, _DagRun())
     assert [(r["table_nm"], r["run_ty"]) for r in report["runs"]] == [("T1", "WKLY")]
-    report = dags.run_timed_task(VAR_KEY, {"run": "weekly,monthly"}, _DagRun("manual", conf={"run": "weekly,monthly"}))
+    conf = {"run": "weekly,monthly", "as_of": "2026-08-08"}
+    report = dags.run_timed_task(VAR_KEY, conf, _DagRun("manual", conf=conf))
     assert [(r["table_nm"], r["run_ty"], r["status"]) for r in report["runs"]] == \
         [("T1", "WKLY", "COMPLETED"), ("T1", "MNT", "COMPLETED")]
     with pytest.raises(dags.AirflowFailException, match="1 of 1 run"):
@@ -331,7 +332,30 @@ def test_revalidation_window_and_dag(variable):
     assert dags._refine_months({}) == 3 and dags._refine_months({"refine_months": "6"}) == 6
     dag = dags.build_refinement_dag("REFINE", VAR_KEY)
     assert [t.task_id for t in dag.tasks] == ["refine"] and "refine" in dag.description
-    assert dags._refine_thresholds({}) == {"short_runs": 3, "swing": 0.5, "swing_runs": 4}
+    assert dags._refine_thresholds({}) == {"short_runs": 3, "swing": 0.5, "swing_runs": 4, "swing_min": 5}
     assert dags._refine_thresholds({"refine_short_runs": "2", "refine_swing": "0.3"})["swing"] == 0.3
     with pytest.raises(ConfigError, match="refine_swing_runs"):
         dags._refine_thresholds({"refine_swing_runs": "0"})
+
+
+def test_the_revalidate_and_refine_tasks_run(monkeypatch, variable, raw, settings):
+    from datetime import timedelta
+    from sampling.db import Connection
+    from sampling.engine import run_sampling
+    build_source(raw.db)
+    um_config(raw.db, run_ty="WKLY")
+    variable({**BASE, "refine_swing_min": "1"})
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
+    monkeypatch.setattr(raw, "close", lambda: None)
+    conn = Connection(raw, host="duckdb", access_lock=False)
+    for i in range(3):
+        out = run_sampling(conn, settings, key(1), run_key=f"W{i}", as_of=settings.today() - timedelta(days=7 * i),
+                           run_params={"batch_id": "2026-08-01"})
+        assert out["status"] == "COMPLETED", out.get("error")
+    assert dags.revalidate_task(VAR_KEY, _DagRun())["counts"]["MATCH"] == 3
+    refined = dags.refine_task(VAR_KEY, _DagRun())
+    assert len(refined["refine_ids"]) == 1
+    assert raw.db.execute("SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRefinement").fetchone()[0] > 0
+    variable({**BASE, "refine_swing": "x"})
+    with pytest.raises(dags.AirflowFailException, match="refine_swing"):
+        dags.refine_task(VAR_KEY, _DagRun())

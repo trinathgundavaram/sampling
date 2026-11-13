@@ -192,3 +192,39 @@ def test_cli_revalidate_and_signoff(raw, conn, settings):
     args = cli.build_parser().parse_args(["signoff", "--reval-id", out["results"][0]["reval_id"], "--note", "ok",
                                           "--by", "me"])
     assert cli.cmd_signoff(conn, settings, args)[0]["signoff_by"] == "me"
+
+
+def _history_weeks(raw, conn, settings):
+    from conftest import build_source, um_config
+    build_source(raw.db, n=400)
+    um_config(raw.db, run_ty="WKLY")
+    insert_rule(raw.db, "EXCLUSION", 210, "SELECTED_IN_LAST_90_DAYS", seq_nbr=0, rule_ty="PRIOR_SELECTION",
+                lookback_days=90, history_scope_cd="SAMPLE")
+    batch = {"batch_id": "2026-08-01"}
+    w1 = run_sampling(conn, settings, key(1), run_key="W1", as_of=AS_OF - timedelta(days=7), run_params=batch)
+    w2 = run_sampling(conn, settings, key(1), run_key="W2", as_of=AS_OF, run_params=batch)
+    assert w1["status"] == w2["status"] == "COMPLETED", (w1.get("error"), w2.get("error"))
+    return w2, batch
+
+
+def test_replay_reads_history_as_it_was_after_later_replacements(raw, conn, settings):
+    from sampling.engine import replace_case
+    w2, _ = _history_weeks(raw, conn, settings)
+    picks = [r[0] for r in raw.db.execute("SELECT Case_Key FROM GOVT_RGLTRY_SampleSelection WHERE Run_Key = 'W1' "
+                                          "AND Selected_Ind = 1").fetchall()]
+    for case in picks[:20]:
+        replace_case(conn, settings, key(1), "W1", case, "unreadable", "me", any_bucket=True)
+    out = revalidate_run(conn, settings, w2["smpl_run_id"])
+    assert out["status"] == "MATCH", out["diff_txt"]
+
+
+def test_replay_reads_history_as_it_was_after_a_later_rerun(raw, conn, settings):
+    w2, batch = _history_weeks(raw, conn, settings)
+    first = raw.db.execute("SELECT Smpl_Run_ID FROM GOVT_RGLTRY_SamplingRun WHERE Run_Key = 'W1'").fetchone()[0]
+    before = set(_picks(raw, first))
+    raw.db.execute("UPDATE GOVT_RGLTRY_SamplingConfig SET Smpl_Method_Cd = 'RANDOM'")
+    rerun = run_sampling(conn, settings, key(1), run_key="W1", as_of=AS_OF - timedelta(days=7), run_params=batch,
+                         seed=999, rerun_reason="redo")
+    assert rerun["status"] == "COMPLETED" and set(_picks(raw, rerun["smpl_run_id"])) != before
+    out = revalidate_run(conn, settings, w2["smpl_run_id"])
+    assert out["status"] == "MATCH", out["diff_txt"]

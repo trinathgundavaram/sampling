@@ -524,10 +524,10 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | `runs [<scope>] [--run-key K] [--status S]` | Recent run rows (with `Config_Hash`, `Finalized_By`, `Override_Rsn_Txt`) | – |
 | `errors [<scope>]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
-| `purge <scope> --older-than-days D [--apply]` | Counts (`--apply`: deletes) the selection rows old runs no longer need (12) | selections |
+| `purge <scope> --older-than-days D [--replay-months M] [--apply]` | Counts (`--apply`: deletes) the selection rows old runs no longer need (12) | selections |
 | `revalidate --run-id R` or `revalidate --since D [--until D] [<scope>]` | Replays one run, or every current `COMPLETED` / `FINAL` run whose as-of date is in the window, and compares the picks (10.11). Exit code 1 unless every run is `MATCH` | revalidation rows |
 | `signoff --reval-id V --note N [--by U]` | Records the review of a revalidation (once) | revalidation row |
-| `refine --since D [--until D] [<scope>] [--short-runs N] [--swing F] [--swing-runs N] [--dry-run]` | Lists what to refine from the figures of the current runs in the window, and saves the list (10.10) | refinement rows (none with `--dry-run`) |
+| `refine --since D [--until D] [<scope>] [--short-runs N] [--swing F] [--swing-runs N] [--swing-min N] [--dry-run]` | Lists what to refine from the figures of the current runs in the window, and saves the list (10.10) | refinement rows (none with `--dry-run`) |
 | `review --refine-id R [--seq N] --note N [--by U]` | Records what was decided about one finding, or about every finding of the report not yet reviewed (once each) | refinement rows |
 
 Exit codes: 0 done, 1 a sample failed (or `purge` skipped a sample, or `revalidate` found a run that is not `MATCH`), 2 a usage
@@ -651,8 +651,8 @@ refine --since 2026-08-01 --until 2026-10-31 --project UMCM --table ODAG1 --run-
 |---|---|---|
 | `SHORT_BUCKET` | A leaf bucket picked fewer cases than its target in at least `--short-runs` runs (default 3). `Short_Run_Cnt` runs, `Missing_Cnt` cases short in all | The bucket's quota or its rule: it keeps having too few candidates |
 | `CAP_BLOCKS` | A CAP rule stopped at least one pick. `Blocked_Cnt` picks stopped, `Lost_Cnt` of them no other case made up | The cap's `Max_Val`, when `Lost_Cnt` is above 0 |
-| `DEAD_RULE` | A query rule's SELECT returned no case in any run of the window | Whether the rule is still needed, or its SQL is wrong |
-| `EXCLUSION_SWING` | An exclusion's count (`Case_Cnt`) moved more than `--swing` (default 0.5, so by half) above or below its average (`Prior_Avg_Val`) over the `--swing-runs` runs before it (default 4). Only runs within the window are counted | A change in the source data or in the rule |
+| `DEAD_RULE` | A query rule's SELECT returned no case in any of its runs in the window, and it ran in at least `--short-runs` runs (so a rule added a week ago is not listed yet) | Whether the rule is still needed, or its SQL is wrong |
+| `EXCLUSION_SWING` | An exclusion's count (`Case_Cnt`) moved more than `--swing` (default 0.5, so by half) above or below its average (`Prior_Avg_Val`) over the `--swing-runs` runs before it (default 4). Checked only for a run that has that many earlier runs in the window, and only when the count or the average is at least `--swing-min` (default 5), so 0 to 1 is not a swing. A swing is listed once: only runs after the window end of the sample's last saved report are checked | A change in the source data or in the rule |
 | `NOT_PICKED` (total) | Always, one row per reason: cases left out for that reason in the window (`Case_Cnt`) | A reason that grows |
 | `TOPUP` (total) | Always: cases the top-up took in the window | A top-up that fills a lot means quotas that do not fit the data |
 | `REPLACED` (total) | One row per reason reviewers gave for replacing cases | Cases the rules should not pick |
@@ -677,9 +677,10 @@ ORDER BY Report_Dtts DESC, Refine_ID, Finding_Seq_Nbr;
 
 In Airflow the `GOVT_RGLTRY_UMCM_SAMPLING_REFINEMENT` DAG runs the report for the Variable's scopes, by default on
 the 1st of every month at 07:00 (`refine_schedule_interval`) over the last 3 months (`refine_months`), with the
-thresholds `refine_short_runs`, `refine_swing` and `refine_swing_runs` (AIRFLOW_DEPLOYMENT.md). With weekly
-samples, 3 months is about 13 runs: enough for the 3-run and 4-run checks. Because each month's window overlaps the
-last, a finding that is not fixed comes back the next month as a new row. The task does not fail on findings.
+thresholds `refine_short_runs`, `refine_swing`, `refine_swing_runs` and `refine_swing_min` (AIRFLOW_DEPLOYMENT.md).
+With weekly samples, 3 months is about 13 runs: enough for the 3-run and 4-run checks. Because each month's window
+overlaps the last, a short bucket, a blocking cap or a dead rule that is not fixed comes back the next month as a new
+row; a swing does not (it is a single event). The task does not fail on findings.
 
 The same checks in SQL, for a look by hand:
 ```sql
@@ -718,7 +719,10 @@ exclusions moved by more than half against their last 4 runs; why reviewers repl
 Every 6 months (requirement 8.01) the past samples are replayed to show their rules still give the same cases.
 A replay takes the run's own configuration (its run row) and rules (its `GOVT_RGLTRY_SamplingRunRule` rows, so a
 rule edited in place since does not matter), its stored run parameters (the batch it sampled, not a new lookup) and
-seed, reads the source as it was when the run started (`{current_rows}`, 6.4), selects as a dry run and compares
+seed, reads the source as it was when the run started (`{current_rows}`, 6.4), reads the history rules'
+`GOVT_RGLTRY_SampleSelection` rows as they were then (a case replaced or a run redone in an earlier cycle after the
+run does not change what the run saw: `Load_Dtts`, `Stat_Dtts` and, for a retired run, `LastUpdt_Dtts` say what was
+there), selects as a dry run and compares
 the picks with the run's own: its `SELECTED` and `REPLACED` rows (a later replacement is not a pick of the run).
 Nothing is written but the `GOVT_RGLTRY_SamplingRevalidation` row.
 
@@ -772,8 +776,10 @@ hash) are never deleted. Not touched: the target tables.
 D must be at least the longest `Lookback_Days` of the active history rules in effect now or later (`Eff_End_Dt` not
 past; an expired version does not count) that may read the sample's rows (the
 `SAMPLE`-scope rules of its table and run type, the `TABLE`-scope rules of its table, the `PROJECT`-scope rules of
-its project, `*` included), or the sample is skipped with the reason: a carry-over or a
-no-repeat rule would otherwise lose the cycles it looks back on. A replacement (10.9) needs the unselected
+its project, `*` included), plus 31 days per month that revalidation replays (`--replay-months`, default 6; the
+Variable's `revalidate_months` in Airflow), or the sample is skipped with the reason: a carry-over or a no-repeat rule
+would otherwise lose the cycles it looks back on, and a replay of a past run would lose the cycles that run looked
+back on. With a 90-day rule and 6 months, D is at least 276. A replacement (10.9) needs the unselected
 candidates of its run: replace before the run is older than D (after that, `replace` says the candidates were
 purged).
 

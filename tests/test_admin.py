@@ -122,6 +122,12 @@ def test_purge_respects_the_history_rules(raw, conn, settings):
     assert history_days(conn, settings, key(1)) == 180
     out = purge_selections(conn, settings, 120, project="UMCM", table="T1", as_of=AS_OF, apply=True)
     assert "keep at least" in out["configs"][0]["skipped"]
+    out = purge_selections(conn, settings, 300, project="UMCM", table="T1", as_of=AS_OF)
+    assert "keep at least 366 days" in out["configs"][0]["skipped"]
+    out = purge_selections(conn, settings, 200, project="UMCM", table="T1", as_of=AS_OF, replay_months=0)
+    assert "skipped" not in out["configs"][0]
+    with pytest.raises(ConfigError, match="replay_months"):
+        purge_selections(conn, settings, 200, project="UMCM", replay_months=-1)
     with pytest.raises(ConfigError):
         purge_selections(conn, settings, 0, project="UMCM")
 

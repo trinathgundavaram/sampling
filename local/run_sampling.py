@@ -16,9 +16,10 @@ if str(_ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(_ENGINE_DIR))
 
 from sampling import __version__
-from sampling.admin import purge_selections
+from sampling.admin import REPLAY_MONTHS, purge_selections
 from sampling.db import connect_teradata, error_text
-from sampling.engine import (REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_RUNS, config_problems, finalize_run,
+from sampling.engine import (REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_MIN, REFINE_SWING_RUNS, config_problems,
+                             finalize_run,
                              load_config, refinement_report, replace_case, revalidate_run, revalidate_since,
                              review_refinement, run_scope, signoff_revalidation, validate)
 from sampling.settings import ConfigError, Settings, _flag
@@ -177,7 +178,7 @@ def cmd_refine(conn, s, args) -> tuple:
     if not since:
         raise ConfigError("give --since")
     out = refinement_report(conn, s, since, _day(args.until, "--until"), **_scope(args), short_runs=args.short_runs,
-                            swing=args.swing, swing_runs=args.swing_runs,
+                            swing=args.swing, swing_runs=args.swing_runs, swing_min=args.swing_min,
                             triggered_by=args.triggered_by or f"local-{getpass.getuser()}", record=not args.dry_run)
     return out, 0
 
@@ -244,7 +245,8 @@ def cmd_mark_failed(conn, s, args) -> tuple:
 
 
 def cmd_purge(conn, s, args) -> tuple:
-    out = purge_selections(conn, s, args.older_than_days, **_scope(args), apply=args.apply)
+    out = purge_selections(conn, s, args.older_than_days, **_scope(args), apply=args.apply,
+                           replay_months=args.replay_months)
     return out, 1 if any("skipped" in c for c in out["configs"]) else 0
 
 
@@ -325,6 +327,9 @@ def build_parser() -> argparse.ArgumentParser:
                          f"(default {REFINE_SWING})")
     rf.add_argument("--swing-runs", type=int, default=REFINE_SWING_RUNS,
                     help=f"how many runs before make the recent average (default {REFINE_SWING_RUNS})")
+    rf.add_argument("--swing-min", type=int, default=REFINE_SWING_MIN,
+                    help=f"a swing is listed only when the count or its average is at least this "
+                         f"(default {REFINE_SWING_MIN})")
     rf.add_argument("--triggered-by", help="recorded on the refinement rows (default local-<user>)")
     rf.add_argument("--dry-run", action="store_true", help="list only, write nothing")
 
@@ -361,6 +366,8 @@ def build_parser() -> argparse.ArgumentParser:
     scope(pg)
     pg.add_argument("--older-than-days", type=int, required=True, help="runs whose as-of date is older than this")
     pg.add_argument("--apply", action="store_true", help="delete (default: count what would go)")
+    pg.add_argument("--replay-months", type=int, default=REPLAY_MONTHS,
+                    help=f"how far back revalidation replays: rows it needs are kept (default {REPLAY_MONTHS})")
 
     mf = sub.add_parser("mark-failed", help="close a run left RUNNING by a crashed process")
     mf.add_argument("--run-id", required=True)

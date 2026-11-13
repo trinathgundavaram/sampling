@@ -170,7 +170,7 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `chunk_rows` | Rows per fetch and per insert batch (default 1000) |
 | `access_lock` | `LOCKING ROW FOR ACCESS` on reads (default true) |
 | `email_recipient` | Adds `success_email` / `fail_email` tasks (the support team) |
-| `retention_days` | Adds `purge_selections` after the runs: deletes the `GOVT_RGLTRY_SampleSelection` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `Lookback_Days`, else that sample is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
+| `retention_days` | Adds `purge_selections` after the runs: deletes the `GOVT_RGLTRY_SampleSelection` rows older than this that nothing needs (OPERATIONAL_RUNBOOK.md section 12). Must cover the history rules' `Lookback_Days` plus 31 days per `revalidate_months`, else that sample is skipped. Leave out until the retention period is decided (OPEN_ITEMS Q14) |
 | `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, target table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `table`, `run_type`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
@@ -184,7 +184,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `refine_timeout_minutes` | Task limit of the refinement DAG (default 60) |
 | `refine_short_runs` | The `refine` task lists a bucket that was short of its target in at least this many runs (default 3) |
 | `refine_swing` | The `refine` task lists an exclusion whose count moved by more than this share of its recent average (default 0.5) |
-| `refine_swing_runs` | How many earlier runs make that recent average (default 4) |
+| `refine_swing_runs` | How many earlier runs make that recent average; a run with fewer earlier runs in the window is not checked (default 4) |
+| `refine_swing_min` | A swing is listed only when the count or its average is at least this (default 5) |
 | `owner`, `tags`, `pool` | As usual |
 
 ### Triggering a run with values (Trigger DAG w/ config, CLI `-c`, REST API)

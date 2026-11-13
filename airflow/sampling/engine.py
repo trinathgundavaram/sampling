@@ -684,26 +684,34 @@ def case_key(row: dict, keys: list) -> str:
 
 
 def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key: str, as_of: date,
-             cache: dict, ahead: bool = False) -> dict:
+             cache: dict, ahead: bool = False, as_seen: Optional[datetime] = None) -> dict:
     scope = _up(rule.get("history_scope_cd"), "SAMPLE")
     days = int(rule.get("lookback_days") or 0)
     if (scope, days, ahead) in cache:
         return cache[(scope, days, ahead)]
     project, table, run_type = sample.key
-    where = ["Curr_Ind = 1", "Excluded_Ind = 0", "Smpl_Cycle_Dt_Key >= ?", "Smpl_Cycle_Dt_Key <= ?",
-             f"NOT ({_same_sample()} AND Run_Key = ?)", "UPPER(Project_Cd) = ?"]
-    params = [as_of - timedelta(days=days), as_of + timedelta(days=days if ahead else 0), project, table, run_type,
-              run_key, project]
+    selected, left_out, seen = "Selected_Ind", "CASE WHEN Selection_Stat IN ('REPLACED', 'SKIPPED') THEN 1 ELSE 0 END", []
+    where = ["Curr_Ind = 1"]
+    if as_seen is not None:
+        selected = ("CASE WHEN Stat_Dtts > ? THEN CASE WHEN Selection_Stat = 'REPLACED' THEN 1 ELSE 0 END "
+                    "ELSE Selected_Ind END")
+        left_out = ("CASE WHEN Selection_Stat = 'SKIPPED' THEN 1 "
+                    "WHEN Selection_Stat = 'REPLACED' AND Stat_Dtts <= ? THEN 1 ELSE 0 END")
+        where = ["Load_Dtts <= ?", "(Curr_Ind = 1 OR LastUpdt_Dtts > ?)"]
+        seen = [as_seen, as_seen]
+    where += ["Excluded_Ind = 0", "Smpl_Cycle_Dt_Key >= ?", "Smpl_Cycle_Dt_Key <= ?",
+              f"NOT ({_same_sample()} AND Run_Key = ?)", "UPPER(Project_Cd) = ?"]
+    params = [*seen, as_of - timedelta(days=days), as_of + timedelta(days=days if ahead else 0), project, table,
+              run_type, run_key, project]
     if scope in ("SAMPLE", "TABLE"):
         where.append("UPPER(Table_Nm) = ?")
         params.append(table)
     if scope == "SAMPLE":
         where.append("UPPER(Run_Ty) = ?")
         params.append(run_type)
-    rows = conn.query(f"SELECT Case_Key, MAX(Selected_Ind) AS sel, "
-                      f"MAX(CASE WHEN Selection_Stat IN ('REPLACED', 'SKIPPED') THEN 1 ELSE 0 END) AS left_out "
+    rows = conn.query(f"SELECT Case_Key, MAX({selected}) AS sel, MAX({left_out}) AS left_out "
                       f"FROM {s.meta_db}.GOVT_RGLTRY_SampleSelection WHERE {' AND '.join(where)} GROUP BY Case_Key",
-                      params)
+                      seen + params)
     out = {"selected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 1},
            "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["left_out"] or 0) == 0}}
     cache[(scope, days, ahead)] = out
@@ -1550,10 +1558,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         history, cache = {}, {}
         for x in sample.exclusions:
             if _up(x.get("rule_ty"), QUERY) in HISTORY_TYPES:
-                history[x["rule_id"]] = _history(conn, s, sample, x, run_key, as_of, cache)
+                history[x["rule_id"]] = _history(conn, s, sample, x, run_key, as_of, cache, as_seen=params.get(AS_SEEN))
         for p in sample.priorities:
             if _up(p.get("rule_ty"), QUERY) in HISTORY_TYPES:
-                history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache)
+                history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache, as_seen=params.get(AS_SEEN))
     except Exception as e:
         return fail("technical", "PULL_FAILURE", e, exc_info=True)
 
@@ -1797,6 +1805,7 @@ def signoff_revalidation(conn: Connection, s: Settings, reval_id: str, by: str, 
 REFINE_SHORT_RUNS = 3
 REFINE_SWING = 0.5
 REFINE_SWING_RUNS = 4
+REFINE_SWING_MIN = 5
 REFINE_KINDS = ("SHORT_BUCKET", "CAP_BLOCKS", "DEAD_RULE", "EXCLUSION_SWING")
 
 
@@ -1809,7 +1818,8 @@ def _scope_where(project, table, run_type, prefix: str = "") -> tuple:
     return where, params
 
 
-def _refine_findings(label: str, rows: list, short_runs: int, swing: float, swing_runs: int) -> list:
+def _refine_findings(label: str, rows: list, short_runs: int, swing: float, swing_runs: int, swing_min: int,
+                     after: Optional[date] = None) -> list:
     runs = list(dict.fromkeys((r["as_of_dt_key"], r["run_key"], r["smpl_run_id"]) for r in rows))
     by = {}
     for r in rows:
@@ -1836,20 +1846,22 @@ def _refine_findings(label: str, rows: list, short_runs: int, swing: float, swin
                 found("CAP_BLOCKS", name, rule_id, f"blocked {blocked} pick(s) in "
                       f"{sum(1 for s in stats if s['over_cnt'])} run(s); {lost} not made up by another case",
                       blocked_cnt=blocked, lost_cnt=lost)
-        elif ty == "RULE" and len(stats) == len(runs) and not any(s["case_cnt"] for s in stats):
-            found("DEAD_RULE", name, rule_id, f"matched no case in any of {len(runs)} run(s)")
+        elif ty == "RULE" and len(stats) >= short_runs and not any(s["case_cnt"] for s in stats):
+            found("DEAD_RULE", name, rule_id, f"matched no case in any of its {len(stats)} run(s)",
+                  last=_day(stats[-1]["as_of_dt_key"]))
         elif ty == "EXCLUSION":
-            for i in range(1, len(stats)):
-                prior = [s["case_cnt"] or 0 for s in stats[max(0, i - swing_runs):i]]
+            for i in range(swing_runs, len(stats)):
+                if after and _day(stats[i]["as_of_dt_key"]) <= after:
+                    continue
+                prior = [s["case_cnt"] or 0 for s in stats[i - swing_runs:i]]
                 avg, now = sum(prior) / len(prior), stats[i]["case_cnt"] or 0
-                if now > (1 + swing) * avg or now < (1 - swing) * avg:
+                if max(now, avg) >= swing_min and (now > (1 + swing) * avg or now < (1 - swing) * avg):
                     found("EXCLUSION_SWING", name, rule_id, f"excluded {now} case(s) on "
                           f"{_day(stats[i]['as_of_dt_key'])} against {avg:g} on average in the {len(prior)} run(s) "
                           f"before", case_cnt=now, prior_avg=round(avg, 2), last=_day(stats[i]["as_of_dt_key"]))
     return out
 
 
-REFINE_TOTALS = ("NOT_PICKED", "TOPUP", "REPLACED")
 REFINE_COLUMNS = ("Finding_Ty", "Finding_Nm", "Rule_ID", "Short_Run_Cnt", "Missing_Cnt", "Blocked_Cnt", "Lost_Cnt",
                   "Case_Cnt", "Prior_Avg_Val", "Last_As_Of_Dt", "Finding_Txt")
 _REFINE_FIELDS = {"Finding_Ty": "kind", "Finding_Nm": "name", "Rule_ID": "rule_id", "Short_Run_Cnt": "short_runs",
@@ -1894,10 +1906,11 @@ def _record_refinement(conn: Connection, s: Settings, sample: dict, since: date,
 def refinement_report(conn: Connection, s: Settings, since: date, until: Optional[date] = None,
                       project: Optional[str] = None, table: Optional[str] = None, run_type: Optional[str] = None,
                       short_runs: int = REFINE_SHORT_RUNS, swing: float = REFINE_SWING,
-                      swing_runs: int = REFINE_SWING_RUNS, triggered_by: str = "SYSTEM", record: bool = True) -> dict:
-    if short_runs < 1 or swing_runs < 1 or swing <= 0:
+                      swing_runs: int = REFINE_SWING_RUNS, swing_min: int = REFINE_SWING_MIN,
+                      triggered_by: str = "SYSTEM", record: bool = True) -> dict:
+    if short_runs < 1 or swing_runs < 1 or swing <= 0 or swing_min < 1:
         raise ConfigError(f"refinement thresholds must be above 0: short runs {short_runs}, swing {swing}, "
-                          f"swing runs {swing_runs}")
+                          f"swing runs {swing_runs}, swing min {swing_min}")
     end = until or s.today()
     where, params = _scope_where(project, table, run_type, "t.")
     where += ["t.As_Of_Dt_Key >= ?", "t.As_Of_Dt_Key <= ?"]
@@ -1918,17 +1931,24 @@ def refinement_report(conn: Connection, s: Settings, since: date, until: Optiona
         JOIN {s.meta_db}.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = x.Smpl_Run_ID AND r.Curr_Ind = 1
         WHERE {' AND '.join(where)}
         GROUP BY x.Project_Cd, x.Table_Nm, x.Run_Ty, x.Stat_Rsn_Txt""", params)
+    where, params = _scope_where(project, table, run_type)
+    earlier = {".".join(_up(r[k]) for k in SAMPLE_KEY): _day(r["last_end"]) for r in conn.query(
+        f"SELECT Project_Cd, Table_Nm, Run_Ty, MAX(Window_End_Dt) AS Last_End "
+        f"FROM {s.meta_db}.GOVT_RGLTRY_SamplingRefinement {'WHERE ' + ' AND '.join(where) if where else ''} "
+        f"GROUP BY Project_Cd, Table_Nm, Run_Ty", params)}
     by_sample = {}
     for r in rows:
         by_sample.setdefault(".".join(_up(r[k]) for k in SAMPLE_KEY), []).append(r)
     triggered_by = str(triggered_by or "SYSTEM")[:USER_MAX]
-    thresholds = f"short runs {short_runs}, swing {swing:g}, swing runs {swing_runs}"
+    thresholds = f"short runs {short_runs}, swing {swing:g}, swing runs {swing_runs}, swing min {swing_min}"
     now = s.now()
     samples = []
     for label, stats in by_sample.items():
         sample = {"sample": label, "refine_id": generate_run_id("REFINE", label, timestamp=now) if record else None,
                   "runs": len({st["smpl_run_id"] for st in stats}),
-                  "findings": _refine_findings(label, stats, short_runs, swing, swing_runs),
+                  "swings_after": earlier.get(label),
+                  "findings": _refine_findings(label, stats, short_runs, swing, swing_runs, swing_min,
+                                               earlier.get(label)),
                   "totals": _refine_totals(label, stats, replaced)}
         for f in sample["findings"]:
             log.warning("REFINE | %s | %s | %s | %s", label, f["kind"], f["name"], f["text"])
