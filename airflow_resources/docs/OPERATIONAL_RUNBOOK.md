@@ -334,7 +334,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 |---|---|---|
 | `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
-| `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
+| `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Not_Selected_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
 **Current sample** of a cycle: `Curr_Ind = 1` for its sample (project, table, run type) and `Run_Key`, on the run row
 and on its selections. A successful rerun turns the earlier rows to 0 (with `LastUpdt_Dtts`, `LastUpdt_ID`) in the
@@ -541,7 +541,17 @@ SELECT Exclusion_Rsn_Txt, COUNT(*) FROM HSABC_DEV.GOVT_RGLTRY_SampleSelection
 WHERE Project_Cd = 'UMCM' AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' AND Run_Key = 'B42'
   AND Curr_Ind = 1 AND Excluded_Ind = 1
 GROUP BY 1;
+
+SELECT Case_Key, Stratum_Path_Txt, Not_Selected_Rsn_Txt FROM HSABC_DEV.GOVT_RGLTRY_SampleSelection
+WHERE Project_Cd = 'UMCM' AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' AND Run_Key = 'B42'
+  AND Curr_Ind = 1 AND Excluded_Ind = 0 AND Selected_Ind = 0
+ORDER BY 2, 1;
 ```
+Every candidate that was not picked has `Not_Selected_Rsn_Txt`, for example
+`Bucket IP Medical/Denied full: its 17 slot(s) went to higher-ranked cases`,
+`Over cap PER_CPT_CODE: L3000 already has 3 in the sample`, `Over cap BH_MAX_8_PCT: BH already has its 12` or
+`Bucket OTHER/Denied is not sampled`. The run's report counts them (`not_picked`) and the task log has one
+`not picked | <kind> | n case(s)` line per kind. `Stat_Rsn_Txt` stays the reason of a manual replace.
 The targets per bucket are in the task log (`SAMPLING | <sample> | bucket <path> | selected n of m candidate(s),
 target t`) and the run's report (`buckets.<path>.target`): a bucket with fewer candidates
 than its target is short; with `TOPUP` the rest came from other buckets.
@@ -643,3 +653,4 @@ Each page is a draw.io file in `diagrams/pages/` and exported as a PNG in `diagr
 | 06 | Finalise, replace a case, rerun a cycle, purge | 10.6–10.9, 12 | [png](diagrams/png/06_after_a_run.png) · [drawio](diagrams/pages/06_after_a_run.drawio) |
 | 07 | Run_Stat and Curr_Ind of a run row | 5, 6.3 | [png](diagrams/png/07_run_lifecycle.png) · [drawio](diagrams/pages/07_run_lifecycle.drawio) |
 | 08 | The five tables and the target table: who fills them and how they join | 3–5 | [png](diagrams/png/08_tables.png) · [drawio](diagrams/pages/08_tables.drawio) |
+| 09 | ODAG1 weekly: the order its 35 rules run and where each result is kept, and its bucket tree (27 leaves, nominal targets, caps) | 2, 4 | [png](diagrams/png/09_odag1_wkly.png) · [drawio](diagrams/pages/09_odag1_wkly.drawio) |

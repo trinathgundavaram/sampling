@@ -835,13 +835,16 @@ class Stratifier:
             self.leaves[path]["selected"] += step
 
     def room(self, path: str) -> bool:
+        return self.ceiling_hit(path) is None
+
+    def ceiling_hit(self, path: str) -> Optional[str]:
         parts = path.split("/")
         for i in range(1, len(parts) + 1):
             prefix = "/".join(parts[:i])
             ceiling = self.ceilings.get(prefix)
             if ceiling is not None and (self.nodes.get(prefix) or {}).get("selected", 0) >= ceiling:
-                return False
-        return True
+                return f"Bucket {prefix} at its most of {ceiling}"
+        return None
 
     def _forget(self, path: str) -> None:
         prefix = f"{path}/"
@@ -1003,9 +1006,24 @@ class Caps:
         return out
 
     def blocking(self, row: dict) -> Optional[str]:
+        hit = self._hit(row)
+        return None if hit is None else str(self.rules[hit[0]][0]["rule_nm"])
+
+    def why(self, row: dict) -> Optional[str]:
+        hit = self._hit(row)
+        if hit is None:
+            return None
+        i, group = hit
+        cap, limit, _, per_value = self.rules[i]
+        where = _label(cap.get("parent_path_txt")) if _up(cap.get("parent_path_txt"), "*") != "*" else "the sample"
+        if per_value:
+            return f"Over cap {cap['rule_nm']}: {group} already has {limit} in {where}"
+        return f"Over cap {cap['rule_nm']}: {where} already has its {limit}"
+
+    def _hit(self, row: dict):
         for i, group in self.groups(row):
             if self.counts[i].get(group, 0) >= self.rules[i][1]:
-                return str(self.rules[i][0]["rule_nm"])
+                return i, group
         return None
 
     def take(self, row: dict) -> None:
@@ -1020,6 +1038,7 @@ def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) 
     for row in sorted(chosen, key=lambda r: r["_order"]):
         name = caps.blocking(row)
         if name:
+            row["_why"] = caps.why(row)
             caps.report[name]["over"] += 1
             over.append((row, name))
         else:
@@ -1060,6 +1079,36 @@ def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) 
             strat.notes.append(f"{row.get('_path')}: a case over the cap {name} left out: its bucket has no "
                                f"other candidate within the caps")
     return sorted(kept, key=lambda r: r["_order"])
+
+
+def explain_left_out(candidates: list, chosen: list, strat: "Stratifier") -> dict:
+    taken = {r["_key"] for r in chosen}
+    counts = {}
+    for r in candidates:
+        if r["_key"] in taken:
+            r.pop("_why", None)
+            continue
+        path = r.get("_path") or "ALL"
+        leaf = strat.leaves.get(path) or {}
+        full = (f"Bucket {path} gets no slots this run" if not leaf.get("target")
+                else f"Bucket {path} full: its {leaf['target']} slot(s) went to higher-ranked cases")
+        why = r.get("_why")
+        if r.get("_skip"):
+            why, kind = f"Bucket {path} is not sampled", "bucket not sampled"
+        elif why == "top up":
+            why, kind = f"{full}; the top-up filled the sample before reaching it", "bucket full"
+        elif why and why.startswith("Over cap "):
+            kind = why.split(":")[0][len("Over cap "):].strip()
+            kind = f"cap {kind}"
+        elif why and why.startswith("Bucket ") and " at its most of " in why:
+            kind = "bucket at its most"
+        elif why:
+            kind = "sample full"
+        else:
+            why, kind = full, "bucket full"
+        r["_why"] = why[:1000]
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
 
 
 def _same_sample(prefix: str = "") -> str:
@@ -1185,17 +1234,18 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
         ranks[r["_key"]] = seen[r.get("_path")]
     rows = [[run_id, *key, run_key, as_of, r["_key"], r["_order"] + 1,
              1 if r["_key"] in order else 0, order.get(r["_key"]), ranks[r["_key"]], 0, None, r.get("_path"),
-             "SELECTED" if r["_key"] in order else "SKIPPED" if r.get("_skip") else None, now, now]
+             "SELECTED" if r["_key"] in order else "SKIPPED" if r.get("_skip") else None,
+             None if r["_key"] in order else r.get("_why"), now, now]
             for r in candidates]
     if _up(c.get("keep_excluded_ind"), "1") not in ("0", "N", "FALSE"):
         rows += [[run_id, *key, run_key, as_of, r["_key"], None, 0, None, None, 1, r["_reason"], None,
-                  None, now, now] for r in excluded]
+                  None, None, now, now] for r in excluded]
     conn.executemany(f"""
         INSERT INTO {s.meta_db}.GOVT_RGLTRY_SampleSelection (
             Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Smpl_Cycle_Dt_Key, Case_Key, Priority_Rank_Nbr,
             Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr, Excluded_Ind, Exclusion_Rsn_Txt, Stratum_Path_Txt,
-            Selection_Stat, Curr_Ind, Load_Dtts, LastUpdt_Dtts
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
+            Selection_Stat, Not_Selected_Rsn_Txt, Curr_Ind, Load_Dtts, LastUpdt_Dtts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
     if output is not None:
         _retire_output(conn, queries, run_key, now)
         _write_output(conn, s, queries, run_id, run_key, key[2], as_of, output,
@@ -1225,6 +1275,8 @@ def _log_selection(label: str, summary: dict, topped: int) -> None:
                  c["replaced"])
     if topped:
         log.info("%s | %s | topped up %d from the other candidates", STEP, label, topped)
+    for kind, n in (summary.get("not_picked") or {}).items():
+        log.info("%s | %s | not picked | %s | %d case(s)", STEP, label, kind, n)
     for note in summary.get("notes") or []:
         log.warning("%s | %s | %s", STEP, label, note)
     if summary["shortfall"]:
@@ -1380,15 +1432,22 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             rest = [r for r in candidates if r["_key"] not in taken and not r.get("_skip")]
             for r in strat.top_up(rest, len(rest), chosen):
                 if len(extra) >= target - len(chosen):
-                    break
-                if caps.blocking(r) is None and strat.room(r.get("_path")):
-                    caps.take(r)
-                    strat.add(r.get("_path"))
-                    extra.append(r)
+                    r["_why"] = r.get("_why") or "top up"
+                    continue
+                blocked = caps.why(r) or strat.ceiling_hit(r.get("_path"))
+                if blocked:
+                    r["_why"] = blocked
+                    continue
+                r.pop("_why", None)
+                caps.take(r)
+                strat.add(r.get("_path"))
+                extra.append(r)
             chosen += extra
         for r in chosen[target:]:
             strat.unselect(r.get("_path"))
+            r["_why"] = f"Sample full: the target of {target} was reached first"
         chosen = sorted(chosen[:target], key=lambda r: r["_order"])
+        summary["not_picked"] = explain_left_out(candidates, chosen, strat)
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     except Exception as e:

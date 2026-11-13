@@ -150,6 +150,7 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SampleSelection (
   Bucket_Rank_Nbr        INTEGER,
   Excluded_Ind           SMALLINT       DEFAULT 0 NOT NULL,
   Exclusion_Rsn_Txt      VARCHAR(200),
+  Not_Selected_Rsn_Txt   VARCHAR(1000),
   Stratum_Path_Txt       VARCHAR(1000),
   Selection_Stat         VARCHAR(20),
   Linked_Case_Key        VARCHAR(1000),

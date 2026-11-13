@@ -148,3 +148,45 @@ def test_a_replacement_keeps_the_caps(raw, conn, settings):
     out = replace_case(conn, settings, key(1), "K", "case_id=a004", "no record", "auditor")
     assert out["replacement"] == "case_id=a005"
     assert _count(raw, SELECTED_U + "u.cpt = 'C1'") == 3
+
+
+def _reasons(raw, out):
+    rows = raw.db.execute("SELECT Case_Key, Selected_Ind, Not_Selected_Rsn_Txt FROM GOVT_RGLTRY_SampleSelection "
+                          "WHERE Smpl_Run_ID = ? ORDER BY 1", [out["smpl_run_id"]]).fetchall()
+    assert all((sel == 1) == (why is None) for _, sel, why in rows), rows
+    return {k[len("case_id="):]: why for k, sel, why in rows if not sel}
+
+
+def test_every_case_left_out_gets_a_reason(raw, conn, settings):
+    rows = [(f"a{i:03d}", "A", "C1" if i < 5 else f"A{i}", "N") for i in range(10)]
+    rows += [(f"b{i:03d}", "B", "C1" if i < 5 else f"B{i}", "N") for i in range(10)]
+    rows += [("z000", "Z", "Z", "N")]
+    _table(raw.db, rows)
+    _config(raw.db, 10, {"A": 50, "B": 50})
+    _cap(raw.db, 50, "CPT_VARIETY", CPT_CAP, 3, rule_ty="PER_VALUE")
+    out = _run(conn, settings)
+    over = "Over cap CPT_VARIETY: C1 already has 3 in the sample"
+    full = "Bucket A full: its 5 slot(s) went to higher-ranked cases"
+    assert _reasons(raw, out) == {"a003": over, "a004": over, "a007": full, "a008": full, "a009": full,
+                                  **{f"b00{i}": over for i in range(5)}, "z000": "Bucket Z is not sampled"}
+    assert out["not_picked"] == {"cap CPT_VARIETY": 7, "bucket full": 3, "bucket not sampled": 1}
+
+
+def test_reasons_after_a_top_up(raw, conn, settings):
+    rows = [(f"d{i:03d}", "Denied", f"D{i}", "Y") for i in range(10)]
+    rows += [(f"p{i:03d}", "Approved", f"P{i}", "Y" if i < 2 else "N") for i in range(10)]
+    _table(raw.db, rows)
+    _config(raw.db, 10, {"Denied": 80, "Approved": 20})
+    _cap(raw.db, 51, "OON", OON_CAP, 4)
+    why = _reasons(raw, _run(conn, settings, "TOPUP"))
+    over = "Over cap OON: the sample already has its 4"
+    late = ("Bucket Approved full: its 2 slot(s) went to higher-ranked cases; the top-up filled the sample before "
+            "reaching it")
+    assert why == {**{f"d00{i}": over for i in range(4, 10)}, "p000": over, "p001": over, "p008": late, "p009": late}
+
+
+def test_a_dry_run_counts_the_reasons(raw, conn, settings):
+    _table(raw.db, [(f"a{i:03d}", "A", f"A{i}", "N") for i in range(6)])
+    _config(raw.db, 4, {"A": 100})
+    out = _run(conn, settings, dry_run=True)
+    assert out["not_picked"] == {"bucket full": 2}
