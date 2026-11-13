@@ -77,8 +77,9 @@ def test_runs_and_errors_commands(local_db, capsys):
     cli.main(["run", "--project", "UMCM", "--run-key", "K2", "--run-param", "batch_id=2026-08-01"])
     capsys.readouterr()
     assert cli.main(["runs", "--project", "UMCM", "--table", "T1", "--run-type", "WKLY"]) == 0
-    assert {r["run_key"]: r["run_stat"] for r in json.loads(capsys.readouterr().out)["runs"]} == \
-        {"K1": "ERROR", "K2": "COMPLETED"}
+    listed = json.loads(capsys.readouterr().out)["runs"]
+    assert {r["run_key"]: r["run_stat"] for r in listed} == {"K1": "ERROR", "K2": "COMPLETED"}
+    assert all("rerun_rsn_txt" in r and "rules_as_of_dt" in r for r in listed)
     assert cli.main(["errors"]) == 0
     assert [e["run_key"] for e in json.loads(capsys.readouterr().out)["errors"]] == ["K1"]
     cli.main(["run", "--project", "UMCM", "--run-key", "K1", "--run-param", "batch_id=2026-08-01"])

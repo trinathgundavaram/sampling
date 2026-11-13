@@ -251,18 +251,28 @@ def _triggered_by(dag_run) -> str:
     return f"airflow-{run_type}" + (f"-{user}" if user else "")
 
 
+def _resume_since(dag_run, tz: str, retry: bool) -> Optional[datetime]:
+    started = getattr(dag_run, "start_date", None) if retry else None
+    return started.astimezone(zone(tz)).replace(tzinfo=None) if started else None
+
+
+def _is_retry(context) -> bool:
+    ti = context.get("ti")
+    return bool(ti and int(getattr(ti, "try_number", 1) or 1) > 1)
+
+
 def run_sampling_task(variable_key: str, overrides: Optional[dict] = None, scope_index: Optional[int] = None,
-                      dag_run=None, connection_id: Optional[str] = None) -> dict:
+                      dag_run=None, connection_id: Optional[str] = None, retry: bool = False) -> dict:
     sampling_log = logging.getLogger("sampling")
     previous = sampling_log.level
     try:
-        return _run_sampling_task(variable_key, overrides, scope_index, dag_run, connection_id)
+        return _run_sampling_task(variable_key, overrides, scope_index, dag_run, connection_id, retry)
     finally:
         sampling_log.setLevel(previous)
 
 
 def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index: Optional[int], dag_run,
-                       connection_id: Optional[str]) -> dict:
+                       connection_id: Optional[str], retry: bool = False) -> dict:
     try:
         config = resolve_config(variable_key, overrides, scope_index)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
@@ -276,7 +286,8 @@ def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index
                   "extra_filters": config.get("extra_filters") or None,
                   "seed": config.get("seed"), "as_of": _as_of(config, dag_run, settings.timezone),
                   "triggered_by": _triggered_by(dag_run), "dry_run": _flag(config.get("dry_run"), False),
-                  "rerun_reason": _rerun_reason(config), "rules_as_of": _rules_as_of(config)}
+                  "rerun_reason": _rerun_reason(config), "rules_as_of": _rules_as_of(config),
+                  "resume_since": _resume_since(dag_run, settings.timezone, retry)}
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
 
@@ -288,6 +299,9 @@ def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index
         logger.info("rules and config in effect on %s", kwargs["rules_as_of"])
     if kwargs["rerun_reason"] is not None:
         logger.info("rerun_reason from the Variable: %r", kwargs["rerun_reason"])
+    if kwargs["resume_since"]:
+        logger.info("retry: samples already made by this Airflow run (since %s) are kept, not run again",
+                    kwargs["resume_since"])
     try:
         conn = connect_teradata(settings.meta_db, settings.access_lock)
     except Exception as e:
@@ -322,7 +336,7 @@ def _sample(report: dict) -> str:
 
 
 def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=None,
-                   connection_id: Optional[str] = None) -> dict:
+                   connection_id: Optional[str] = None, retry: bool = False) -> dict:
     try:
         variable = _load_variable(variable_key)
         tz = variable.get("schedule_timezone") or variable.get("timezone") or DEFAULT_TIMEZONE
@@ -335,7 +349,7 @@ def run_timed_task(variable_key: str, overrides: Optional[dict] = None, dag_run=
         entry = "the Variable's own scope" if index is None else f"runs entry {index + 1}"
         logger.info("SAMPLING | %s", entry)
         try:
-            runs += run_sampling_task(variable_key, overrides, index, dag_run, connection_id).get("runs", [])
+            runs += run_sampling_task(variable_key, overrides, index, dag_run, connection_id, retry).get("runs", [])
         except Exception as e:
             logger.error("SAMPLING | %s | failed: %s", entry, e)
             failed.append((f"{entry}: {e}", isinstance(e, AirflowFailException)))
@@ -426,7 +440,7 @@ def _minutes(dag_config: dict, key: str, default: timedelta) -> timedelta:
     return timedelta(minutes=value) if value > 0 else default
 
 
-def _task_id(scope: dict, index: int, scopes: list) -> str:
+def _task_id(index: int, scopes: list) -> str:
     if len(scopes) == 1:
         return "run_sampling"
 
@@ -475,10 +489,11 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
 
     def run(scope_index: Optional[int], **context):
         return run_sampling_task(variable_key, overrides=_overrides(context), scope_index=scope_index,
-                                 dag_run=context.get("dag_run"))
+                                 dag_run=context.get("dag_run"), retry=_is_retry(context))
 
     def run_timed(**context):
-        return run_timed_task(variable_key, overrides=_overrides(context, names), dag_run=context.get("dag_run"))
+        return run_timed_task(variable_key, overrides=_overrides(context, names), dag_run=context.get("dag_run"),
+                              retry=_is_retry(context))
 
     try:
         scopes = run_scopes(dag_config)
@@ -492,10 +507,10 @@ def build_sampling_dag(dag_id: str, variable_key: str) -> DAG:
         tasks = [PythonOperator(task_id="run_sampling", dag=dag, python_callable=run_timed,
                                 execution_timeout=timeout, show_return_value_in_logs=False, **pool)]
     else:
-        tasks = [PythonOperator(task_id=_task_id(scope, i, scopes), dag=dag, python_callable=run,
+        tasks = [PythonOperator(task_id=_task_id(i, scopes), dag=dag, python_callable=run,
                                 op_kwargs={"scope_index": i if dag_config.get("runs") else None},
                                 execution_timeout=timeout, show_return_value_in_logs=False, **pool)
-                 for i, scope in enumerate(scopes)]
+                 for i in range(len(scopes))]
     task_ids.extend(t.task_id for t in tasks)
 
     given = "{{ conf_value(dag_run, params, '%s') }}"

@@ -782,8 +782,9 @@ def select(rows: list, n: int, method: str, rng: random.Random, cap: Optional[in
     if method == "SYSTEMATIC":
         if n >= len(rows):
             return list(rows)
-        k = max(1, len(rows) // n)
-        return rows[rng.randint(1, k) - 1::k][:n]
+        step = len(rows) / n
+        start = rng.random() * step
+        return [rows[min(len(rows) - 1, int(start + i * step))] for i in range(n)]
     raise ConfigError(f"unknown smpl_method_cd {method!r}")
 
 
@@ -817,21 +818,17 @@ class Stratifier:
         self.target = target
         return self._allocate(rows, target, 0, "")
 
-    def top_up(self, rest: list, n: int, chosen: list) -> list:
-        cap = self.cap_for(self.target)
-        pool = select(rest, len(rest), self.method, self.rng("TOPUP"), cap, self.use_diversity)
-        if not (self.use_diversity and cap):
-            return pool[:n]
+    def top_up(self, rest: list, chosen: list) -> tuple:
+        pool = select(rest, len(rest), self.method, self.rng("TOPUP"), None, self.use_diversity)
         used = {}
         for r in chosen:
             used[_norm(r.get(DIVERSITY))] = used.get(_norm(r.get(DIVERSITY)), 0) + 1
-        out = []
-        for r in pool:
-            v = _norm(r.get(DIVERSITY))
-            if len(out) < n and used.get(v, 0) < cap:
-                used[v] = used.get(v, 0) + 1
-                out.append(r)
-        return out
+        return pool, self.cap_for(self.target), used
+
+    def diversity_why(self, row: dict, cap: Optional[int], used: dict, where: str = "the sample") -> Optional[str]:
+        if cap is None or used.get(_norm(row.get(DIVERSITY)), 0) < cap:
+            return None
+        return f"Diversity cap: {_label(row.get(DIVERSITY))} already has {cap} in {where}"
 
     def unselect(self, path: str) -> None:
         self._count(path, -1)
@@ -847,9 +844,6 @@ class Stratifier:
                 node["selected"] += step
         if path in self.leaves and self.leaves[path] is not self.nodes.get(path):
             self.leaves[path]["selected"] += step
-
-    def room(self, path: str) -> bool:
-        return self.ceiling_hit(path) is None
 
     def ceiling_hit(self, path: str) -> Optional[str]:
         parts = path.split("/")
@@ -1080,7 +1074,13 @@ def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) 
     for row, name in over:
         path = row.get("_path")
         pool = pools.get(path, [])
-        new = next((c for c in pool if caps.blocking(c) is None and diverse(path, c)), None)
+        new = None
+        for c in pool:
+            if caps.blocking(c) is not None:
+                c["_why"] = caps.why(c)
+            elif diverse(path, c):
+                new = c
+                break
         if new:
             spread.setdefault(path, {}).setdefault(_norm(new.get(DIVERSITY)), 0)
             spread[path][_norm(new.get(DIVERSITY))] += 1
@@ -1116,8 +1116,15 @@ def explain_left_out(candidates: list, chosen: list, strat: "Stratifier") -> dic
             kind = f"cap {kind}"
         elif why and why.startswith("Bucket ") and " at its most of " in why:
             kind = "bucket at its most"
+        elif why and why.startswith("Diversity cap: "):
+            kind = "diversity cap"
         elif why:
             kind = "sample full"
+        elif strat.use_diversity and leaf.get("target") and leaf.get("selected", 0) < leaf["target"]:
+            limit = strat.cap_for(leaf["target"])
+            why = (f"Diversity cap: {_label(r.get(DIVERSITY))} already has {limit} in bucket {path}" if limit
+                   else full)
+            kind = "diversity cap" if limit else "bucket full"
         else:
             why, kind = full, "bucket full"
         r["_why"] = why[:1000]
@@ -1203,7 +1210,7 @@ def fetch_output(conn: Connection, queries: dict, sample: Sample, chosen: list) 
     return out
 
 
-def _retire_output(conn, queries, run_key, now, where: str = "", params: Sequence = ()):
+def _retire_output(conn, s, queries, key, run_key, now, where: str = "", params: Sequence = ()):
     have = {c.lower(): c for c in queries["output_columns"]}
     sets, values = [f"{have['etl_is_curr_ind']} = 'N'"], []
     if "etl_is_del_ind" in have:
@@ -1211,9 +1218,19 @@ def _retire_output(conn, queries, run_key, now, where: str = "", params: Sequenc
     if "etl_last_updt_dt_tm" in have:
         sets.append(f"{have['etl_last_updt_dt_tm']} = ?")
         values.append(now)
-    conn.execute(f"UPDATE {queries['tgt_table_nm']} SET {', '.join(sets)} "
-                 f"WHERE {have['smpl_run_key']} = ? AND {have['etl_is_curr_ind']} = 'Y'"
-                 f"{' AND ' + where if where else ''}", [*values, run_key, *params])
+    conds, args = [f"{have['smpl_run_key']} = ?", f"{have['etl_is_curr_ind']} = 'Y'"], [run_key]
+    if "smpl_run_id" in have:
+        conds.append(f"{have['smpl_run_id']} IN (SELECT Smpl_Run_ID FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun "
+                     f"WHERE {_same_sample()} AND Run_Key = ?)")
+        args += [*key, run_key]
+    elif "smpl_run_ty" in have:
+        conds.append(f"UPPER({have['smpl_run_ty']}) = ?")
+        args.append(key[2])
+    if where:
+        conds.append(where)
+        args += list(params)
+    conn.execute(f"UPDATE {queries['tgt_table_nm']} SET {', '.join(sets)} WHERE {' AND '.join(conds)}",
+                 [*values, *args])
 
 
 def _write_output(conn, s, queries, run_id, run_key, run_type, as_of, output: dict, cases: list, now):
@@ -1262,7 +1279,7 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
             Selection_Stat, Not_Selected_Rsn_Txt, Curr_Ind, Load_Dtts, LastUpdt_Dtts
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
     if output is not None:
-        _retire_output(conn, queries, run_key, now)
+        _retire_output(conn, s, queries, key, run_key, now)
         _write_output(conn, s, queries, run_id, run_key, key[2], as_of, output,
                       [(r["_key"], order[r["_key"]], r.get("_path")) for r in chosen], now)
 
@@ -1298,11 +1315,31 @@ def _log_selection(label: str, summary: dict, topped: int) -> None:
         log.warning("%s | %s | short of the target by %d", STEP, label, summary["shortfall"])
 
 
+def _made_since(live: Optional[dict], since: Optional[datetime]) -> bool:
+    started = (live or {}).get("start_dtts")
+    return bool(since and isinstance(started, datetime) and started >= since)
+
+
+def _resumed(s: Settings, summary: dict, live: dict, label: str) -> dict:
+    target = live.get("tgt_table_nm")
+    summary.update(status="COMPLETED", resumed=True, smpl_run_id=live["smpl_run_id"],
+                   in_scope=live.get("in_scope_cnt"), excluded=live.get("excluded_cnt"),
+                   candidates=live.get("candidate_cnt") or 0, selected=live.get("selected_cnt") or 0,
+                   shortfall=live.get("shortfall_cnt"), target_cnt=live.get("target_cnt"),
+                   config_hash=live.get("config_hash"))
+    if str(target or "").strip():
+        summary["tgt_table_nm"] = f"{s.resolve_env(str(live.get('tgt_schema_nm') or '').strip())}." \
+                                  f"{s.resolve_env(str(target).strip())}"
+    log.info("%s | %s | run_key %s already sampled by run %s earlier in this Airflow run (started %s): kept, not "
+             "run again", STEP, label, summary["run_key"], live["smpl_run_id"], live.get("start_dtts"))
+    return summary
+
+
 def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = None,
                  run_params: Optional[dict] = None, seed: Optional[int] = None, triggered_by: str = "SYSTEM",
                  as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None,
                  extra_filters: Optional[str] = None, rerun_reason: Optional[str] = None,
-                 rules_as_of: Optional[date] = None) -> dict:
+                 rules_as_of: Optional[date] = None, resume_since: Optional[datetime] = None) -> dict:
     as_of = as_of or s.today()
     started = s.now()
     rules_day = rules_as_of or s.today()
@@ -1382,6 +1419,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         live = None if early else current_run(conn, s, sample.key, run_key)
         final = live if live and _up(live.get("run_stat")) == "FINAL" else None
+        if _made_since(live, resume_since) and rerun_reason is None and not dry_run:
+            return _resumed(s, summary, live, label)
         if not dry_run:
             _start_run(conn, s, run_id, run_key, sample, run_seed, as_of, params_text, triggered_by, started,
                        force_reason if final else None, rerun_reason, rules_day)
@@ -1462,14 +1501,16 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
             taken = {r["_key"] for r in chosen}
             rest = [r for r in candidates if r["_key"] not in taken and not r.get("_skip")]
-            for r in strat.top_up(rest, len(rest), chosen):
+            pool, spread_cap, used = strat.top_up(rest, chosen)
+            for r in pool:
                 if len(extra) >= target - len(chosen):
                     r["_why"] = r.get("_why") or "top up"
                     continue
-                blocked = caps.why(r) or strat.ceiling_hit(r.get("_path"))
+                blocked = caps.why(r) or strat.ceiling_hit(r.get("_path")) or strat.diversity_why(r, spread_cap, used)
                 if blocked:
                     r["_why"] = blocked
                     continue
+                used[_norm(r.get(DIVERSITY))] = used.get(_norm(r.get(DIVERSITY)), 0) + 1
                 r.pop("_why", None)
                 caps.take(r)
                 strat.add(r.get("_path"))
@@ -1681,7 +1722,7 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
                 [flag, order, rank, status, linked, reason[:1000], by, now, now, run_id, case])
         if output is not None:
             where = []
-            _retire_output(conn, queries, run_key, now,
+            _retire_output(conn, s, queries, key, run_key, now,
                            _key_condition(sample.keys, gone, where), where)
             _write_output(conn, s, queries, run_id, run_key, key[2], run.get("as_of_dt_key"), output,
                           [(new["case_key"], old["selection_order_nbr"], new["stratum_path_txt"])], now)

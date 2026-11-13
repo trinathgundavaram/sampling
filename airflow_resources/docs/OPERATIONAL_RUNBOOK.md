@@ -79,7 +79,9 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 A failure closes the run row as `ERROR` with `Error_Ty` and a one-line `Error_Txt` (the error type and the
 database's message; several configuration problems: the first, then `(+N more: see the task log)`). Every problem
 and a technical error's traceback are in the task log only. A configuration problem fails the task at once; a
-technical one is retried (`retries`).
+technical one is retried (`retries`). A retry keeps the samples its Airflow run already made: a scope with several
+samples where one failed runs only the rest again (the others are reported with `"resumed": true`), so a retry
+never needs `rerun_reason`.
 
 ## 3. Tables: map and roles
 
@@ -332,8 +334,9 @@ The `ETL_*` and `SMPL_*` columns are always set by sampling, **even when the sou
 has are written; it must have the two required ones and the key columns. A column that is neither in the source nor
 in the list above fails the run as `CONFIG_ERROR`; `validate --check-sql` reports it before a run. A rerun of a
 cycle retires the current rows of its `SMPL_RUN_KEY`, as the framework's loads do (`ETL_IS_CURR_IND = 'N'`,
-`ETL_IS_DEL_IND = 'Y'`, `ETL_LAST_UPDT_DT_TM` now), so give each sample its own table (two run types sharing one
-table would retire each other's rows of the same run key). The service account needs SELECT, INSERT and UPDATE on
+`ETL_IS_DEL_IND = 'Y'`, `ETL_LAST_UPDT_DT_TM` now), and only its own: with `SMPL_RUN_ID` in the table, the rows of
+that sample's earlier runs; without it, the rows of its `SMPL_RUN_TY`. Samples may share a table when it has
+`SMPL_RUN_ID` (without it, two tables of the same run type sharing one would still retire each other's rows). The service account needs SELECT, INSERT and UPDATE on
 it. OUTPUT rules are no longer used (a row of that class is reported: set `Active_Ind = 0`).
 
 ## 5. Tables the engine writes (read only)
@@ -384,7 +387,7 @@ and counts per bucket, are a `GROUP BY` on it.
 |---|---|---|
 | `RANKED` | The first n of each bucket in priority order | PRIORITY rules |
 | `RANDOM` | A seeded shuffle of each bucket (seed on the run row; rerun with `--seed` to reproduce) | – |
-| `SYSTEMATIC` | Seeded start, then every k-th in priority order. No `Diversity_Sql_Txt` | PRIORITY rules |
+| `SYSTEMATIC` | Seeded start, then every (candidates ÷ n)-th in priority order, the step kept exact (199 for 100: about every 2nd, down to the last ranks). No `Diversity_Sql_Txt` | PRIORITY rules |
 
 ### 6.2 Rule classes and their values
 | Column | Values |
@@ -557,7 +560,8 @@ ORDER BY 2, 1;
 ```
 Every candidate that was not picked has `Not_Selected_Rsn_Txt`, for example
 `Bucket IP Medical/Denied full: its 17 slot(s) went to higher-ranked cases`,
-`Over cap PER_CPT_CODE: L3000 already has 3 in the sample`, `Over cap BH_MAX_8_PCT: BH already has its 12` or
+`Over cap PER_CPT_CODE: L3000 already has 3 in the sample`, `Over cap BH_MAX_8_PCT: BH already has its 12`,
+`Diversity cap: X already has 2 in the sample` or
 `Bucket OTHER/Denied is not sampled`. The run's report counts them (`not_picked`) and the task log has one
 `not picked | <kind> | n case(s)` line per kind. `Stat_Rsn_Txt` stays the reason of a manual replace.
 The targets per bucket are in the task log (`SAMPLING | <sample> | bucket <path> | selected n of m candidate(s),
@@ -647,7 +651,8 @@ The selected, `REPLACED` and `REPLACEMENT` rows of current runs stay, so the sam
 taken out and why stay readable, and no-repeat rules keep working. The run rows (with each run's totals, rules and
 hash) are never deleted. Not touched: the target tables.
 
-D must be at least the longest `Lookback_Days` of the active history rules that may read the sample's rows (the
+D must be at least the longest `Lookback_Days` of the active history rules in effect now or later (`Eff_End_Dt` not
+past; an expired version does not count) that may read the sample's rows (the
 `SAMPLE`-scope rules of its table and run type, the `TABLE`-scope rules of its table, the `PROJECT`-scope rules of
 its project, `*` included), or the sample is skipped with the reason: a carry-over or a
 no-repeat rule would otherwise lose the cycles it looks back on. A replacement (10.9) needs the unselected

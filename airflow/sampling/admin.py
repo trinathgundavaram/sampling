@@ -12,13 +12,14 @@ from sampling.settings import ConfigError, Settings
 log = logging.getLogger(__name__)
 
 
-def history_days(conn: Connection, s: Settings, key) -> int:
+def history_days(conn: Connection, s: Settings, key, as_of: Optional[date] = None) -> int:
     project, table, run_type = sample_key(key)
     rows = conn.query(f"""
         SELECT Table_Nm, Run_Ty, Rule_Ty, Lookback_Days, History_Scope_Cd
         FROM {s.meta_db}.GOVT_RGLTRY_SamplingRule
-        WHERE Active_Ind = 1 AND UPPER(Rule_Class_Cd) IN ('EXCLUSION', 'PRIORITY') AND UPPER(Project_Cd) = ?""",
-        [project])
+        WHERE Active_Ind = 1 AND Eff_End_Dt >= ? AND UPPER(Rule_Class_Cd) IN ('EXCLUSION', 'PRIORITY')
+          AND UPPER(Project_Cd) = ?""",
+        [as_of or s.today(), project])
 
     def reads(r) -> bool:
         scope = _up(r["history_scope_cd"], "SAMPLE")
@@ -38,7 +39,8 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
         raise ConfigError(f"older_than_days must be a whole number, got {older_than_days!r}") from None
     if days < 1:
         raise ConfigError("older_than_days must be >= 1")
-    cutoff = (as_of or s.today()) - timedelta(days=days)
+    day = as_of or s.today()
+    cutoff = day - timedelta(days=days)
     db = s.meta_db
     same = _same_sample()
     retired = (f"SELECT Smpl_Run_ID FROM {db}.GOVT_RGLTRY_SamplingRun WHERE {same} AND Curr_Ind = 0 "
@@ -49,7 +51,7 @@ def purge_selections(conn: Connection, s: Settings, older_than_days: int, projec
     out = []
     for key in discover_configs(conn, s, project, table, run_type):
         entry = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "cutoff": cutoff.isoformat()}
-        needed = history_days(conn, s, key)
+        needed = history_days(conn, s, key, day)
         if days < needed:
             out.append({**entry, "skipped": f"history rules look back {needed} days: keep at least that many"})
             continue

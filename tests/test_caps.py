@@ -190,3 +190,17 @@ def test_a_dry_run_counts_the_reasons(raw, conn, settings):
     _config(raw.db, 4, {"A": 100})
     out = _run(conn, settings, dry_run=True)
     assert out["not_picked"] == {"bucket full": 2}
+
+
+def test_a_candidate_passed_over_for_a_cap_says_so(raw, conn, settings):
+    raw.db.execute("CREATE TABLE u (case_id VARCHAR, disp VARCHAR, cpt VARCHAR, oon VARCHAR)")
+    raw.db.executemany("INSERT INTO u VALUES (?, 'A', ?, 'N')",
+                       [("a0", "X"), ("a1", "X"), ("a2", "X"), ("a3", "Y"), ("a4", "Z")])
+    insert_config(raw.db, src_table_nm="u", exclusion_sql=None, scope_sql_txt=None, target_cnt=2, order_by="case_id")
+    _cap(raw.db, 50, "ONE_PER_CPT", CPT_CAP, 1, rule_ty="PER_VALUE")
+    out = _run(conn, settings)
+    assert out["not_picked"] == {"cap ONE_PER_CPT": 2, "bucket full": 1}
+    reasons = dict(raw.db.execute("SELECT Case_Key, Not_Selected_Rsn_Txt FROM GOVT_RGLTRY_SampleSelection "
+                                  "WHERE Selected_Ind = 0").fetchall())
+    assert reasons["case_id=a2"] == reasons["case_id=a1"] == "Over cap ONE_PER_CPT: X already has 1 in the sample"
+    assert reasons["case_id=a4"].startswith("Bucket ALL full")

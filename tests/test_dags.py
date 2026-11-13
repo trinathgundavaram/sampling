@@ -309,3 +309,12 @@ def test_rules_as_of_from_the_variable_or_a_trigger(monkeypatch, variable, raw):
     variable({**BASE, "rules_as_of": "June 30"})
     with pytest.raises(AirflowFailException, match="rules_as_of must be YYYY-MM-DD"):
         _run_task(monkeypatch, raw)
+
+
+def test_a_retry_passes_the_start_of_its_airflow_run():
+    from types import SimpleNamespace
+    run = SimpleNamespace(start_date=datetime(2026, 8, 1, 13, 0, tzinfo=ZoneInfo("UTC")))
+    assert dags._resume_since(run, "America/Chicago", True) == datetime(2026, 8, 1, 8, 0)
+    assert dags._resume_since(run, "America/Chicago", False) is None
+    assert dags._is_retry({"ti": SimpleNamespace(try_number=2)})
+    assert not dags._is_retry({"ti": SimpleNamespace(try_number=1)}) and not dags._is_retry({})

@@ -137,3 +137,15 @@ def test_cli_purge(raw, monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(raw, "close", lambda: None)
     _sample(raw.db)
     assert cli.main(["purge", "--project", "UMCM", "--older-than-days", "30"]) == 0
+
+
+def test_the_purge_guard_reads_rule_versions_in_effect_or_to_come(raw, conn, settings):
+    _sample(raw.db)
+    insert_rule(raw.db, "PRIORITY", 21, "carry_over", rule_ty="PRIOR_CANDIDATE", lookback_days=365,
+                eff_start_dt=date(2025, 1, 1), eff_end_dt=date(2026, 6, 30))
+    insert_rule(raw.db, "PRIORITY", 21, "carry_over", rule_ty="PRIOR_CANDIDATE", lookback_days=30,
+                eff_start_dt=date(2026, 7, 1))
+    assert history_days(conn, settings, key(1), AS_OF) == 30
+    insert_rule(raw.db, "PRIORITY", 22, "carry_over_2027", rule_ty="PRIOR_CANDIDATE", lookback_days=200,
+                eff_start_dt=date(2027, 1, 1))
+    assert history_days(conn, settings, key(1), AS_OF) == 200

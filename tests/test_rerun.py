@@ -68,3 +68,29 @@ def test_a_final_sample_still_needs_the_force_reason(ready, conn, settings, raw)
     finalize_run(Connection(raw, access_lock=False), settings, key(1), "K", "auditor")
     assert _run(conn, settings, rerun_reason="redo")["error_type"] == "FINALIZED"
     assert _run(conn, settings, force_reason="approved by audit")["status"] == "COMPLETED"
+
+
+def test_a_retry_keeps_the_samples_its_airflow_run_already_made(ready, conn, settings, raw):
+    from conftest import insert_config
+    from sampling.engine import run_scope
+    insert_config(raw.db, 2, src_table_nm="later_src", exclusion_sql=None, order_by="case_id")
+    kw = dict(run_key="K", run_params=PARAMS, as_of=AS_OF)
+    since = settings.now()
+    first = run_scope(conn, settings, project="UMCM", **kw)
+    assert [(r["table_nm"], r["status"]) for r in first["runs"]] == [("T1", "COMPLETED"), ("T2", "ERROR")]
+    build_source(raw.db, table="later_src")
+    retry = run_scope(conn, settings, project="UMCM", resume_since=since, **kw)
+    assert [(r["table_nm"], r["status"]) for r in retry["runs"]] == [("T1", "COMPLETED"), ("T2", "COMPLETED")]
+    kept = retry["runs"][0]
+    assert kept["resumed"] and kept["smpl_run_id"] == first["runs"][0]["smpl_run_id"]
+    assert kept["selected"] == first["runs"][0]["selected"]
+    assert ready.db.execute("SELECT COUNT(*) FROM GOVT_RGLTRY_SamplingRun WHERE Table_Nm = 'T1'").fetchone() == (1,)
+
+
+def test_a_sample_from_before_the_airflow_run_still_needs_a_reason(ready, conn, settings):
+    _run(conn, settings)
+    later = settings.now()
+    out = _run(conn, settings, resume_since=later)
+    assert out["error_type"] == "RERUN_REASON"
+    redo = _run(conn, settings, resume_since=later, rerun_reason="source corrected")
+    assert redo["status"] == "COMPLETED" and not redo.get("resumed")

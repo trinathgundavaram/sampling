@@ -395,3 +395,35 @@ def test_g_blank_param_without_a_param_rule_is_a_config_error(raw, conn, setting
     set_config(raw.db, scope_sql_txt="SELECT * FROM main.u WHERE batch = '{batch_id}'")
     out = _run(conn, settings, run_key="K", run_params={"batch_id": " "})
     assert out["status"] == "ERROR" and out["error_type"] == "CONFIG_ERROR" and "batch_id" in out["error"]
+
+
+def test_e_samples_sharing_a_target_table_keep_their_own_rows(raw, conn, settings):
+    raw.db.execute("CREATE TABLE src (case_id VARCHAR)")
+    raw.db.executemany("INSERT INTO src VALUES (?)", [(f"c{i:02d}",) for i in range(20)])
+    raw.db.execute(f"CREATE TABLE out_t (case_id VARCHAR, {SAMPLE_COLS})")
+    for i, (table, run_ty) in enumerate((("T1", "WKLY"), ("T1", "MNT"), ("T2", "WKLY")), start=1):
+        insert_config(raw.db, i, src_table_nm="src", exclusion_sql=None, scope_sql_txt=None, target_cnt=3,
+                      order_by="case_id", run_ty=run_ty, table_nm=table, tgt_schema_nm="main", tgt_table_nm="out_t")
+        assert run_sampling(conn, settings, ("UMCM", table, run_ty), run_key="R",
+                            as_of=AS_OF)["status"] == "COMPLETED"
+    current = "SELECT COUNT(*) FROM out_t WHERE etl_is_curr_ind = 'Y'"
+    assert _rows(raw, current) == [(9,)]
+    run_sampling(conn, settings, key(1, run_ty="MNT"), run_key="R", as_of=AS_OF, rerun_reason="redo")
+    assert _rows(raw, current) == [(9,)]
+    assert _rows(raw, "SELECT smpl_run_ty, COUNT(*) FROM out_t WHERE etl_is_curr_ind = 'N' GROUP BY 1") == [("MNT", 3)]
+
+
+def test_d_cases_held_back_by_the_diversity_cap_say_so(raw, conn, settings):
+    _cases_table(raw.db, _cases("a", 20, "D", code="X") + _cases("b", 20, "D", code="Y") + _cases("c", 3, "D", code="Z"))
+    _config(raw.db, 9, diversity_sql_txt="code", diversity_cap_cnt=2)
+    out = _run(conn, settings)
+    assert out["selected"] == 6 and out["not_picked"] == {"diversity cap": 37}
+    reasons = dict(_rows(raw, "SELECT Case_Key, Not_Selected_Rsn_Txt FROM GOVT_RGLTRY_SampleSelection "
+                              "WHERE Selected_Ind = 0"))
+    assert reasons["case_id=a005"] == "Diversity cap: X already has 2 in the sample"
+    set_config(raw.db, shortfall_cd="NONE")
+    out = _run(conn, settings, run_key="no_top_up")
+    assert out["not_picked"] == {"diversity cap": 37}
+    reasons = dict(_rows(raw, "SELECT Case_Key, Not_Selected_Rsn_Txt FROM GOVT_RGLTRY_SampleSelection "
+                              "WHERE Selected_Ind = 0 AND Run_Key = 'no_top_up'"))
+    assert reasons["case_id=c002"] == "Diversity cap: Z already has 2 in bucket ALL"

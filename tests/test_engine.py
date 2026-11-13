@@ -319,3 +319,13 @@ def test_a_wrong_time_zone_name_is_still_a_config_error():
     st.zone.cache_clear()
     with pytest.raises(ConfigError, match="not a known time zone"):
         Settings.from_mapping({"meta_db": "M", "timezone": "America/Chicagoo"})
+
+
+def test_systematic_spreads_over_every_rank():
+    rows = [{"i": i} for i in range(199)]
+    for seed in range(20):
+        picked = [r["i"] for r in select(rows, 100, "SYSTEMATIC", random.Random(seed))]
+        assert len(set(picked)) == 100 and picked == sorted(picked)
+        assert picked[-1] >= 197 and all(1 <= b - a <= 2 for a, b in zip(picked, picked[1:]))
+    starts = {select(rows[:10], 4, "SYSTEMATIC", random.Random(s))[0]["i"] for s in range(50)}
+    assert starts == {0, 1, 2}

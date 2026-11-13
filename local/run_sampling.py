@@ -28,8 +28,8 @@ PREFIX = "SAMPLING_"
 
 def read_env_file(path: Path) -> dict:
     out = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.removeprefix("export ").split("=", 1)
@@ -179,7 +179,8 @@ def cmd_runs(conn, s, args) -> tuple:
             where.append(f"{col} = ?")
             params.append(value)
     rows = conn.query(f"SELECT TOP {int(args.limit)} Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, Run_Stat, "
-                      f"Curr_Ind, Config_Hash, Finalized_By, Override_Rsn_Txt, Smpl_Method_Cd, Random_Seed_Nbr, "
+                      f"Curr_Ind, Config_Hash, Finalized_By, Override_Rsn_Txt, Rerun_Rsn_Txt, Rules_As_Of_Dt, "
+                      f"Smpl_Method_Cd, Random_Seed_Nbr, "
                       f"Target_Ty, Target_Val, Target_Cnt, In_Scope_Cnt, Excluded_Cnt, Candidate_Cnt, Selected_Cnt, Shortfall_Cnt, "
                       f"Start_Dtts, End_Dtts, Triggered_By, Error_Ty, Error_Txt "
                       f"FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE {' AND '.join(where)} ORDER BY Start_Dtts DESC",

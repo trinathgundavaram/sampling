@@ -55,8 +55,9 @@ local/                                      the local version (command line, dev
    framework scopes its batches; one that fails does not stop the others. The task's report (JSON) is in the log
    and is the task's XCom.
 4. **The task fails** on a configuration problem at once (no retry), and on a technical error (connection, a
-   failed query, a failed write) after `retries` (default 1, 5 minutes apart). Every run is idempotent: a retry or
-   a rerun writes a new attempt and marks the earlier one not current.
+   failed query, a failed write) after `retries` (default 1, 5 minutes apart). A retry keeps the samples this
+   Airflow run already made and runs only the rest (no `rerun_reason` needed); a rerun writes a new attempt and
+   marks the earlier one not current.
 
 No `.env` file and no secrets manager: on Airflow the credentials come from the Connection only and the settings
 from the Variable only (a `dev.env` or `SAMPLING_*` variables on a worker are ignored; they apply to the local
