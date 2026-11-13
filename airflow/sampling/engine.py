@@ -12,6 +12,7 @@ from decimal import Decimal
 from fnmatch import fnmatchcase
 from typing import Optional, Sequence
 
+from sampling import __version__
 from sampling.db import ERROR_TEXT_MAX, Connection, error_text, generate_run_id, log_sql, substitute_params
 from sampling.settings import ConfigError, Settings
 
@@ -79,8 +80,25 @@ DIVERSITY_RULE = {"rule_id": "div", "rule_class_cd": "DIVERSITY", "rule_nm": "Di
 DIVERSITY = "smp_r_div"
 SCOPE_ALIAS = "smp_scope"
 EXTRA_FILTERS = "extra_filters"
+CURRENT_ROWS = "current_rows"
+AS_SEEN = "_as_seen"
 RUN_KEY_MAX, RUN_PARAMS_MAX, USER_MAX = 250, 4000, 100
-BUILT_IN_PARAMS = {"as_of_date", "project_cd", "table_nm", "run_ty", "run_key", EXTRA_FILTERS}
+BUILT_IN_PARAMS = {"as_of_date", "project_cd", "table_nm", "run_ty", "run_key", EXTRA_FILTERS, CURRENT_ROWS}
+_CURRENT_ROWS_RE = re.compile(r"\{current_rows(?::([A-Za-z_][A-Za-z0-9_]*))?\}", re.IGNORECASE)
+
+
+def current_rows(as_seen: Optional[datetime] = None, alias: Optional[str] = None) -> str:
+    a = f"{alias}." if alias else ""
+    if as_seen is None:
+        return f"{a}ETL_IS_CURR_IND = 'Y' AND {a}ETL_IS_DEL_IND = 'N'"
+    at = f"TIMESTAMP '{as_seen:%Y-%m-%d %H:%M:%S.%f}'"
+    return (f"{a}ETL_LOAD_DT_TM <= {at} AND ({a}ETL_IS_CURR_IND = 'Y' OR {a}ETL_LAST_UPDT_DT_TM > {at}) "
+            f"AND ({a}ETL_IS_DEL_IND = 'N' OR {a}ETL_LAST_UPDT_DT_TM > {at})")
+
+
+def _expand(text: str, params: dict) -> str:
+    seen = (params or {}).get(AS_SEEN)
+    return _CURRENT_ROWS_RE.sub(lambda m: f"({current_rows(seen, m.group(1))})", text) if text else text
 
 
 def _up(value, default: str = "") -> str:
@@ -372,7 +390,7 @@ def round_target(value: float, rounding_cd: str) -> int:
     if mode == "CEIL":
         return max(0, math.ceil(value - 1e-9))
     if mode == "ROUND":
-        return max(0, round(value))
+        return max(0, math.floor(value + 0.5 + 1e-9))
     return max(0, math.floor(value + 1e-9))
 
 
@@ -517,7 +535,7 @@ def _col(rule: dict) -> str:
 
 def build_queries(sample: Sample, s: Settings, params: dict) -> dict:
     def sql(text, identifier=False):
-        return substitute_params(s.resolve_env(str(text or "").strip(), identifier=identifier), params)
+        return substitute_params(_expand(s.resolve_env(str(text or "").strip(), identifier=identifier), params), params)
 
     c = sample.config
     source = f"{sql(c.get('src_schema_nm'), identifier=True)}.{sql(c.get('src_table_nm'), identifier=True)}"
@@ -571,7 +589,7 @@ def query_rules(sample: Sample) -> list:
 
 
 def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, key_queries: list,
-                     params: Optional[dict] = None) -> dict:
+                     params: Optional[dict] = None, matched: Optional[list] = None) -> dict:
     keys_lower = [k.lower() for k in sample.keys]
     counts, done = {}, {}
     for rule, text in key_queries:
@@ -584,6 +602,7 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
                      same[0], len(found))
             _set_rule_column(rows, rule, found, value_rule)
             counts[str(name)] = len(found)
+            _matched(matched, rule, rows, found)
             continue
         configured = sample.config.get("diversity_sql_txt") if rule is DIVERSITY_RULE else rule.get("rule_sql_txt")
         log_sql(f"{STEP} | {sample.label} | {what}", configured, text, params)
@@ -606,10 +625,16 @@ def mark_query_rules(conn: Connection, s: Settings, sample: Sample, rows: list, 
             need = " and one value column" if value_rule else ""
             raise ConfigError(f"{what} must return the key_columns {', '.join(sample.keys)}{need}: {e}") from None
         _set_rule_column(rows, rule, found, value_rule)
+        _matched(matched, rule, rows, found)
         done[(text.strip(), value_rule)] = (what, found)
         counts[str(name)] = len(found)
         log.info("%s | %s | %s returned %d case(s)", STEP, sample.label, what, len(found))
     return counts
+
+
+def _matched(matched: Optional[list], rule: dict, rows: list, found: dict) -> None:
+    if matched is not None:
+        matched.append((rule, sum(1 for row in rows if row["_key"] in found)))
 
 
 def _set_rule_column(rows: list, rule: dict, found: dict, value_rule: bool) -> None:
@@ -633,7 +658,7 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
             raise ValueError(f"PARAM rule {name}: {name.lower()} is set by the engine, give the rule another name")
         if name.lower() in passed:
             continue
-        text = substitute_params(s.resolve_env(_text(p), identifier=False), params)
+        text = substitute_params(_expand(s.resolve_env(_text(p), identifier=False), params), params)
         rows = conn.query(text)
         value = next(iter(rows[0].values()), None) if rows else None
         if value is None:
@@ -1007,7 +1032,7 @@ class Caps:
             if not _under(row.get("_path"), cap.get("parent_path_txt")):
                 continue
             value = row.get(col)
-            if per_value and value is not None:
+            if per_value and value is not None and str(value).strip():
                 out.append((i, _norm(value)))
             elif not per_value and value == 1:
                 out.append((i, ""))
@@ -1251,7 +1276,7 @@ class FinalizedMeanwhile(ConfigError):
 
 
 def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excluded, chosen, output,
-             as_of: date, forced: bool = False) -> int:
+             as_of: date, forced: bool = False, stats: Optional[list] = None) -> int:
     now = s.now()
     c, key = sample.config, sample.key
     live = None if forced else current_run(conn, s, key, run_key)
@@ -1278,6 +1303,7 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
             Selected_Ind, Selection_Order_Nbr, Bucket_Rank_Nbr, Excluded_Ind, Exclusion_Rsn_Txt, Stratum_Path_Txt,
             Selection_Stat, Not_Selected_Rsn_Txt, Curr_Ind, Load_Dtts, LastUpdt_Dtts
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""", rows, s.chunk_rows)
+    _write_stats(conn, s, run_id, run_key, key, as_of, stats or [], now)
     if output is not None:
         _retire_output(conn, s, queries, key, run_key, now)
         _write_output(conn, s, queries, run_id, run_key, key[2], as_of, output,
@@ -1293,6 +1319,44 @@ def _persist(conn, s, run_id, run_key, sample: Sample, queries, candidates, excl
         SET Curr_Ind = 0, LastUpdt_Dtts = ?, LastUpdt_ID = USER
         WHERE {_same_sample()} AND Run_Key = ? AND Smpl_Run_ID <> ? AND Curr_Ind = 1""",
         [now, *key, run_key, run_id])
+
+
+STAT_COLUMNS = ("Stat_Ty", "Stat_Nm", "Rule_ID", "Leaf_Ind", "Candidate_Cnt", "Target_Cnt", "Selected_Cnt",
+                "Limit_Cnt", "Over_Cnt", "Replaced_Cnt", "Case_Cnt", "Stat_Txt")
+
+
+def run_stats(sample: Sample, strat: "Stratifier", caps: "Caps", counts: dict, matched: list, not_picked: dict,
+              topped: int) -> list:
+    def rid(rule):
+        value = rule.get("rule_id")
+        return value if isinstance(value, int) else None
+
+    def stat(kind, name, **cols):
+        return {"Stat_Ty": kind, "Stat_Nm": str(name)[:1000], **cols}
+
+    out = [stat("BUCKET", path, Leaf_Ind=1 if path in strat.leaves else 0, Candidate_Cnt=n["candidates"],
+                Target_Cnt=n["target"], Selected_Cnt=n["selected"]) for path, n in strat.nodes.items()]
+    for cap, limit, _, _ in caps.rules:
+        report = caps.report[str(cap["rule_nm"])]
+        out.append(stat("CAP", cap["rule_nm"], Rule_ID=rid(cap), Limit_Cnt=limit, Over_Cnt=report["over"],
+                        Replaced_Cnt=report["replaced"]))
+    out += [stat("EXCLUSION", x["rule_nm"], Rule_ID=rid(x), Case_Cnt=counts.get(str(x["rule_nm"]), 0))
+            for x in sample.exclusions]
+    out += [stat("RULE", f"{rule['rule_class_cd']} {rule['rule_nm']}", Rule_ID=rid(rule), Case_Cnt=n)
+            for rule, n in matched]
+    out += [stat("NOT_PICKED", kind, Case_Cnt=n) for kind, n in not_picked.items()]
+    out.append(stat("TOPUP", "top-up", Case_Cnt=topped))
+    out += [stat("NOTE", note.split(":")[0], Stat_Txt=note[:1000]) for note in strat.notes]
+    return out
+
+
+def _write_stats(conn, s, run_id, run_key, key, as_of, stats: list, now) -> None:
+    columns = ["Smpl_Run_ID", "Project_Cd", "Table_Nm", "Run_Ty", "Run_Key", "As_Of_Dt_Key", "Stat_Seq_Nbr",
+               *STAT_COLUMNS, "Load_Dtts", "LastUpdt_Dtts"]
+    conn.executemany(f"INSERT INTO {s.meta_db}.GOVT_RGLTRY_SamplingRunStat ({', '.join(columns)}) "
+                     f"VALUES ({', '.join(['?'] * len(columns))})",
+                     [[run_id, *key, run_key, as_of, i + 1, *(r.get(c) for c in STAT_COLUMNS), now, now]
+                      for i, r in enumerate(stats)], s.chunk_rows)
 
 
 def _log_selection(label: str, summary: dict, topped: int) -> None:
@@ -1313,6 +1377,14 @@ def _log_selection(label: str, summary: dict, topped: int) -> None:
         log.warning("%s | %s | %s", STEP, label, note)
     if summary["shortfall"]:
         log.warning("%s | %s | short of the target by %d", STEP, label, summary["shortfall"])
+
+
+def _day(value) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
 
 
 def _made_since(live: Optional[dict], since: Optional[datetime]) -> bool:
@@ -1339,11 +1411,15 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                  run_params: Optional[dict] = None, seed: Optional[int] = None, triggered_by: str = "SYSTEM",
                  as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None,
                  extra_filters: Optional[str] = None, rerun_reason: Optional[str] = None,
-                 rules_as_of: Optional[date] = None, resume_since: Optional[datetime] = None) -> dict:
+                 rules_as_of: Optional[date] = None, resume_since: Optional[datetime] = None,
+                 replay: Optional[dict] = None) -> dict:
+    if replay:
+        as_of, dry_run, seed = _day(replay["as_of_dt_key"]), True, replay.get("random_seed_nbr")
+        rules_as_of = _day(replay.get("rules_as_of_dt")) or as_of
     as_of = as_of or s.today()
     started = s.now()
     rules_day = rules_as_of or s.today()
-    sample = load_config(conn, s, key, rules_day)
+    sample = run_sample(conn, s, replay) if replay else load_config(conn, s, key, rules_day)
     config, method = sample.config, sample.method
     project, table, run_type = sample.key
     rounding = _up(config.get("rounding_cd"), "FLOOR")
@@ -1356,8 +1432,14 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
 
     early = None
     try:
-        params = resolve_params(conn, s, sample, run_params, as_of)
-        run_key = substitute_params(template, params, escape=False)
+        if replay:
+            if not replay.get("run_parm_txt"):
+                raise ValueError(f"run {replay['smpl_run_id']} stored no run parameters, so it cannot be replayed")
+            params, run_key = json.loads(replay["run_parm_txt"]), replay["run_key"]
+            params[AS_SEEN] = replay["start_dtts"]
+        else:
+            params = resolve_params(conn, s, sample, run_params, as_of)
+            run_key = substitute_params(template, params, escape=False)
     except ValueError as e:
         early, params = ("config", "CONFIG_ERROR", e), dict(run_params or {})
     except Exception as e:
@@ -1374,7 +1456,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                                                     f"Run_Key holds")
         run_key = run_key[:RUN_KEY_MAX]
     params["run_key"] = run_key
-    if str(extra_filters or "").strip():
+    if str(extra_filters or "").strip() and not replay:
         params[EXTRA_FILTERS] = str(extra_filters).strip()
     params_text = json.dumps(params, default=str)
     if len(params_text) > RUN_PARAMS_MAX:
@@ -1417,7 +1499,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     given = rerun_reason is not None
     rerun_reason = str(rerun_reason or "").strip()[:1000] or None
     try:
-        live = None if early else current_run(conn, s, sample.key, run_key)
+        live = None if early or replay else current_run(conn, s, sample.key, run_key)
         final = live if live and _up(live.get("run_stat")) == "FINAL" else None
         if _made_since(live, resume_since) and rerun_reason is None and not dry_run:
             return _resumed(s, summary, live, label)
@@ -1483,7 +1565,8 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     try:
-        summary["rule_queries"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"], params)
+        matched = []
+        summary["rule_queries"] = mark_query_rules(conn, s, sample, rows, queries["key_queries"], params, matched)
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     except Exception as e:
@@ -1521,6 +1604,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             r["_why"] = f"Sample full: the target of {target} was reached first"
         chosen = sorted(chosen[:target], key=lambda r: r["_order"])
         summary["not_picked"] = explain_left_out(candidates, chosen, strat)
+        stats = run_stats(sample, strat, caps, counts, matched, summary["not_picked"], len(extra))
     except ConfigError as e:
         return fail("config", "CONFIG_ERROR", e)
     except Exception as e:
@@ -1531,7 +1615,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     _log_selection(label, summary, len(extra))
 
     output = None
-    if queries["output"]:
+    if queries["output"] and not replay:
         try:
             queries["output_columns"] = target_table_columns(conn, queries, sample)
             output = fetch_output(conn, queries, sample, chosen)
@@ -1543,6 +1627,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
             return fail("technical", "OUTPUT_FAILURE", e, exc_info=True)
 
     if dry_run:
+        summary["picked"] = [{"case_key": r["_key"], "order": i + 1, "path": r.get("_path")}
+                             for i, r in enumerate(chosen)]
+        if replay:
+            summary["scope_keys"] = sorted(r["_key"] for r in rows)
         summary["status"] = "COMPLETED"
         log.info("%s | %s | dry run complete: nothing written", STEP, label)
         return summary
@@ -1550,7 +1638,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     try:
         with conn.transaction():
             summary["retired_runs"] = _persist(conn, s, run_id, run_key, sample, queries, candidates, excluded,
-                                               chosen, output, as_of, forced=bool(force_reason))
+                                               chosen, output, as_of, forced=bool(force_reason), stats=stats)
             _finish_run(conn, s, run_id, summary)
     except FinalizedMeanwhile as e:
         return fail("config", "FINALIZED", str(e))
@@ -1583,6 +1671,302 @@ def finalize_run(conn: Connection, s: Settings, key, run_key: str, by: str) -> d
     log.info("FINALIZE | %s | run_key %s | run %s finalised by %s", ".".join(key), run_key, run["smpl_run_id"], by)
     return {"smpl_run_id": run["smpl_run_id"], "project_cd": key[0], "table_nm": key[1], "run_ty": key[2],
             "run_key": run_key, "status": "FINAL", "finalized_by": by}
+
+
+REVAL_STATUSES = ("MATCH", "DIFFERENT", "SOURCE_CHANGED", "FAILED")
+DIFF_TXT_MAX = 4000
+
+
+def _key_list(title: str, keys: list) -> str:
+    return f"{title} ({len(keys)}): {', '.join(keys)}" if keys else ""
+
+
+def _diff_text(missing: list, only_orig: list, only_replay: list) -> Optional[str]:
+    parts = [p for p in (_key_list("not in the source as it was", missing),
+                         _key_list("picked then, not now", only_orig),
+                         _key_list("picked now, not then", only_replay)) if p]
+    text = "; ".join(parts)
+    if len(text) <= DIFF_TXT_MAX:
+        return text or None
+    more = " ... (cut short: the revalidate command lists them all)"
+    return text[:DIFF_TXT_MAX - len(more)] + more
+
+
+def revalidate_run(conn: Connection, s: Settings, run_id: str, triggered_by: str = "SYSTEM") -> dict:
+    found = conn.query(f"SELECT * FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE Smpl_Run_ID = ?", [run_id])
+    if not found:
+        raise ConfigError(f"no run {run_id!r} in GOVT_RGLTRY_SamplingRun")
+    run = found[0]
+    if _up(run.get("run_stat")) not in ("COMPLETED", "FINAL"):
+        raise ConfigError(f"run {run_id} is {run.get('run_stat')}: only a COMPLETED or FINAL run can be replayed")
+    key = tuple(_up(run.get(k)) for k in SAMPLE_KEY)
+    label = ".".join(key)
+    original = [r["case_key"] for r in conn.query(
+        f"SELECT Case_Key, Selection_Order_Nbr FROM {s.meta_db}.GOVT_RGLTRY_SampleSelection WHERE Smpl_Run_ID = ? "
+        f"AND Selection_Stat IN ('SELECTED', 'REPLACED') ORDER BY Selection_Order_Nbr", [run_id])]
+    triggered_by = str(triggered_by or "SYSTEM")[:USER_MAX]
+    now = s.now()
+    out = {"reval_id": generate_run_id("REVAL", label, run.get("run_key"), timestamp=now), "smpl_run_id": run_id,
+           "project_cd": key[0], "table_nm": key[1], "run_ty": key[2], "run_key": run.get("run_key"),
+           "as_of_date": _day(run.get("as_of_dt_key")), "as_seen": run.get("start_dtts"),
+           "orig_selected": len(original), "replay_selected": None, "same": None, "only_orig": [], "only_replay": [],
+           "missing": [], "error": None}
+    log.info("REVALIDATE | %s | run %s | run_key %s | replaying %d pick(s) on the source as it was at %s", label,
+             run_id, run.get("run_key"), len(original), run.get("start_dtts"))
+    try:
+        summary = run_sampling(conn, s, key, triggered_by=triggered_by, replay=run)
+    except Exception as e:
+        summary = {"status": "ERROR", "error": error_text(e)}
+    if summary.get("status") != "COMPLETED":
+        out.update(status="FAILED", error=str(summary.get("error") or "the replay did not complete"))
+    else:
+        replayed = [p["case_key"] for p in summary["picked"]]
+        scope, now_set, then_set = set(summary["scope_keys"]), set(replayed), set(original)
+        out.update(replay_selected=len(replayed), same=len(now_set & then_set),
+                   only_orig=[k for k in original if k not in now_set],
+                   only_replay=[k for k in replayed if k not in then_set],
+                   missing=[k for k in original if k not in scope])
+        out["status"] = ("SOURCE_CHANGED" if out["missing"] else
+                         "DIFFERENT" if out["only_orig"] or out["only_replay"] else "MATCH")
+    out["diff_txt"] = _diff_text(out["missing"], out["only_orig"], out["only_replay"])
+    conn.execute(f"""
+        INSERT INTO {s.meta_db}.GOVT_RGLTRY_SamplingRevalidation (
+            Reval_ID, Smpl_Run_ID, Project_Cd, Table_Nm, Run_Ty, Run_Key, As_Of_Dt_Key, Source_As_Of_Dtts, Reval_Dtts,
+            Triggered_By, Reval_Stat, Orig_Selected_Cnt, Replay_Selected_Cnt, Same_Cnt, Only_Orig_Cnt,
+            Only_Replay_Cnt, Missing_Cnt, Diff_Txt, Config_Hash, Engine_Version_Txt, Error_Txt, Load_Dtts,
+            LastUpdt_Dtts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [out["reval_id"], run_id, *key, run.get("run_key"), out["as_of_date"], run.get("start_dtts"), now,
+         triggered_by, out["status"], len(original), out["replay_selected"], out["same"],
+         None if out["status"] == "FAILED" else len(out["only_orig"]),
+         None if out["status"] == "FAILED" else len(out["only_replay"]),
+         None if out["status"] == "FAILED" else len(out["missing"]), out["diff_txt"], run.get("config_hash"),
+         __version__, _stored_error(out["error"]) if out["error"] else None, now, now])
+    log_at = log.info if out["status"] == "MATCH" else log.warning
+    log_at("REVALIDATE | %s | run %s | %s | then %d, now %s, same %s%s", label, run_id, out["status"],
+           len(original), out["replay_selected"], out["same"],
+           f" | {out['diff_txt'] or out['error']}" if out["status"] != "MATCH" else "")
+    return out
+
+
+def revalidate_since(conn: Connection, s: Settings, since: date, until: Optional[date] = None,
+                     project: Optional[str] = None, table: Optional[str] = None, run_type: Optional[str] = None,
+                     triggered_by: str = "SYSTEM") -> dict:
+    where, params = ["Curr_Ind = 1", "Run_Stat IN ('COMPLETED', 'FINAL')", "As_Of_Dt_Key >= ?"], [since]
+    if until:
+        where.append("As_Of_Dt_Key <= ?")
+        params.append(until)
+    scope, scope_params = _scope_where(project, table, run_type)
+    where, params = where + scope, params + scope_params
+    runs = conn.query(f"SELECT Smpl_Run_ID FROM {s.meta_db}.GOVT_RGLTRY_SamplingRun WHERE {' AND '.join(where)} "
+                      f"ORDER BY Project_Cd, Table_Nm, Run_Ty, As_Of_Dt_Key, Run_Key", params)
+    results = []
+    for r in runs:
+        try:
+            results.append(revalidate_run(conn, s, r["smpl_run_id"], triggered_by))
+        except Exception as e:
+            log.error("REVALIDATE | run %s | could not be revalidated: %s", r["smpl_run_id"], error_text(e))
+            results.append({"smpl_run_id": r["smpl_run_id"], "status": "FAILED", "error": error_text(e)})
+    counts = {k: sum(1 for r in results if r["status"] == k) for k in REVAL_STATUSES}
+    log.info("REVALIDATE | %d run(s) since %s | %s", len(results), since,
+             ", ".join(f"{k} {v}" for k, v in counts.items()))
+    return {"since": since, "until": until, "runs": len(results), "counts": counts, "results": results}
+
+
+def signoff_revalidation(conn: Connection, s: Settings, reval_id: str, by: str, note: str) -> dict:
+    note, by = str(note or "").strip()[:1000], str(by or "").strip()[:USER_MAX]
+    if not note:
+        raise ConfigError("give a sign-off note: what was reviewed and the decision")
+    if not by:
+        raise ConfigError("give who signs off")
+    now = s.now()
+    done = conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRevalidation SET Signoff_By = ?, Signoff_Dtts = ?, "
+                        f"Signoff_Txt = ?, LastUpdt_Dtts = ?, LastUpdt_ID = USER "
+                        f"WHERE Reval_ID = ? AND Signoff_By IS NULL", [by, now, note, now, reval_id])
+    if done == 0:
+        rows = conn.query(f"SELECT Signoff_By, Signoff_Dtts FROM {s.meta_db}.GOVT_RGLTRY_SamplingRevalidation "
+                          f"WHERE Reval_ID = ?", [reval_id])
+        if not rows:
+            raise ConfigError(f"no revalidation {reval_id!r}")
+        raise ConfigError(f"revalidation {reval_id} is already signed off by {rows[0]['signoff_by']} at "
+                          f"{rows[0]['signoff_dtts']}")
+    log.info("REVALIDATE | %s signed off by %s: %s", reval_id, by, note)
+    return {"reval_id": reval_id, "signoff_by": by, "signoff_dtts": now, "signoff_txt": note}
+
+
+REFINE_SHORT_RUNS = 3
+REFINE_SWING = 0.5
+REFINE_SWING_RUNS = 4
+REFINE_KINDS = ("SHORT_BUCKET", "CAP_BLOCKS", "DEAD_RULE", "EXCLUSION_SWING")
+
+
+def _scope_where(project, table, run_type, prefix: str = "") -> tuple:
+    where, params = [], []
+    for col, value in (("Project_Cd", project), ("Table_Nm", table), ("Run_Ty", run_type)):
+        if value not in (None, ""):
+            where.append(f"UPPER({prefix}{col}) = ?")
+            params.append(_up(value))
+    return where, params
+
+
+def _refine_findings(label: str, rows: list, short_runs: int, swing: float, swing_runs: int) -> list:
+    runs = list(dict.fromkeys((r["as_of_dt_key"], r["run_key"], r["smpl_run_id"]) for r in rows))
+    by = {}
+    for r in rows:
+        by.setdefault((r["stat_ty"], r["stat_nm"]), []).append(r)
+    out = []
+
+    def found(kind, name, rule_id, text, **figures):
+        out.append({"sample": label, "kind": kind, "name": name, "rule_id": rule_id, "runs": len(runs),
+                    **figures, "text": text})
+
+    for (ty, name), stats in by.items():
+        rule_id = next((s["rule_id"] for s in stats if s["rule_id"] is not None), None)
+        if ty == "BUCKET":
+            short = [s for s in stats if s["leaf_ind"] == 1 and (s["selected_cnt"] or 0) < (s["target_cnt"] or 0)]
+            if len(short) >= short_runs:
+                gap = sum(s["target_cnt"] - (s["selected_cnt"] or 0) for s in short)
+                found("SHORT_BUCKET", name, rule_id, f"short of its target in {len(short)} of {len(runs)} run(s), "
+                      f"{gap} case(s) in all", short_runs=len(short), missing_cnt=gap,
+                      last=_day(short[-1]["as_of_dt_key"]))
+        elif ty == "CAP":
+            blocked = sum(s["over_cnt"] or 0 for s in stats)
+            if blocked:
+                lost = blocked - sum(s["replaced_cnt"] or 0 for s in stats)
+                found("CAP_BLOCKS", name, rule_id, f"blocked {blocked} pick(s) in "
+                      f"{sum(1 for s in stats if s['over_cnt'])} run(s); {lost} not made up by another case",
+                      blocked_cnt=blocked, lost_cnt=lost)
+        elif ty == "RULE" and len(stats) == len(runs) and not any(s["case_cnt"] for s in stats):
+            found("DEAD_RULE", name, rule_id, f"matched no case in any of {len(runs)} run(s)")
+        elif ty == "EXCLUSION":
+            for i in range(1, len(stats)):
+                prior = [s["case_cnt"] or 0 for s in stats[max(0, i - swing_runs):i]]
+                avg, now = sum(prior) / len(prior), stats[i]["case_cnt"] or 0
+                if now > (1 + swing) * avg or now < (1 - swing) * avg:
+                    found("EXCLUSION_SWING", name, rule_id, f"excluded {now} case(s) on "
+                          f"{_day(stats[i]['as_of_dt_key'])} against {avg:g} on average in the {len(prior)} run(s) "
+                          f"before", case_cnt=now, prior_avg=round(avg, 2), last=_day(stats[i]["as_of_dt_key"]))
+    return out
+
+
+REFINE_TOTALS = ("NOT_PICKED", "TOPUP", "REPLACED")
+REFINE_COLUMNS = ("Finding_Ty", "Finding_Nm", "Rule_ID", "Short_Run_Cnt", "Missing_Cnt", "Blocked_Cnt", "Lost_Cnt",
+                  "Case_Cnt", "Prior_Avg_Val", "Last_As_Of_Dt", "Finding_Txt")
+_REFINE_FIELDS = {"Finding_Ty": "kind", "Finding_Nm": "name", "Rule_ID": "rule_id", "Short_Run_Cnt": "short_runs",
+                  "Missing_Cnt": "missing_cnt", "Blocked_Cnt": "blocked_cnt", "Lost_Cnt": "lost_cnt",
+                  "Case_Cnt": "case_cnt", "Prior_Avg_Val": "prior_avg", "Last_As_Of_Dt": "last", "Finding_Txt": "text"}
+
+
+def _refine_totals(label: str, stats: list, replaced: list) -> list:
+    sums = {}
+    for st in stats:
+        if st["stat_ty"] in ("NOT_PICKED", "TOPUP"):
+            name = (st["stat_ty"], str(st["stat_nm"]))
+            sums[name] = sums.get(name, 0) + (st["case_cnt"] or 0)
+    for x in replaced:
+        if ".".join(_up(x[k]) for k in SAMPLE_KEY) == label:
+            sums[("REPLACED", str(x["stat_rsn_txt"] or "no reason"))] = x["case_cnt"]
+    words = {"NOT_PICKED": "case(s) not picked for this reason", "TOPUP": "case(s) taken by the top-up",
+             "REPLACED": "case(s) replaced by reviewers for this reason"}
+    return [{"sample": label, "kind": kind, "name": name, "rule_id": None, "case_cnt": n,
+             "text": f"{n} {words[kind]}"} for (kind, name), n in sums.items()]
+
+
+def _record_refinement(conn: Connection, s: Settings, sample: dict, since: date, until: date, thresholds: str,
+                       triggered_by: str, now: datetime) -> None:
+    key = sample["sample"].split(".")
+    columns = ["Refine_ID", "Finding_Seq_Nbr", "Project_Cd", "Table_Nm", "Run_Ty", "Window_Start_Dt",
+               "Window_End_Dt", "Run_Cnt", *REFINE_COLUMNS, "Threshold_Txt", "Report_Dtts", "Triggered_By",
+               "Engine_Version_Txt", "Load_Dtts", "LastUpdt_Dtts"]
+
+    def value(row, col):
+        v = row.get(_REFINE_FIELDS[col])
+        return str(v)[:1000] if col in ("Finding_Nm", "Finding_Txt") and v is not None else v
+
+    rows = [[sample["refine_id"], i + 1, *key, since, until, sample["runs"], *(value(f, c) for c in REFINE_COLUMNS),
+             thresholds, now, triggered_by, __version__, now, now]
+            for i, f in enumerate(sample["findings"] + sample["totals"])]
+    if rows:
+        conn.executemany(f"INSERT INTO {s.meta_db}.GOVT_RGLTRY_SamplingRefinement ({', '.join(columns)}) "
+                         f"VALUES ({', '.join(['?'] * len(columns))})", rows, s.chunk_rows)
+
+
+def refinement_report(conn: Connection, s: Settings, since: date, until: Optional[date] = None,
+                      project: Optional[str] = None, table: Optional[str] = None, run_type: Optional[str] = None,
+                      short_runs: int = REFINE_SHORT_RUNS, swing: float = REFINE_SWING,
+                      swing_runs: int = REFINE_SWING_RUNS, triggered_by: str = "SYSTEM", record: bool = True) -> dict:
+    if short_runs < 1 or swing_runs < 1 or swing <= 0:
+        raise ConfigError(f"refinement thresholds must be above 0: short runs {short_runs}, swing {swing}, "
+                          f"swing runs {swing_runs}")
+    end = until or s.today()
+    where, params = _scope_where(project, table, run_type, "t.")
+    where += ["t.As_Of_Dt_Key >= ?", "t.As_Of_Dt_Key <= ?"]
+    params += [since, end]
+    rows = conn.query(f"""
+        SELECT t.Smpl_Run_ID, t.Project_Cd, t.Table_Nm, t.Run_Ty, t.Run_Key, t.As_Of_Dt_Key, t.Stat_Ty, t.Stat_Nm,
+               t.Rule_ID, t.Leaf_Ind, t.Target_Cnt, t.Selected_Cnt, t.Over_Cnt, t.Replaced_Cnt, t.Case_Cnt
+        FROM {s.meta_db}.GOVT_RGLTRY_SamplingRunStat t
+        JOIN {s.meta_db}.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = t.Smpl_Run_ID AND r.Curr_Ind = 1
+        WHERE {' AND '.join(where)}
+        ORDER BY t.Project_Cd, t.Table_Nm, t.Run_Ty, t.As_Of_Dt_Key, t.Run_Key, t.Stat_Seq_Nbr""", params)
+    where, params = _scope_where(project, table, run_type, "x.")
+    where += ["x.Selection_Stat = 'REPLACED'", "x.Smpl_Cycle_Dt_Key >= ?", "x.Smpl_Cycle_Dt_Key <= ?"]
+    params += [since, end]
+    replaced = conn.query(f"""
+        SELECT x.Project_Cd, x.Table_Nm, x.Run_Ty, x.Stat_Rsn_Txt, COUNT(*) AS Case_Cnt
+        FROM {s.meta_db}.GOVT_RGLTRY_SampleSelection x
+        JOIN {s.meta_db}.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = x.Smpl_Run_ID AND r.Curr_Ind = 1
+        WHERE {' AND '.join(where)}
+        GROUP BY x.Project_Cd, x.Table_Nm, x.Run_Ty, x.Stat_Rsn_Txt""", params)
+    by_sample = {}
+    for r in rows:
+        by_sample.setdefault(".".join(_up(r[k]) for k in SAMPLE_KEY), []).append(r)
+    triggered_by = str(triggered_by or "SYSTEM")[:USER_MAX]
+    thresholds = f"short runs {short_runs}, swing {swing:g}, swing runs {swing_runs}"
+    now = s.now()
+    samples = []
+    for label, stats in by_sample.items():
+        sample = {"sample": label, "refine_id": generate_run_id("REFINE", label, timestamp=now) if record else None,
+                  "runs": len({st["smpl_run_id"] for st in stats}),
+                  "findings": _refine_findings(label, stats, short_runs, swing, swing_runs),
+                  "totals": _refine_totals(label, stats, replaced)}
+        for f in sample["findings"]:
+            log.warning("REFINE | %s | %s | %s | %s", label, f["kind"], f["name"], f["text"])
+        if record:
+            _record_refinement(conn, s, sample, since, end, thresholds, triggered_by, now)
+        samples.append(sample)
+    counts = {k: sum(1 for o in samples for f in o["findings"] if f["kind"] == k) for k in REFINE_KINDS}
+    log.info("REFINE | %d sample(s), %d run(s) from %s to %s | %s%s", len(samples), sum(o["runs"] for o in samples),
+             since, end, ", ".join(f"{k} {v}" for k, v in counts.items()),
+             " | recorded in GOVT_RGLTRY_SamplingRefinement" if record and samples else "")
+    return {"since": since, "until": end, "thresholds": thresholds, "samples": samples, "counts": counts}
+
+
+def review_refinement(conn: Connection, s: Settings, refine_id: str, by: str, note: str,
+                      seq: Optional[int] = None) -> dict:
+    note, by = str(note or "").strip()[:1000], str(by or "").strip()[:USER_MAX]
+    if not note:
+        raise ConfigError("give a review note: what was decided")
+    if not by:
+        raise ConfigError("give who reviews")
+    table = f"{s.meta_db}.GOVT_RGLTRY_SamplingRefinement"
+    where, params = "Refine_ID = ?", [refine_id]
+    if seq is not None:
+        where, params = where + " AND Finding_Seq_Nbr = ?", params + [seq]
+    rows = conn.query(f"SELECT Finding_Seq_Nbr, Review_By, Review_Dtts FROM {table} WHERE {where}", params)
+    if not rows:
+        raise ConfigError(f"no refinement {refine_id!r}" + (f" finding {seq}" if seq is not None else ""))
+    open_rows = [r["finding_seq_nbr"] for r in rows if r["review_by"] is None]
+    if not open_rows:
+        done = rows[0]
+        raise ConfigError(f"refinement {refine_id}" + (f" finding {seq}" if seq is not None else "") +
+                          f" is already reviewed (by {done['review_by']} at {done['review_dtts']})")
+    now = s.now()
+    conn.execute(f"UPDATE {table} SET Review_By = ?, Review_Dtts = ?, Review_Txt = ?, LastUpdt_Dtts = ?, "
+                 f"LastUpdt_ID = USER WHERE {where} AND Review_By IS NULL", [by, now, note, now, *params])
+    log.info("REFINE | %s | %d finding(s) reviewed by %s: %s", refine_id, len(open_rows), by, note)
+    return {"refine_id": refine_id, "reviewed": sorted(open_rows), "review_by": by, "review_dtts": now,
+            "review_txt": note}
 
 
 def parse_case_key(text: str, keys: list) -> dict:

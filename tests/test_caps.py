@@ -204,3 +204,13 @@ def test_a_candidate_passed_over_for_a_cap_says_so(raw, conn, settings):
                                   "WHERE Selected_Ind = 0").fetchall())
     assert reasons["case_id=a2"] == reasons["case_id=a1"] == "Over cap ONE_PER_CPT: X already has 1 in the sample"
     assert reasons["case_id=a4"].startswith("Bucket ALL full")
+
+
+def test_a_blank_value_is_not_one_shared_value(raw, conn, settings):
+    rows = [(f"a{i:03d}", "A", " " * (i % 3), "N") for i in range(8)] + [(f"b{i:03d}", "A", "C1", "N") for i in range(8)]
+    _table(raw.db, rows)
+    _config(raw.db, 12, {"A": 100})
+    _cap(raw.db, 50, "CPT_VARIETY", CPT_CAP, 3, rule_ty="PER_VALUE")
+    out = _run(conn, settings)
+    assert out["selected"] == 11 and _count(raw, SELECTED_U + "TRIM(u.cpt) = ''") == 8
+    assert _count(raw, SELECTED_U + "u.cpt = 'C1'") == 3

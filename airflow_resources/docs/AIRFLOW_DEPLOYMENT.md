@@ -14,6 +14,8 @@ Airflow; a test checks that the local command line starts in a Python without Ai
 ```
 airflow/                                    copied into the DAGs folder
   govt_rgltry_umcm_sampling.py           the DAG file: dag_id + Variable name only
+  govt_rgltry_umcm_sampling_revalidation.py  the revalidation DAG file (same Variable)
+  govt_rgltry_umcm_sampling_refinement.py    the refinement DAG file (same Variable)
   sampling/
     dags.py        the DAG (schedule, tasks, triggers, emails, ServiceNow callback), Variable + Connection ->
                    the engine (the only Airflow-aware module)
@@ -31,7 +33,7 @@ airflow_resources/                          (not deployed with the DAGs)
   requirements.txt                          Python packages for the workers
 
 sql/                                        shared by both versions
-  schema.sql                                Teradata DDL ({{META_DB}} template), 5 tables
+  schema.sql                                Teradata DDL ({{META_DB}} template), 8 tables
 
 local/                                      the local version (command line, dev.env); uses airflow/sampling
 ```
@@ -44,6 +46,15 @@ local/                                      the local version (command line, dev
    | DAG id | Variable | DAG file |
    |---|---|---|
    | `GOVT_RGLTRY_UMCM_SAMPLING` | `govt_rgltry_umcm_sampling_config_var` | `govt_rgltry_umcm_sampling.py` |
+   | `GOVT_RGLTRY_UMCM_SAMPLING_REVALIDATION` | the same Variable | `govt_rgltry_umcm_sampling_revalidation.py` |
+   | `GOVT_RGLTRY_UMCM_SAMPLING_REFINEMENT` | the same Variable | `govt_rgltry_umcm_sampling_refinement.py` |
+
+   Both extra DAGs cover the Variable's scopes, run on their own schedule and have one task with no retries:
+   - The revalidation DAG (task `revalidate`) replays the past samples (OPERATIONAL_RUNBOOK.md 10.11), by default on
+     1 January and 1 July. It fails, and opens the ServiceNow ticket, when a run does not give the same cases again.
+   - The refinement DAG (task `refine`) lists what to refine from the figures of the past runs and saves the list in
+     `GOVT_RGLTRY_SamplingRefinement` (OPERATIONAL_RUNBOOK.md 10.10), by default on the 1st of every month over
+     the last 3 months. It does not fail on what it finds; it fails only when it cannot run.
 
 2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. The
    bridge reads it with `airflow.sdk Connection.get` and sets `TERADATA_HOST`, `TERADATA_USER`,
@@ -76,7 +87,7 @@ version).
    The email tasks
    use the Airflow Connection `smtp_default`.
 3. Create the tables by hand (DBA), in the metadata database, from the DDL in `sql/schema.sql` (replace
-   `{{META_DB}}`). A deployment is fresh: drop any existing `GOVT_RGLTRY_Sampl*` table first and create all five
+   `{{META_DB}}`). A deployment is fresh: drop any existing `GOVT_RGLTRY_Sampl*` table first and create all eight
    again - no table is altered in place. Neither the engine nor the command line creates, drops or alters tables.
 4. Enter the configuration rows (`GOVT_RGLTRY_SamplingConfig`, `GOVT_RGLTRY_SamplingRule`; there are no seed files:
    the rows are entered in the tables, see the runbook sections 4 and 7, and for ODAG1 OPEN_ITEMS.md section D), then run
@@ -165,6 +176,15 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
 | `trigger_keys` | Optional list of the keys a trigger may set (default: `project`, `table`, `run_type`, `run_key`, `seed`, `as_of`, `rules_as_of`, `dry_run`, `log_level`; `run_params` and `extra_filters` reach the SQL, so a trigger sets them only when listed here). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
 | `snow_assignment_group` | ServiceNow assignment group of the failure ticket |
+| `revalidate_schedule_interval` | The revalidation DAG's cron (default `0 6 1 1,7 *`: 1 January and 1 July, 06:00) |
+| `revalidate_months` | How far back the revalidation DAG replays: current runs whose as-of date is in the last N months (default 6) |
+| `revalidate_timeout_minutes` | Task limit of the revalidation DAG (default 480) |
+| `refine_schedule_interval` | The refinement DAG's cron (default `0 7 1 * *`: the 1st of every month, 07:00) |
+| `refine_months` | How far back the refinement DAG looks: current runs whose as-of date is in the last N months (default 3) |
+| `refine_timeout_minutes` | Task limit of the refinement DAG (default 60) |
+| `refine_short_runs` | The `refine` task lists a bucket that was short of its target in at least this many runs (default 3) |
+| `refine_swing` | The `refine` task lists an exclusion whose count moved by more than this share of its recent average (default 0.5) |
+| `refine_swing_runs` | How many earlier runs make that recent average (default 4) |
 | `owner`, `tags`, `pool` | As usual |
 
 ### Triggering a run with values (Trigger DAG w/ config, CLI `-c`, REST API)

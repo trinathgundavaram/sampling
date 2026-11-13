@@ -97,6 +97,9 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 | `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, the configuration it used | engine |
 | `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
+| `GOVT_RGLTRY_SamplingRunStat` | One row per bucket, cap, exclusion, query rule, not-picked reason, top-up and note of a completed run ([10.10](#1010-find-what-to-refine)) | engine |
+| `GOVT_RGLTRY_SamplingRefinement` | One row per finding or total of a refinement report: what to refine, and the reviewer's decision ([10.10](#1010-find-what-to-refine)) | engine (`refine`), reviewer (`review`) |
+| `GOVT_RGLTRY_SamplingRevalidation` | One row per replay of a past run: did its rules give the same picks again, and the reviewer's sign-off ([10.11](#1011-revalidate-past-samples)) | engine (`revalidate`), reviewer (`signoff`) |
 | *`Tgt_Schema_Nm`.`Tgt_Table_Nm`* | The target table: the selected cases' source rows (optional, one per sample, created by another process, [4.3](#43-the-target-table)) | engine |
 
 ```
@@ -104,7 +107,9 @@ GOVT_RGLTRY_SamplingConfig (Project_Cd, Table_Nm, Run_Ty)
  └── GOVT_RGLTRY_SamplingRule (Project_Cd, Table_Nm or '*', Run_Ty or '*', Rule_Class_Cd)
        LEVEL rows (Level_Nbr) ← BUCKET rows (same Level_Nbr)
 
-GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule and GOVT_RGLTRY_SampleSelection
+GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule, GOVT_RGLTRY_SampleSelection
+                                      GOVT_RGLTRY_SamplingRunStat and GOVT_RGLTRY_SamplingRevalidation
+GOVT_RGLTRY_SamplingRefinement (Project_Cd, Table_Nm, Run_Ty) = the sample of SamplingConfig, no run ID: it covers many runs
                                     = SMPL_RUN_ID of the target table
 ```
 
@@ -162,7 +167,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 | `Target_Val` | The sample size: `150` (CNT) or `5` = 5 % (PCT) |
 | `Min_Target_Cnt`, `Max_Target_Cnt` | Optional, PCT only: at least / at most this many cases (5 %, but at least 30 and at most 200). A minimum above the candidates leaves the sample short (`Shortfall_Cd`) |
 | `Smpl_Method_Cd` | `RANKED` / `RANDOM` / `SYSTEMATIC` ([6.1](#61-sampling-methods)) |
-| `Rounding_Cd` | `FLOOR` / `ROUND` / `CEIL` of every percentage: the target, each bucket's share, a cap (default `FLOOR`) |
+| `Rounding_Cd` | `FLOOR` / `ROUND` / `CEIL` of every percentage: the target, each bucket's share, a cap (default `FLOOR`). `ROUND` takes a half up (6.5 → 7) |
 | `Diversity_Sql_Txt` | Optional `SELECT` of the key columns and one value (any joins, e.g. a code family from a reference table): within each bucket, picks rotate across the values (cases it does not return form one group, `NULL`) |
 | `Diversity_Cap_Ty`, `Diversity_Cap_Val` | Optional: at most this many picks per value – `CNT` `3`, or `PCT` `10` = 10 % of the target of the bucket being picked (of the whole sample's target during the top-up), at least 1 |
 | `Shortfall_Cd` | `TOPUP` (default) / `NONE` |
@@ -293,7 +298,7 @@ A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at mo
 **CAP** – a limit across the whole sample, where a bucket's `Max_Val` or the diversity cap only limit one bucket at
 a time. `Rule_Sql_Txt` is a `SELECT`: `Rule_Ty` `QUERY` (default) returns the key columns of the cases it limits (at
 most `Max_Val` of them: "at most 10 out-of-network"), `PER_VALUE` the key columns and a value (at most `Max_Val` per
-value: "at most 3 of one CPT code"; a case it does not return, or NULL, is not limited). `Parent_Path_Txt`: only the
+value: "at most 3 of one CPT code"; a case it does not return, NULL, or a blank value, is not limited). `Parent_Path_Txt`: only the
 cases of the buckets under it (`Denied` = the denials, `*` default = the whole sample). `Max_Ty` + `Max_Val` (required):
 `CNT` a number, `PCT` a percentage of the sample's target. After the buckets have selected, the cases are taken in
 priority order; one that would exceed a cap gives way to the next candidate of its own bucket that fits every cap
@@ -346,6 +351,9 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 | `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, `Rerun_Rsn_Txt`, `Rules_As_Of_Dt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Not_Selected_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
+| `GOVT_RGLTRY_SamplingRunStat` | figure of a completed run | `Stat_Ty` with `Stat_Nm`, numbered by `Stat_Seq_Nbr`: `BUCKET` (a bucket path; `Leaf_Ind`, `Candidate_Cnt`, `Target_Cnt`, `Selected_Cnt` after caps and top-up), `CAP` (`Rule_ID`, `Limit_Cnt`, `Over_Cnt` picks it blocked, `Replaced_Cnt`), `EXCLUSION` (`Case_Cnt` excluded by it, the first rule that hit), `RULE` (`<class> <name>`, `Case_Cnt` pulled cases its SELECT returned), `NOT_PICKED` (a reason kind, `Case_Cnt`), `TOPUP` (`Case_Cnt` taken by the top-up), `NOTE` (`Stat_Txt`, the engine's note, also in the task log). Written in the run's own transaction; a failed run, a dry run or a kept retry writes none. Never purged |
+| `GOVT_RGLTRY_SamplingRefinement` | refinement report (`refine`) | `Refine_ID` (one per sample per report) with `Finding_Seq_Nbr`, the sample, `Window_Start_Dt` / `Window_End_Dt`, `Run_Cnt` (runs looked at), `Finding_Ty` (`SHORT_BUCKET`, `CAP_BLOCKS`, `DEAD_RULE`, `EXCLUSION_SWING`, or a total: `NOT_PICKED`, `TOPUP`, `REPLACED`), `Finding_Nm` (the bucket, cap, rule or reason), `Rule_ID`, `Short_Run_Cnt`, `Missing_Cnt`, `Blocked_Cnt`, `Lost_Cnt`, `Case_Cnt`, `Prior_Avg_Val`, `Last_As_Of_Dt`, `Finding_Txt` (the finding in words), `Threshold_Txt`, `Report_Dtts`, `Triggered_By`, `Engine_Version_Txt`, `Review_By` / `Review_Dtts` / `Review_Txt`. Never purged |
+| `GOVT_RGLTRY_SamplingRevalidation` | replay of a run (`revalidate`) | `Reval_ID`, `Smpl_Run_ID` and its sample / `Run_Key` / `As_Of_Dt_Key`, `Source_As_Of_Dtts` (the run's start: the source is read as it was then), `Reval_Stat` (`MATCH`, `DIFFERENT`, `SOURCE_CHANGED`, `FAILED`), `Orig_Selected_Cnt`, `Replay_Selected_Cnt`, `Same_Cnt`, `Only_Orig_Cnt`, `Only_Replay_Cnt`, `Missing_Cnt`, `Diff_Txt` (the differing case keys, cut at 4000 characters), `Config_Hash` of the run, `Engine_Version_Txt` of the replay, `Error_Txt`, `Signoff_By` / `Signoff_Dtts` / `Signoff_Txt`. Never purged |
 
 **Current sample** of a cycle: `Curr_Ind = 1` for its sample (project, table, run type) and `Run_Key`, on the run row
 and on its selections. A successful rerun turns the earlier rows to 0 (with `LastUpdt_Dtts`, `LastUpdt_ID`) in the
@@ -419,8 +427,9 @@ and counts per bucket, are a `GROUP BY` on it.
 | `{as_of_date}` | The run's business date `YYYY-MM-DD` |
 | `{run_key}` | The run key |
 | `{project_cd}`, `{table_nm}`, `{run_ty}` | The sample's project, table and run type (upper case) |
+| `{current_rows}` / `{current_rows:a}` | The current version of a row: `ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N'` (with `a.` in front of each column for the alias `a`). In a replay (10.11) the version that was current when the run started: `ETL_LOAD_DT_TM <= t AND (ETL_IS_CURR_IND = 'Y' OR ETL_LAST_UPDT_DT_TM > t) AND (ETL_IS_DEL_IND = 'N' OR ETL_LAST_UPDT_DT_TM > t)`. Write it, not the condition itself, in every SQL that reads a table keeping old row versions, or a replay reads that table as it is now |
 | `{name}` / `$name` | A `run_params` value or a PARAM rule. Inside quotes (`'{batch_id}'`) any value is safe (quotes are doubled). Outside quotes (`n < {top}`) the value may only be a number, a date or a name (letters, digits, `_ . : -`), else the run is a `CONFIG_ERROR` |
-| Reserved | `as_of_date`, `project_cd`, `table_nm`, `run_ty`, `run_key`, `extra_filters` are set by the engine: a `run_params` value or a PARAM rule of that name is a `CONFIG_ERROR` |
+| Reserved | `as_of_date`, `project_cd`, `table_nm`, `run_ty`, `run_key`, `extra_filters`, `current_rows` are set by the engine: a `run_params` value or a PARAM rule of that name is a `CONFIG_ERROR` |
 
 ### 6.4a Dates held as text
 
@@ -470,6 +479,7 @@ section D.
 | At most 10 out-of-network denials | CAP `QUERY`, `SELECT <keys> FROM <source> WHERE <OON>`, `Parent_Path_Txt` `Denied`, `Max_Val` 10 |
 | 5 % of the week's cases, at least 30, at most 200 | `Target_Ty` `PCT`, `Target_Val` 5, `Min_Target_Cnt` 30, `Max_Target_Cnt` 200 |
 | Always 10 inpatient cases, the rest by mix | BUCKET Inpatient `Quota_Cd` `CNT`, `Quota_Val` 10; the others PCT / REMAINDER |
+| Every case of a kind is reviewed, the rest sampled as before (certainty + random) | a new LEVEL 0 (`Rule_Sql_Txt` NULL, `Unlisted_Cd` `SKIP`) with BUCKET Must review (`Seq_Nbr` 1, the `SELECT` of those cases, `Quota_Cd` `CNT`, `Quota_Val` = the target, or `Max_Target_Cnt` with `Target_Ty` `PCT`) and BUCKET Rest (`Seq_Nbr` 2, no `Rule_Sql_Txt`, `REMAINDER`); the existing levels move down one `Level_Nbr` and every `Parent_Path_Txt` of their LEVEL, BUCKET and CAP rows gets `Rest` in front (`*` becomes `Rest` on the first of them and `Rest/*` below it, `IP PAC` becomes `Rest/IP PAC`); a `*` left as it is also splits Must review and can leave must-review cases out. Rest's mix applies to what Must review leaves, so 4 must-review cases of 150 leave 146 for the areas. Paths start with `Must review` or `Rest/`. The caps still apply to the must-review cases, and with more of them than the target they fill the whole sample |
 | Exactly 150 or flag it | `Shortfall_Cd` `NONE`, Variable `fail_on_shortfall` true |
 | A table of the selected cases for the auditors | `Tgt_Schema_Nm` + `Tgt_Table_Nm` (4.3) |
 
@@ -508,15 +518,19 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | `test-connection` | Logs in, shows the session and which sampling tables exist | – |
 | `validate <scope> [--check-sql] [--run-param k=v] [--rules-as-of D]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
 | `show-config <sample> [--rules-as-of D]` | The config and the rules it uses, by class, and its problems (JSON) | – |
-| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--rules-as-of D] [--seed S] [--dry-run] [--rerun-reason R] [--force-reason R]` | Runs the sample(s); `--run-key` defaults to `SAMPLING_RUN_KEY`, then the as-of date; `--rules-as-of` (or `SAMPLING_RULES_AS_OF`) uses the rules in effect on that date; `--rerun-reason` (or `SAMPLING_RERUN_REASON`) is required to run a run key again, and refused otherwise; `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
+| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--rules-as-of D] [--seed S] [--dry-run] [--rerun-reason R] [--force-reason R]` | Runs the sample(s) (a dry run also lists the cases it picks: `picked`); `--run-key` defaults to `SAMPLING_RUN_KEY`, then the as-of date; `--rules-as-of` (or `SAMPLING_RULES_AS_OF`) uses the rules in effect on that date; `--rerun-reason` (or `SAMPLING_RERUN_REASON`) is required to run a run key again, and refused otherwise; `--force-reason` replaces a `FINAL` sample. Exit code 1 when a sample fails; a shortfall only with `SAMPLING_FAIL_ON_SHORTFALL=true` (like the Variable's `fail_on_shortfall`) | yes, except `--dry-run` |
 | `finalize <sample> --run-key K [--by U]` | Makes the current sample of the cycle `FINAL` | run row |
 | `replace <sample> --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, target table |
 | `runs [<scope>] [--run-key K] [--status S]` | Recent run rows (with `Config_Hash`, `Finalized_By`, `Override_Rsn_Txt`) | – |
 | `errors [<scope>]` | Open errors: cycles whose latest attempt failed | – |
 | `mark-failed --run-id R` | Closes a run stuck in `RUNNING` (e.g. the worker died) | run row |
 | `purge <scope> --older-than-days D [--apply]` | Counts (`--apply`: deletes) the selection rows old runs no longer need (12) | selections |
+| `revalidate --run-id R` or `revalidate --since D [--until D] [<scope>]` | Replays one run, or every current `COMPLETED` / `FINAL` run whose as-of date is in the window, and compares the picks (10.11). Exit code 1 unless every run is `MATCH` | revalidation rows |
+| `signoff --reval-id V --note N [--by U]` | Records the review of a revalidation (once) | revalidation row |
+| `refine --since D [--until D] [<scope>] [--short-runs N] [--swing F] [--swing-runs N] [--dry-run]` | Lists what to refine from the figures of the current runs in the window, and saves the list (10.10) | refinement rows (none with `--dry-run`) |
+| `review --refine-id R [--seq N] --note N [--by U]` | Records what was decided about one finding, or about every finding of the report not yet reviewed (once each) | refinement rows |
 
-Exit codes: 0 done, 1 a sample failed (or `purge` skipped a sample), 2 a usage
+Exit codes: 0 done, 1 a sample failed (or `purge` skipped a sample, or `revalidate` found a run that is not `MATCH`), 2 a usage
 or configuration problem. One log file per command in
 `local/logs`.
 
@@ -564,7 +578,7 @@ Every candidate that was not picked has `Not_Selected_Rsn_Txt`, for example
 `Diversity cap: X already has 2 in the sample` or
 `Bucket OTHER/Denied is not sampled`. The run's report counts them (`not_picked`) and the task log has one
 `not picked | <kind> | n case(s)` line per kind. `Stat_Rsn_Txt` stays the reason of a manual replace.
-The targets per bucket are in the task log (`SAMPLING | <sample> | bucket <path> | selected n of m candidate(s),
+The targets per bucket are in `GOVT_RGLTRY_SamplingRunStat` (`Stat_Ty = 'BUCKET'`), the task log (`SAMPLING | <sample> | bucket <path> | selected n of m candidate(s),
 target t`) and the run's report (`buckets.<path>.target`): a bucket with fewer candidates
 than its target is short; with `TOPUP` the rest came from other buckets.
 
@@ -623,9 +637,113 @@ next one overall (the mix then differs from the quotas: the reason records why).
 replaced case does not come back as carry-over (`PRIOR_CANDIDATE`) in later cycles. Not checked by a replacement:
 the diversity cap (`Diversity_Cap_Val`) and the CAP rules (the auditors choose the case).
 
+### 10.10 Find what to refine
+
+Requirement 8.03 asks for the opportunities to refine the automation to be found. `GOVT_RGLTRY_SamplingRunStat`
+keeps the figures of every completed run. The refinement report reads them over a window of as-of dates and lists
+the places where the setup may need a change. It reads only the current run of each cycle (`Curr_Ind = 1` on
+`GOVT_RGLTRY_SamplingRun`). It changes nothing in the setup: it is a to-do list for the team.
+```
+refine --since 2026-08-01 --until 2026-10-31 --project UMCM --table ODAG1 --run-type WKLY
+```
+
+| `Finding_Ty` | Listed when | What to look at |
+|---|---|---|
+| `SHORT_BUCKET` | A leaf bucket picked fewer cases than its target in at least `--short-runs` runs (default 3). `Short_Run_Cnt` runs, `Missing_Cnt` cases short in all | The bucket's quota or its rule: it keeps having too few candidates |
+| `CAP_BLOCKS` | A CAP rule stopped at least one pick. `Blocked_Cnt` picks stopped, `Lost_Cnt` of them no other case made up | The cap's `Max_Val`, when `Lost_Cnt` is above 0 |
+| `DEAD_RULE` | A query rule's SELECT returned no case in any run of the window | Whether the rule is still needed, or its SQL is wrong |
+| `EXCLUSION_SWING` | An exclusion's count (`Case_Cnt`) moved more than `--swing` (default 0.5, so by half) above or below its average (`Prior_Avg_Val`) over the `--swing-runs` runs before it (default 4). Only runs within the window are counted | A change in the source data or in the rule |
+| `NOT_PICKED` (total) | Always, one row per reason: cases left out for that reason in the window (`Case_Cnt`) | A reason that grows |
+| `TOPUP` (total) | Always: cases the top-up took in the window | A top-up that fills a lot means quotas that do not fit the data |
+| `REPLACED` (total) | One row per reason reviewers gave for replacing cases | Cases the rules should not pick |
+
+Each run of the report saves its rows in `GOVT_RGLTRY_SamplingRefinement`: one `Refine_ID` per sample, one row per
+finding and total (`Finding_Seq_Nbr`), with the window, the thresholds used and the text in words. `--dry-run`
+lists without saving. Each finding is also logged as a warning line: `REFINE | <sample> | <kind> | <name> | <text>`.
+
+A reviewer then records what was decided, once per row: for one finding with `--seq`, or for every finding of the
+report not yet reviewed without it.
+```
+review --refine-id "REFINE::UMCM.ODAG1.WKLY::..." --seq 2 --note "lower bucket B's quota to 10%" --by jdoe
+review --refine-id "REFINE::UMCM.ODAG1.WKLY::..." --note "rest seen, no change" --by jdoe
+```
+Open findings:
+```sql
+SELECT Refine_ID, Finding_Seq_Nbr, Finding_Ty, Finding_Nm, Finding_Txt, Report_Dtts
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRefinement
+WHERE Review_By IS NULL AND Finding_Ty NOT IN ('NOT_PICKED', 'TOPUP', 'REPLACED')
+ORDER BY Report_Dtts DESC, Refine_ID, Finding_Seq_Nbr;
+```
+
+In Airflow the `GOVT_RGLTRY_UMCM_SAMPLING_REFINEMENT` DAG runs the report for the Variable's scopes, by default on
+the 1st of every month at 07:00 (`refine_schedule_interval`) over the last 3 months (`refine_months`), with the
+thresholds `refine_short_runs`, `refine_swing` and `refine_swing_runs` (AIRFLOW_DEPLOYMENT.md). With weekly
+samples, 3 months is about 13 runs: enough for the 3-run and 4-run checks. Because each month's window overlaps the
+last, a finding that is not fixed comes back the next month as a new row. The task does not fail on findings.
+
+The same checks in SQL, for a look by hand:
+```sql
+SELECT t.Stat_Nm, COUNT(*) AS short_runs, MIN(t.As_Of_Dt_Key), MAX(t.As_Of_Dt_Key)
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRunStat t JOIN HSABC_DEV.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = t.Smpl_Run_ID AND r.Curr_Ind = 1
+WHERE t.Project_Cd = 'UMCM' AND t.Table_Nm = 'ODAG1' AND t.Run_Ty = 'WKLY' AND t.Stat_Ty = 'BUCKET' AND t.Leaf_Ind = 1
+  AND t.Selected_Cnt < t.Target_Cnt AND t.As_Of_Dt_Key >= ADD_MONTHS(CURRENT_DATE, -6)
+GROUP BY 1 HAVING COUNT(*) >= 3 ORDER BY 2 DESC;
+
+SELECT t.Stat_Nm, SUM(t.Over_Cnt) AS blocked, SUM(t.Over_Cnt - t.Replaced_Cnt) AS lost, COUNT(*) AS runs
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRunStat t JOIN HSABC_DEV.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = t.Smpl_Run_ID AND r.Curr_Ind = 1
+WHERE t.Project_Cd = 'UMCM' AND t.Table_Nm = 'ODAG1' AND t.Run_Ty = 'WKLY' AND t.Stat_Ty = 'CAP'
+GROUP BY 1 ORDER BY 2 DESC;
+
+SELECT t.Stat_Nm, t.Rule_ID, MAX(t.Case_Cnt) AS most_matched, COUNT(*) AS runs
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRunStat t JOIN HSABC_DEV.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = t.Smpl_Run_ID AND r.Curr_Ind = 1
+WHERE t.Project_Cd = 'UMCM' AND t.Table_Nm = 'ODAG1' AND t.Run_Ty = 'WKLY' AND t.Stat_Ty = 'RULE' AND t.As_Of_Dt_Key >= ADD_MONTHS(CURRENT_DATE, -6)
+GROUP BY 1, 2 HAVING MAX(t.Case_Cnt) = 0;
+
+SELECT t.Stat_Nm, t.As_Of_Dt_Key, t.Case_Cnt,
+       AVG(t.Case_Cnt) OVER (PARTITION BY t.Stat_Nm ORDER BY t.As_Of_Dt_Key ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING) AS prior_avg
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRunStat t JOIN HSABC_DEV.GOVT_RGLTRY_SamplingRun r ON r.Smpl_Run_ID = t.Smpl_Run_ID AND r.Curr_Ind = 1
+WHERE t.Project_Cd = 'UMCM' AND t.Table_Nm = 'ODAG1' AND t.Run_Ty = 'WKLY' AND t.Stat_Ty = 'EXCLUSION'
+QUALIFY t.Case_Cnt > 1.5 * prior_avg OR t.Case_Cnt < 0.5 * prior_avg;
+
+SELECT Stat_Rsn_Txt, COUNT(*) FROM HSABC_DEV.GOVT_RGLTRY_SampleSelection
+WHERE Project_Cd = 'UMCM' AND Table_Nm = 'ODAG1' AND Run_Ty = 'WKLY' AND Selection_Stat = 'REPLACED' GROUP BY 1 ORDER BY 2 DESC;
+```
+They answer, in order: which buckets were short in 3 or more runs of the last 6 months; which caps keep blocking
+picks, and how many picks they cost after replacements; which query rules matched no case in 6 months; which
+exclusions moved by more than half against their last 4 runs; why reviewers replace cases. `NOT_PICKED` and
+`TOPUP` rows show the same over time for the reasons cases were left out and for how much the top-up fills.
+
+### 10.11 Revalidate past samples
+
+Every 6 months (requirement 8.01) the past samples are replayed to show their rules still give the same cases.
+A replay takes the run's own configuration (its run row) and rules (its `GOVT_RGLTRY_SamplingRunRule` rows, so a
+rule edited in place since does not matter), its stored run parameters (the batch it sampled, not a new lookup) and
+seed, reads the source as it was when the run started (`{current_rows}`, 6.4), selects as a dry run and compares
+the picks with the run's own: its `SELECTED` and `REPLACED` rows (a later replacement is not a pick of the run).
+Nothing is written but the `GOVT_RGLTRY_SamplingRevalidation` row.
+
+| `Reval_Stat` | Meaning | What to do |
+|---|---|---|
+| `MATCH` | The same cases | sign off |
+| `DIFFERENT` | Other cases (`Diff_Txt`: picked then, not now / picked now, not then) | an engine change (`Engine_Version_Txt`), a history rule reading runs made since, or a table read without `{current_rows}` (a lookup table, a row updated in place): find which before signing off |
+| `SOURCE_CHANGED` | A case the run picked is not in the source as it was (`Missing_Cnt`): a version was deleted or purged | the source no longer holds that week; record it in the sign-off |
+| `FAILED` | The replay could not run (`Error_Txt`), e.g. a run with no stored parameters | fix and replay |
+
+```
+revalidate --since 2026-05-01 --project UMCM
+signoff --reval-id "<Reval_ID>" --note "reviewed: matches" --by <user>
+```
+```sql
+SELECT Reval_Stat, COUNT(*), SUM(CASE WHEN Signoff_By IS NULL THEN 1 ELSE 0 END) AS not_signed_off
+FROM HSABC_DEV.GOVT_RGLTRY_SamplingRevalidation WHERE Reval_Dtts >= ADD_MONTHS(CURRENT_DATE, -1) GROUP BY 1;
+```
+In Airflow the `GOVT_RGLTRY_UMCM_SAMPLING_REVALIDATION` DAG does this on its own schedule (AIRFLOW_DEPLOYMENT.md),
+for the Variable's scopes, over the last `revalidate_months` (default 6), and fails when a run is not `MATCH`.
+A replay needs the run's selected rows (purge keeps them, 12) and the source's old row versions for the window.
+
 ## 11. First run on DEV (checklist)
 
-1. Drop any existing `GOVT_RGLTRY_Sampl*` tables and create the five again by hand from `sql/schema.sql` (DBA).
+1. Drop any existing `GOVT_RGLTRY_Sampl*` tables and create the eight again by hand from `sql/schema.sql` (DBA).
 2. Have each target table created (4.3: the source's columns plus the `ETL_*` / `SMPL_*` ones).
 3. Enter the configuration rows (OPEN_ITEMS.md section D, once its TODOs are answered; `Active_Ind = 1`).
 4. `validate --project UMCM --table ODAG1 --run-type WKLY --check-sql`.
@@ -679,5 +797,5 @@ Each page is a draw.io file in `diagrams/pages/` and exported as a PNG in `diagr
 | 05 | CAP rules, replacements within caps, top-up and shortfall | 2, 4 | [png](diagrams/png/05_caps_and_top_up.png) · [drawio](diagrams/pages/05_caps_and_top_up.drawio) |
 | 06 | Finalise, replace a case, rerun a cycle, purge | 10.6–10.9, 12 | [png](diagrams/png/06_after_a_run.png) · [drawio](diagrams/pages/06_after_a_run.drawio) |
 | 07 | Run_Stat and Curr_Ind of a run row | 5, 6.3 | [png](diagrams/png/07_run_lifecycle.png) · [drawio](diagrams/pages/07_run_lifecycle.drawio) |
-| 08 | The five tables and the target table: who fills them and how they join | 3–5 | [png](diagrams/png/08_tables.png) · [drawio](diagrams/pages/08_tables.drawio) |
+| 08 | The eight tables and the target table: who fills them and how they join | 3–5 | [png](diagrams/png/08_tables.png) · [drawio](diagrams/pages/08_tables.drawio) |
 | 09 | ODAG1 weekly: the order its 35 rules run and where each result is kept, and its bucket tree (27 leaves, nominal targets, caps) | 2, 4 | [png](diagrams/png/09_odag1_wkly.png) · [drawio](diagrams/pages/09_odag1_wkly.drawio) |

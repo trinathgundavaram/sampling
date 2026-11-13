@@ -318,3 +318,20 @@ def test_a_retry_passes_the_start_of_its_airflow_run():
     assert dags._resume_since(run, "America/Chicago", False) is None
     assert dags._is_retry({"ti": SimpleNamespace(try_number=2)})
     assert not dags._is_retry({"ti": SimpleNamespace(try_number=1)}) and not dags._is_retry({})
+
+
+def test_revalidation_window_and_dag(variable):
+    assert dags.months_back(date(2026, 7, 1), 6) == date(2026, 1, 1)
+    assert dags.months_back(date(2026, 3, 31), 6) == date(2025, 9, 28)
+    assert dags._revalidate_months({}) == 6 and dags._revalidate_months({"revalidate_months": "3"}) == 3
+    with pytest.raises(ConfigError, match="revalidate_months"):
+        dags._revalidate_months({"revalidate_months": "x"})
+    dag = dags.build_revalidation_dag("REVAL", VAR_KEY)
+    assert [t.task_id for t in dag.tasks] == ["revalidate"]
+    assert dags._refine_months({}) == 3 and dags._refine_months({"refine_months": "6"}) == 6
+    dag = dags.build_refinement_dag("REFINE", VAR_KEY)
+    assert [t.task_id for t in dag.tasks] == ["refine"] and "refine" in dag.description
+    assert dags._refine_thresholds({}) == {"short_runs": 3, "swing": 0.5, "swing_runs": 4}
+    assert dags._refine_thresholds({"refine_short_runs": "2", "refine_swing": "0.3"})["swing"] == 0.3
+    with pytest.raises(ConfigError, match="refine_swing_runs"):
+        dags._refine_thresholds({"refine_swing_runs": "0"})

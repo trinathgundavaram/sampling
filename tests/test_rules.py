@@ -427,3 +427,29 @@ def test_d_cases_held_back_by_the_diversity_cap_say_so(raw, conn, settings):
     reasons = dict(_rows(raw, "SELECT Case_Key, Not_Selected_Rsn_Txt FROM GOVT_RGLTRY_SampleSelection "
                               "WHERE Selected_Ind = 0 AND Run_Key = 'no_top_up'"))
     assert reasons["case_id=c002"] == "Diversity cap: Z already has 2 in bucket ALL"
+
+
+def _certainty(db, target, quota):
+    _config(db, target)
+    insert_rule(db, "LEVEL", 50, "tier", level_nbr=0, unlisted_cd="SKIP")
+    insert_bucket(db, 51, 0, "Must review", seq_nbr=1, rule_sql_txt="flag = 'Y'", quota_cd="CNT", quota_val=quota)
+    insert_bucket(db, 52, 0, "Rest", seq_nbr=2, quota_cd="REMAINDER")
+    insert_strata(db, 6, 1, 1, "area", "area", {"A": 50, "B": 50}, applies_to="Rest")
+
+
+def test_certainty_cases_all_taken_and_rest_split_what_is_left(raw, conn, settings):
+    _cases_table(raw.db, _cases("m", 4, "D", "A", flag="Y") + _cases("a", 40, "D", "A") + _cases("b", 40, "D", "B"))
+    _certainty(raw.db, 20, 20)
+    out = _run(conn, settings)
+    assert _selected(out) == {"Must review": 4, "Rest/A": 8, "Rest/B": 8}
+    assert out["selected"] == 20 and not out["notes"]
+    flagged = _rows(raw, "SELECT COUNT(*) FROM GOVT_RGLTRY_SampleSelection WHERE Selected_Ind = 1 "
+                         "AND Stratum_Path_Txt = 'Must review'")
+    assert flagged == [(4,)]
+
+
+def test_certainty_cases_beyond_the_target_fill_the_whole_sample(raw, conn, settings):
+    _cases_table(raw.db, _cases("m", 25, "D", "A", flag="Y") + _cases("a", 40, "D", "A") + _cases("b", 40, "D", "B"))
+    _certainty(raw.db, 20, 20)
+    out = _run(conn, settings)
+    assert _selected(out) == {"Must review": 20, "Rest/A": 0, "Rest/B": 0}

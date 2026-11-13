@@ -329,3 +329,7 @@ def test_systematic_spreads_over_every_rank():
         assert picked[-1] >= 197 and all(1 <= b - a <= 2 for a, b in zip(picked, picked[1:]))
     starts = {select(rows[:10], 4, "SYSTEMATIC", random.Random(s))[0]["i"] for s in range(50)}
     assert starts == {0, 1, 2}
+
+
+def test_round_takes_a_half_up():
+    assert [round_target(v, "ROUND") for v in (0.5, 2.5, 6.5, 19.5, 2.49, 150 * 0.13)] == [1, 3, 7, 20, 2, 20]

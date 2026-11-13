@@ -142,6 +142,99 @@ CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRunRule (
 )
 PRIMARY INDEX (Smpl_Run_ID);
 
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRunStat (
+  Smpl_Run_ID            VARCHAR(250)   NOT NULL,
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Run_Key                VARCHAR(250)   NOT NULL,
+  As_Of_Dt_Key           DATE           NOT NULL,
+  Stat_Ty                VARCHAR(20)    NOT NULL,
+  Stat_Seq_Nbr           INTEGER        NOT NULL,
+  Stat_Nm                VARCHAR(1000)  NOT NULL,
+  Rule_ID                INTEGER,
+  Leaf_Ind               SMALLINT,
+  Candidate_Cnt          INTEGER,
+  Target_Cnt             INTEGER,
+  Selected_Cnt           INTEGER,
+  Limit_Cnt              INTEGER,
+  Over_Cnt               INTEGER,
+  Replaced_Cnt           INTEGER,
+  Case_Cnt               INTEGER,
+  Stat_Txt               VARCHAR(1000),
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
+)
+PRIMARY INDEX (Smpl_Run_ID);
+
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRevalidation (
+  Reval_ID               VARCHAR(250)   NOT NULL,
+  Smpl_Run_ID            VARCHAR(250)   NOT NULL,
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Run_Key                VARCHAR(250)   NOT NULL,
+  As_Of_Dt_Key           DATE           NOT NULL,
+  Source_As_Of_Dtts      TIMESTAMP(6),
+  Reval_Dtts             TIMESTAMP(6)   NOT NULL,
+  Triggered_By           VARCHAR(100),
+  Reval_Stat             VARCHAR(20)    NOT NULL,
+  Orig_Selected_Cnt      INTEGER,
+  Replay_Selected_Cnt    INTEGER,
+  Same_Cnt               INTEGER,
+  Only_Orig_Cnt          INTEGER,
+  Only_Replay_Cnt        INTEGER,
+  Missing_Cnt            INTEGER,
+  Diff_Txt               VARCHAR(4000),
+  Config_Hash            CHAR(64),
+  Engine_Version_Txt     VARCHAR(30),
+  Error_Txt              VARCHAR(4000),
+  Signoff_By             VARCHAR(100),
+  Signoff_Dtts           TIMESTAMP(6),
+  Signoff_Txt            VARCHAR(1000),
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
+)
+PRIMARY INDEX (Smpl_Run_ID);
+
+CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SamplingRefinement (
+  Refine_ID              VARCHAR(250)   NOT NULL,
+  Finding_Seq_Nbr        INTEGER        NOT NULL,
+  Project_Cd             VARCHAR(30)    NOT NULL,
+  Table_Nm               VARCHAR(63)    NOT NULL,
+  Run_Ty                 VARCHAR(20)    NOT NULL,
+  Window_Start_Dt        DATE           NOT NULL,
+  Window_End_Dt          DATE           NOT NULL,
+  Run_Cnt                INTEGER        NOT NULL,
+  Finding_Ty             VARCHAR(20)    NOT NULL,
+  Finding_Nm             VARCHAR(1000)  NOT NULL,
+  Rule_ID                INTEGER,
+  Short_Run_Cnt          INTEGER,
+  Missing_Cnt            INTEGER,
+  Blocked_Cnt            INTEGER,
+  Lost_Cnt               INTEGER,
+  Case_Cnt               INTEGER,
+  Prior_Avg_Val          DECIMAL(18,4),
+  Last_As_Of_Dt          DATE,
+  Finding_Txt            VARCHAR(1000),
+  Threshold_Txt          VARCHAR(200),
+  Report_Dtts            TIMESTAMP(6)   NOT NULL,
+  Triggered_By           VARCHAR(100),
+  Engine_Version_Txt     VARCHAR(30),
+  Review_By              VARCHAR(100),
+  Review_Dtts            TIMESTAMP(6),
+  Review_Txt             VARCHAR(1000),
+  Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
+  LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
+  LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
+)
+PRIMARY INDEX (Refine_ID);
+
 CREATE MULTISET TABLE {{META_DB}}.GOVT_RGLTRY_SampleSelection (
   Smpl_Run_ID            VARCHAR(250)   NOT NULL,
   Project_Cd             VARCHAR(30)    NOT NULL,

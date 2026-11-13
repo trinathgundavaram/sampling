@@ -20,7 +20,8 @@ except ImportError:
 from sampling import __version__
 from sampling.db import connect_teradata, error_text
 from sampling.admin import purge_selections
-from sampling.engine import run_scope
+from sampling.engine import (REFINE_KINDS, REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_RUNS, REVAL_STATUSES,
+                             refinement_report, revalidate_since, run_scope)
 from sampling.settings import DEFAULT_TIMEZONE, ConfigError, Settings, _flag, cron_match, zone
 
 
@@ -40,6 +41,10 @@ DEFAULT_TIMEOUT = timedelta(hours=2)
 DEFAULT_RETRIES = 1
 DEFAULT_ASSIGNMENT_GROUP = "D&AE - EDE Govt Compliance"
 DEFAULT_TAGS = ["GOVT_RGLTRY", "Sampling"]
+DEFAULT_REVALIDATE_SCHEDULE = "0 6 1 1,7 *"
+DEFAULT_REVALIDATE_MONTHS = 6
+DEFAULT_REFINE_SCHEDULE = "0 7 1 * *"
+DEFAULT_REFINE_MONTHS = 3
 _TEXT = ["null", "string"]
 
 
@@ -383,6 +388,144 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
         conn.close()
     logger.info("PURGE report:\n%s", json.dumps(out, indent=2, default=str))
     return {"scopes": out}
+
+
+def months_back(day: date, months: int) -> date:
+    year, month = divmod(day.year * 12 + day.month - 1 - months, 12)
+    return date(year, month + 1, min(day.day, 28))
+
+
+def _months(config: dict, key: str, default: int) -> int:
+    value = config.get(key)
+    try:
+        return max(1, int(value)) if value not in (None, "") else default
+    except (TypeError, ValueError):
+        raise ConfigError(f"{key} must be a whole number of months, got {value!r}") from None
+
+
+def _revalidate_months(config: dict) -> int:
+    return _months(config, "revalidate_months", DEFAULT_REVALIDATE_MONTHS)
+
+
+def _refine_months(config: dict) -> int:
+    return _months(config, "refine_months", DEFAULT_REFINE_MONTHS)
+
+
+def _refine_thresholds(config: dict) -> dict:
+    out = {}
+    for key, name, kind, default in (("refine_short_runs", "short_runs", int, REFINE_SHORT_RUNS),
+                                     ("refine_swing", "swing", float, REFINE_SWING),
+                                     ("refine_swing_runs", "swing_runs", int, REFINE_SWING_RUNS)):
+        value = config.get(key)
+        try:
+            out[name] = kind(value) if value not in (None, "") else default
+        except (TypeError, ValueError):
+            raise ConfigError(f"{key} must be a number, got {value!r}") from None
+        if out[name] <= 0:
+            raise ConfigError(f"{key} must be above 0, got {value!r}")
+    return out
+
+
+def _each_scope(variable_key: str, connection_id: Optional[str], months, work) -> tuple:
+    try:
+        config = resolve_config(variable_key)
+        settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
+        _load_teradata_connection(_connection_id(config, connection_id))
+        runs = _load_variable(variable_key).get("runs")
+        scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
+        since = months_back(settings.today(), months(config))
+        thresholds = _refine_thresholds(config) if months is _refine_months else {}
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    try:
+        conn = connect_teradata(settings.meta_db, settings.access_lock)
+    except Exception as e:
+        raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
+    out, seen = [], set()
+    try:
+        for scope in scopes:
+            where = tuple(scope.get(k) for k in SCOPE_KEYS)
+            if where in seen:
+                continue
+            seen.add(where)
+            out.append(work(conn, settings, since, thresholds,
+                            {k: scope.get(k) for k in SCOPE_KEYS if scope.get(k) not in (None, "")}))
+    except ConfigError as e:
+        raise AirflowFailException(f"configuration: {e}") from e
+    finally:
+        conn.close()
+    return since, out
+
+
+def revalidate_task(variable_key: str, dag_run=None, connection_id: Optional[str] = None) -> dict:
+    since, out = _each_scope(variable_key, connection_id, _revalidate_months,
+                             lambda conn, settings, since, _, scope: revalidate_since(
+        conn, settings, since, triggered_by=_triggered_by(dag_run), **scope))
+    counts = {k: sum(r["counts"][k] for r in out) for k in REVAL_STATUSES}
+    logger.info("REVALIDATE report:\n%s", json.dumps(out, indent=2, default=str))
+    off = [f"{r['smpl_run_id']} {r['status']}" for o in out for r in o["results"] if r["status"] != "MATCH"]
+    if off:
+        raise AirflowFailException(f"{len(off)} of {sum(o['runs'] for o in out)} run(s) since {since} did not "
+                                   f"replay to the same picks (see GOVT_RGLTRY_SamplingRevalidation): "
+                                   f"{'; '.join(off[:20])}")
+    return {"since": since.isoformat(), "counts": counts}
+
+
+def refine_task(variable_key: str, dag_run=None, connection_id: Optional[str] = None) -> dict:
+    since, out = _each_scope(variable_key, connection_id, _refine_months,
+                             lambda conn, settings, since, thresholds, scope: refinement_report(
+                                 conn, settings, since, triggered_by=_triggered_by(dag_run), **scope, **thresholds))
+    logger.info("REFINE report:\n%s", json.dumps(out, indent=2, default=str))
+    counts = {k: sum(o["counts"][k] for o in out) for k in REFINE_KINDS}
+    ids = [smp["refine_id"] for o in out for smp in o["samples"]]
+    return {"since": since.isoformat(), "counts": counts, "refine_ids": ids}
+
+
+def _pool(dag_config: dict) -> dict:
+    return {"pool": dag_config["pool"]} if dag_config.get("pool") else {}
+
+
+def _report_dag(dag_id: str, variable_key: str, what: str, schedule_key: str, default_schedule: str) -> DAG:
+    dag_config = load_dag_config(variable_key)
+    tz = dag_config.get("schedule_timezone") or dag_config.get("timezone") or DEFAULT_TIMEZONE
+    try:
+        start_date = datetime(2026, 1, 1, tzinfo=zone(tz))
+    except Exception:
+        logger.warning("timezone %r is not valid; %s is used", tz, DEFAULT_TIMEZONE)
+        start_date = datetime(2026, 1, 1, tzinfo=zone(DEFAULT_TIMEZONE))
+    default_args = {
+        "owner": dag_config.get("owner") or "oss",
+        "depends_on_past": False,
+        "start_date": start_date,
+        "retries": 0,
+        "on_failure_callback": _failure_alert_ticket(dag_config.get("snow_assignment_group")
+                                                     or DEFAULT_ASSIGNMENT_GROUP),
+    }
+    return DAG(dag_id=dag_id, description=f"{what} ({variable_key})", default_args=default_args,
+               schedule=dag_config.get(schedule_key) or default_schedule, catchup=False, max_active_runs=1,
+               tags=_names(dag_config.get("tags")) or DEFAULT_TAGS)
+
+
+def build_revalidation_dag(dag_id: str, variable_key: str) -> DAG:
+    dag_config = load_dag_config(variable_key)
+    dag = _report_dag(dag_id, variable_key, "replay past samples and compare their picks",
+                      "revalidate_schedule_interval", DEFAULT_REVALIDATE_SCHEDULE)
+    PythonOperator(task_id="revalidate", dag=dag,
+                   python_callable=lambda **context: revalidate_task(variable_key, context.get("dag_run")),
+                   execution_timeout=_minutes(dag_config, "revalidate_timeout_minutes", timedelta(hours=8)),
+                   show_return_value_in_logs=False, **_pool(dag_config))
+    return dag
+
+
+def build_refinement_dag(dag_id: str, variable_key: str) -> DAG:
+    dag_config = load_dag_config(variable_key)
+    dag = _report_dag(dag_id, variable_key, "list what to refine from the figures of past runs",
+                      "refine_schedule_interval", DEFAULT_REFINE_SCHEDULE)
+    PythonOperator(task_id="refine", dag=dag,
+                   python_callable=lambda **context: refine_task(variable_key, context.get("dag_run")),
+                   execution_timeout=_minutes(dag_config, "refine_timeout_minutes", timedelta(hours=1)),
+                   show_return_value_in_logs=False, **_pool(dag_config))
+    return dag
 
 
 def sample_summary(ti, task_ids: list) -> str:

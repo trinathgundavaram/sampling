@@ -27,7 +27,7 @@ def test_env_file_values(tmp_path):
 def test_the_schema_has_the_five_tables():
     schema = (ROOT / "sql" / "schema.sql").read_text()
     tables = [s.split()[3] for s in schema.split(";") if s.strip().startswith("CREATE MULTISET TABLE")]
-    assert len(tables) == 5 and all(t.startswith("{{META_DB}}.GOVT_RGLTRY_") for t in tables)
+    assert len(tables) == 8 and all(t.startswith("{{META_DB}}.GOVT_RGLTRY_") for t in tables)
     assert "CLOB" not in schema and "INDEX GOVT" not in schema.upper() and "--" not in schema
     assert not (ROOT / "sql" / "seed").exists() and not (ROOT / "sql" / "schema_drop.sql").exists()
 
@@ -150,3 +150,13 @@ def test_rules_as_of_from_the_option_or_the_environment(local_db, monkeypatch, c
     capsys.readouterr()
     assert local_db.db.execute("SELECT Run_Key, CAST(Rules_As_Of_Dt AS VARCHAR) FROM GOVT_RGLTRY_SamplingRun "
                                "ORDER BY 1").fetchall() == [("A", "2026-06-30"), ("B", "2026-05-01")]
+
+
+def test_a_shortfall_fails_a_local_run_only_when_asked(local_db, capsys, monkeypatch):
+    from conftest import set_config
+    set_config(local_db.db, target_val=5000)
+    run = ["run", "--project", "UMCM", "--run-param", "batch_id=2026-08-01", "--as-of", "2026-08-01"]
+    assert cli.main([*run, "--run-key", "S1"]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"][0]["shortfall"] > 0
+    monkeypatch.setenv("SAMPLING_FAIL_ON_SHORTFALL", "true")
+    assert cli.main([*run, "--run-key", "S2"]) == 1

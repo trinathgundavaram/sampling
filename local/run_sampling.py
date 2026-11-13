@@ -18,9 +18,10 @@ if str(_ENGINE_DIR) not in sys.path:
 from sampling import __version__
 from sampling.admin import purge_selections
 from sampling.db import connect_teradata, error_text
-from sampling.engine import (config_problems, finalize_run, load_config, replace_case, run_scope,
-                             validate)
-from sampling.settings import ConfigError, Settings
+from sampling.engine import (REFINE_SHORT_RUNS, REFINE_SWING, REFINE_SWING_RUNS, config_problems, finalize_run,
+                             load_config, refinement_report, replace_case, revalidate_run, revalidate_since,
+                             review_refinement, run_scope, signoff_revalidation, validate)
+from sampling.settings import ConfigError, Settings, _flag
 
 log = logging.getLogger("sampling.cli")
 PREFIX = "SAMPLING_"
@@ -141,7 +142,8 @@ def cmd_run(conn, s, args) -> tuple:
                     dry_run=args.dry_run, force_reason=args.force_reason,
                     rerun_reason=args.rerun_reason if args.rerun_reason is not None
                     else os.environ.get(PREFIX + "RERUN_REASON"), rules_as_of=_rules_as_of(args))
-    problems = out["failed"] or any(r.get("shortfall") for r in out["runs"])
+    short = any(r.get("shortfall") for r in out["runs"]) and _flag(os.environ.get(PREFIX + "FAIL_ON_SHORTFALL"), False)
+    problems = out["failed"] or short
     return out, 1 if problems else 0
 
 
@@ -156,6 +158,36 @@ def cmd_finalize(conn, s, args) -> tuple:
 def cmd_replace(conn, s, args) -> tuple:
     return replace_case(conn, s, _key(args), args.run_key, args.case_key, args.reason, _user(args),
                         any_bucket=args.any_bucket), 0
+
+
+def cmd_revalidate(conn, s, args) -> tuple:
+    by = args.triggered_by or f"local-{getpass.getuser()}"
+    if args.run_id:
+        out = revalidate_run(conn, s, args.run_id, by)
+        return out, 0 if out["status"] == "MATCH" else 1
+    since = _day(args.since, "--since")
+    if not since:
+        raise ConfigError("give --run-id or --since")
+    out = revalidate_since(conn, s, since, _day(args.until, "--until"), **_scope(args), triggered_by=by)
+    return out, 0 if out["counts"]["MATCH"] == out["runs"] else 1
+
+
+def cmd_refine(conn, s, args) -> tuple:
+    since = _day(args.since, "--since")
+    if not since:
+        raise ConfigError("give --since")
+    out = refinement_report(conn, s, since, _day(args.until, "--until"), **_scope(args), short_runs=args.short_runs,
+                            swing=args.swing, swing_runs=args.swing_runs,
+                            triggered_by=args.triggered_by or f"local-{getpass.getuser()}", record=not args.dry_run)
+    return out, 0
+
+
+def cmd_review(conn, s, args) -> tuple:
+    return review_refinement(conn, s, args.refine_id, _user(args), args.note, args.seq), 0
+
+
+def cmd_signoff(conn, s, args) -> tuple:
+    return signoff_revalidation(conn, s, args.reval_id, _user(args), args.note), 0
 
 
 def cmd_validate(conn, s, args) -> tuple:
@@ -227,7 +259,8 @@ def cmd_test_connection(conn, s, args) -> tuple:
 COMMANDS = {"run": cmd_run, "validate": cmd_validate, "show-config": cmd_show_config, "runs": cmd_runs,
             "errors": cmd_errors, "mark-failed": cmd_mark_failed, "test-connection": cmd_test_connection,
             "finalize": cmd_finalize, "replace": cmd_replace,
-            "purge": cmd_purge}
+            "purge": cmd_purge, "revalidate": cmd_revalidate, "signoff": cmd_signoff,
+            "refine": cmd_refine, "review": cmd_review}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +306,38 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--any-bucket", action="store_true", help="take the next candidate of any bucket when its "
                                                               "own has none left")
     rp.add_argument("--by", help="recorded as status_by (default: your user name)")
+
+    rv = sub.add_parser("revalidate", help="replay past runs on the source as it was and compare the picks")
+    rv.add_argument("--run-id", help="one run (Smpl_Run_ID)")
+    rv.add_argument("--since", help="every current COMPLETED or FINAL run whose as-of date is on or after YYYY-MM-DD")
+    rv.add_argument("--until", help="and on or before YYYY-MM-DD")
+    scope(rv)
+    rv.add_argument("--triggered-by", help="recorded on the revalidation row (default local-<user>)")
+
+    rf = sub.add_parser("refine", help="list what to refine from the figures of past runs")
+    rf.add_argument("--since", help="current runs whose as-of date is on or after YYYY-MM-DD")
+    rf.add_argument("--until", help="and on or before YYYY-MM-DD")
+    scope(rf)
+    rf.add_argument("--short-runs", type=int, default=REFINE_SHORT_RUNS,
+                    help=f"a bucket short of its target in this many runs is listed (default {REFINE_SHORT_RUNS})")
+    rf.add_argument("--swing", type=float, default=REFINE_SWING,
+                    help=f"an exclusion count this share above or below its recent average is listed "
+                         f"(default {REFINE_SWING})")
+    rf.add_argument("--swing-runs", type=int, default=REFINE_SWING_RUNS,
+                    help=f"how many runs before make the recent average (default {REFINE_SWING_RUNS})")
+    rf.add_argument("--triggered-by", help="recorded on the refinement rows (default local-<user>)")
+    rf.add_argument("--dry-run", action="store_true", help="list only, write nothing")
+
+    rw = sub.add_parser("review", help="record what was decided about a refinement report")
+    rw.add_argument("--refine-id", required=True, help="as in GOVT_RGLTRY_SamplingRefinement.Refine_ID")
+    rw.add_argument("--seq", type=int, help="one finding (Finding_Seq_Nbr); default every finding not yet reviewed")
+    rw.add_argument("--note", required=True, help="what was decided")
+    rw.add_argument("--by", help="recorded as Review_By (default: your user name)")
+
+    so = sub.add_parser("signoff", help="sign off a revalidation after review")
+    so.add_argument("--reval-id", required=True, help="as in GOVT_RGLTRY_SamplingRevalidation.Reval_ID")
+    so.add_argument("--note", required=True, help="what was reviewed and the decision")
+    so.add_argument("--by", help="recorded as Signoff_By (default: your user name)")
 
     v = sub.add_parser("validate", help="check the samples of a scope")
     scope(v)
