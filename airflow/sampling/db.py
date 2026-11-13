@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Iterator, Optional, Sequence
 
@@ -258,9 +258,29 @@ def error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {error_line(exc)}"[:ERROR_TEXT_MAX]
 
 
+def _literal(v) -> str:
+    if v is None:
+        return "NULL"
+    if isinstance(v, (bool, int, float, Decimal)):
+        return str(int(v) if isinstance(v, bool) else v)
+    if isinstance(v, datetime):
+        return f"TIMESTAMP '{v.replace(tzinfo=None).isoformat(sep=' ')}'"
+    if isinstance(v, date):
+        return f"DATE '{v.isoformat()}'"
+    return "'" + str(v).replace("'", "''") + "'"
+
+
 def log_sql(what: str, template: Optional[str], sql: str, params: Optional[dict] = None) -> None:
     params = {str(k).lower(): v for k, v in (params or {}).items()}
-    names = dict.fromkeys(n for n in ((a or b).lower() for a, b in _TOKEN_RE.findall(template or "")) if n != "env")
-    shown = ", ".join(f"{n} = {params.get(n)!r}" for n in names) or "none"
-    log.info("%s\n    SQL:         %s\n    parameters:  %s\n    with values: %s", what,
-             " ".join(str(template or sql).split()), shown, " ".join(sql.split()))
+    body = " ".join(str(template or sql).split())
+    names = dict.fromkeys(n for n in ((a or b).lower() for a, b in _TOKEN_RE.findall(body)) if n != "env")
+    shown = ", ".join(f"{n} = {_literal(params.get(n))}" for n in names) or "none"
+    def mark(m):
+        return "?" if (m.group(1) or m.group(2)).lower() in names else m.group(0)
+
+    def quoted(m):
+        inner = _TOKEN_RE.sub(mark, m.group(1))
+        return inner if inner == "?" else m.group(0)
+    sent = _TOKEN_RE.sub(mark, re.sub(r"'(\{\w+\}|\$\w+)'", quoted, body))
+    log.info("%s\n    SQL:         %s\n    parameters:  %s\n    with values: %s", what, sent, shown,
+             " ".join(sql.split()))

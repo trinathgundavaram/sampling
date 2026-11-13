@@ -10,7 +10,7 @@ from typing import Optional
 from airflow.providers.smtp.operators.smtp import EmailOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.sdk import DAG, BaseHook, Param, Variable
+from airflow.sdk import DAG, Connection, Param, Variable
 from airflow.timetables.trigger import MultipleCronTriggerTimetable
 try:
     from airflow.sdk.exceptions import AirflowFailException
@@ -30,7 +30,7 @@ DEFAULT_CONNECTION_ID = "govt_rgltry_teradata"
 CONNECTION_TYPE = "teradata"
 TD_CONN_KEY = "td_conn_var"
 SCOPE_KEYS = ("project", "table", "run_type")
-RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "dry_run")
+RUN_KEYS = ("run_key", "run_params", "extra_filters", "seed", "as_of", "rules_as_of", "dry_run")
 TRIGGER_KEYS = (*SCOPE_KEYS, *RUN_KEYS, "log_level")
 SQL_TRIGGER_KEYS = ("run_params", "extra_filters")
 DEFAULT_TRIGGER_KEYS = tuple(k for k in TRIGGER_KEYS if k not in SQL_TRIGGER_KEYS)
@@ -50,15 +50,23 @@ def _connection_id(config: dict, connection_id: Optional[str] = None) -> str:
     return str(connection_id or config.get("connection_id") or config.get(TD_CONN_KEY) or DEFAULT_CONNECTION_ID)
 
 
-def _load_teradata_connection(conn_id: str) -> dict:
-    conn = BaseHook.get_connection(conn_id)
+def _set_env(key: str, value) -> None:
+    if value is None or value == "":
+        return
+    os.environ[str(key)] = str(value)
+
+
+def _load_teradata_connection(conn_id: str) -> None:
+    conn = Connection.get(conn_id)
     if not conn.host or not conn.login or not conn.password:
         raise ConfigError(f"Airflow Connection '{conn_id}' needs host, login and password")
+    _set_env("TERADATA_HOST", conn.host)
+    _set_env("TERADATA_USER", conn.login)
+    _set_env("TERADATA_PASSWORD", conn.password)
     extra = conn.extra_dejson or {}
-    logmech = extra.get("logmech") or os.environ.get("TERADATA_LOGMECH") or "LDAP"
+    _set_env("TERADATA_LOGMECH", extra.get("logmech") or os.environ.get("TERADATA_LOGMECH") or "LDAP")
     logger.info("Loaded Teradata connection '%s': host=%s user=%s logmech=%s (password not logged)",
-                conn_id, conn.host, conn.login, logmech)
-    return {"host": conn.host, "user": conn.login, "password": conn.password, "logmech": logmech}
+                conn_id, conn.host, conn.login, os.environ.get("TERADATA_LOGMECH"))
 
 
 def _keys(value: Optional[dict]) -> dict:
@@ -220,6 +228,21 @@ def _as_of(config: dict, dag_run, tz: str) -> date:
     return when.astimezone(zone(tz)).date()
 
 
+def _rules_as_of(config: dict) -> Optional[date]:
+    value = config.get("rules_as_of")
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value).strip())
+    except ValueError as e:
+        raise ConfigError(f"rules_as_of must be YYYY-MM-DD, got {value!r}") from e
+
+
+def _rerun_reason(config: dict) -> Optional[str]:
+    value = config.get("rerun_reason")
+    return None if value is None else str(value)
+
+
 def _triggered_by(dag_run) -> str:
     if dag_run is None:
         return "airflow"
@@ -247,12 +270,13 @@ def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index
         if not isinstance(logging.getLevelName(level), int):
             raise ConfigError(f"log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL, got {level!r}")
         logging.getLogger("sampling").setLevel(level)
-        credentials = _load_teradata_connection(_connection_id(config, connection_id))
+        _load_teradata_connection(_connection_id(config, connection_id))
         scope = {k: config.get(k) for k in SCOPE_KEYS if config.get(k) not in (None, "")}
         kwargs = {"run_key": config.get("run_key") or None, "run_params": _run_params(config.get("run_params")),
                   "extra_filters": config.get("extra_filters") or None,
                   "seed": config.get("seed"), "as_of": _as_of(config, dag_run, settings.timezone),
-                  "triggered_by": _triggered_by(dag_run), "dry_run": _flag(config.get("dry_run"), False)}
+                  "triggered_by": _triggered_by(dag_run), "dry_run": _flag(config.get("dry_run"), False),
+                  "rerun_reason": _rerun_reason(config), "rules_as_of": _rules_as_of(config)}
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
 
@@ -260,8 +284,12 @@ def _run_sampling_task(variable_key: str, overrides: Optional[dict], scope_index
                 settings.describe(), scope or "none", kwargs["run_key"] or "(as_of date)", kwargs["as_of"],
                 kwargs["extra_filters"] or "none",
                 " | DRY RUN" if kwargs["dry_run"] else "")
+    if kwargs["rules_as_of"]:
+        logger.info("rules and config in effect on %s", kwargs["rules_as_of"])
+    if kwargs["rerun_reason"] is not None:
+        logger.info("rerun_reason from the Variable: %r", kwargs["rerun_reason"])
     try:
-        conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
+        conn = connect_teradata(settings.meta_db, settings.access_lock)
     except Exception as e:
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     try:
@@ -321,13 +349,13 @@ def purge_task(variable_key: str, connection_id: Optional[str] = None) -> dict:
     try:
         config = resolve_config(variable_key)
         settings = Settings.from_mapping({k: config.get(k) for k in SETTINGS_KEYS})
-        credentials = _load_teradata_connection(_connection_id(config, connection_id))
+        _load_teradata_connection(_connection_id(config, connection_id))
         runs = _load_variable(variable_key).get("runs")
         scopes = [resolve_config(variable_key, scope_index=i) for i in range(len(runs))] if runs else [config]
     except ConfigError as e:
         raise AirflowFailException(f"configuration: {e}") from e
     try:
-        conn = connect_teradata(settings.meta_db, settings.access_lock, credentials=credentials)
+        conn = connect_teradata(settings.meta_db, settings.access_lock)
     except Exception as e:
         raise RuntimeError(f"cannot connect to Teradata: {error_text(e)}") from e
     out = []

@@ -65,10 +65,10 @@ def test_one_sample_failing_unexpectedly_does_not_stop_the_others(raw, conn, set
                   order_by="case_id")
     real = engine.load_config
 
-    def broken(c, s, k):
+    def broken(c, s, k, *rest):
         if tuple(k)[1] == "T1":
             raise RuntimeError("[Teradata Database] [Error 2631] Transaction ABORTed due to deadlock")
-        return real(c, s, k)
+        return real(c, s, k, *rest)
 
     monkeypatch.setattr(engine, "load_config", broken)
     out = run_scope(conn, settings, project="UMCM", run_key="K", as_of=AS_OF)
@@ -95,7 +95,7 @@ def test_a_sample_finalised_during_a_rerun_is_not_replaced(raw, conn, settings, 
         return real(*a, **k)
 
     monkeypatch.setattr(engine, "_log_selection", finalise_meanwhile)
-    out = _run(conn, settings)
+    out = _run(conn, settings, rerun_reason="redo")
     assert out["error_type"] == "FINALIZED" and "finalised while this run was selecting" in out["error"]
     current = raw.db.execute("SELECT Smpl_Run_ID, Run_Stat FROM GOVT_RGLTRY_SamplingRun WHERE Curr_Ind = 1").fetchall()
     assert current == [(first["smpl_run_id"], "FINAL")]
@@ -103,7 +103,7 @@ def test_a_sample_finalised_during_a_rerun_is_not_replaced(raw, conn, settings, 
 
 def test_finalise_refuses_a_run_a_rerun_replaced_meanwhile(raw, conn, settings, monkeypatch):
     first = _run(conn, settings)
-    _run(conn, settings)
+    _run(conn, settings, rerun_reason="redo")
     monkeypatch.setattr(engine, "current_run", lambda *a: {"smpl_run_id": first["smpl_run_id"],
                                                            "run_stat": "COMPLETED"})
     with pytest.raises(ConfigError, match="no longer the current"):

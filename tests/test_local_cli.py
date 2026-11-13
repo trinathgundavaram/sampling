@@ -117,3 +117,35 @@ def test_an_unknown_log_level_could_not_run(capsys, monkeypatch):
     assert cli.main(["--log-level", "LOUD", "test-connection"]) == 2
     out = json.loads(capsys.readouterr().out)
     assert out["result"] == "COULD NOT RUN" and "LOUD" in out["problem"]
+
+
+def test_rerun_reason_from_the_option_or_the_environment(local_db, monkeypatch, capsys):
+    base = ["run", "--project", "UMCM", "--run-type", "WKLY", "--run-param", "batch_id=2026-08-01",
+            "--as-of", "2026-08-01", "--run-key", "R1"]
+    monkeypatch.delenv("SAMPLING_RERUN_REASON", raising=False)
+    assert cli.main(base) == 0
+    assert cli.main(base) == 1
+    assert cli.main([*base, "--rerun-reason", "   "]) == 1
+    assert cli.main([*base, "--rerun-reason", "fixed source"]) == 0
+    monkeypatch.setenv("SAMPLING_RERUN_REASON", "from the env")
+    assert cli.main(base) == 0
+    assert cli.main([*base[:-1], "R2"]) == 1
+    capsys.readouterr()
+    reasons = local_db.db.execute("SELECT Run_Key, Rerun_Rsn_Txt, Error_Ty FROM GOVT_RGLTRY_SamplingRun "
+                                  "ORDER BY Start_Dtts").fetchall()
+    assert reasons == [("R1", None, None), ("R1", None, "RERUN_REASON"), ("R1", None, "RERUN_REASON"),
+                       ("R1", "fixed source", None), ("R1", "from the env", None),
+                       ("R2", "from the env", "RERUN_REASON")]
+
+
+def test_rules_as_of_from_the_option_or_the_environment(local_db, monkeypatch, capsys):
+    base = ["run", "--project", "UMCM", "--run-type", "WKLY", "--run-param", "batch_id=2026-08-01",
+            "--as-of", "2026-08-01"]
+    monkeypatch.delenv("SAMPLING_RULES_AS_OF", raising=False)
+    assert cli.main([*base, "--run-key", "A", "--rules-as-of", "2026-06-30"]) == 0
+    monkeypatch.setenv("SAMPLING_RULES_AS_OF", "2026-05-01")
+    assert cli.main([*base, "--run-key", "B"]) == 0
+    assert cli.main([*base, "--run-key", "C", "--rules-as-of", "30/06/2026"]) == 2
+    capsys.readouterr()
+    assert local_db.db.execute("SELECT Run_Key, CAST(Rules_As_Of_Dt AS VARCHAR) FROM GOVT_RGLTRY_SamplingRun "
+                               "ORDER BY 1").fetchall() == [("A", "2026-06-30"), ("B", "2026-05-01")]

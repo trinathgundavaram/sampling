@@ -176,19 +176,15 @@ def test_task_runs_the_scope_and_passes_the_connection(monkeypatch, variable, ra
     from sampling.db import Connection
     build_source(raw.db)
     um_config(raw.db)
-    given = {}
-
-    def connect(db, lock, credentials=None):
-        given.update(credentials or {})
-        return Connection(raw, host="duckdb", access_lock=False)
-
-    monkeypatch.delenv("TERADATA_PASSWORD", raising=False)
-    monkeypatch.setattr(dags, "connect_teradata", connect)
+    for name in ("TERADATA_HOST", "TERADATA_USER", "TERADATA_PASSWORD", "TERADATA_LOGMECH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(dags, "connect_teradata", lambda db, lock, **_: Connection(raw, host="duckdb", access_lock=False))
     report = dags.run_sampling_task(VAR_KEY, overrides={})
     assert report["result"] == "ALL SAMPLES COMPLETED" and report["runs"][0]["selected"] == 150
     assert report["runs"][0]["as_of_date"] == "2026-08-01"
-    assert given == {"host": "td.example", "user": "svc", "password": "secret", "logmech": "TD2"}
-    assert "TERADATA_PASSWORD" not in os.environ
+    assert {k: os.environ.get(k) for k in ("TERADATA_HOST", "TERADATA_USER", "TERADATA_PASSWORD",
+                                           "TERADATA_LOGMECH")} == \
+        {"TERADATA_HOST": "td.example", "TERADATA_USER": "svc", "TERADATA_PASSWORD": "secret", "TERADATA_LOGMECH": "TD2"}
 
 
 def test_config_problem_fails_without_retry(monkeypatch, variable, raw):
@@ -277,3 +273,39 @@ def test_a_trigger_sets_sql_text_only_when_the_variable_allows_it(variable):
     assert config["run_key"] == "rk"
     variable({**BASE, "trigger_keys": ["run_params"]})
     assert dags.resolve_config(VAR_KEY, {"run_params": '{"batch_id": "X"}'})["run_params"] == '{"batch_id": "X"}'
+
+
+def test_a_rerun_needs_a_reason_in_the_variable(monkeypatch, variable, raw):
+    from airflow.sdk.exceptions import AirflowFailException
+    monkeypatch.setattr(raw, "close", lambda: None)
+    build_source(raw.db)
+    um_config(raw.db)
+    _run_task(monkeypatch, raw)
+    with pytest.raises(AirflowFailException, match="RERUN_REASON"):
+        _run_task(monkeypatch, raw)
+    with pytest.raises(AirflowFailException, match="RERUN_REASON"):
+        _run_task(monkeypatch, raw, overrides={"rerun_reason": "from a trigger"})
+    variable({**BASE, "rerun_reason": "  "})
+    with pytest.raises(AirflowFailException, match="blank"):
+        _run_task(monkeypatch, raw)
+    variable({**BASE, "rerun_reason": "source corrected"})
+    report = _run_task(monkeypatch, raw)
+    assert report["runs"][0]["rerun_reason"] == "source corrected"
+    variable({**BASE, "rerun_reason": "source corrected", "as_of": "2026-08-02",
+              "run_params": {"batch_id": "2026-08-02"}})
+    with pytest.raises(AirflowFailException, match="has no sample yet"):
+        _run_task(monkeypatch, raw)
+
+
+def test_rules_as_of_from_the_variable_or_a_trigger(monkeypatch, variable, raw):
+    from airflow.sdk.exceptions import AirflowFailException
+    monkeypatch.setattr(raw, "close", lambda: None)
+    build_source(raw.db)
+    um_config(raw.db)
+    variable({**BASE, "rules_as_of": "2026-06-30", "run_key": "A"})
+    assert _run_task(monkeypatch, raw)["runs"][0]["rules_as_of"] == "2026-06-30"
+    assert _run_task(monkeypatch, raw, overrides={"run_key": "B", "rules_as_of": "2026-05-01"})["runs"][0][
+        "rules_as_of"] == "2026-05-01"
+    variable({**BASE, "rules_as_of": "June 30"})
+    with pytest.raises(AirflowFailException, match="rules_as_of must be YYYY-MM-DD"):
+        _run_task(monkeypatch, raw)

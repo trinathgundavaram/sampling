@@ -5,7 +5,8 @@ versions sharing the same engine code:
 
 - **`airflow/`** – the DAG `GOVT_RGLTRY_UMCM_SAMPLING` (Airflow 3.3), in the style of the GOVT_RGLTRY
   framework's Airflow package: one DAG file, one `<name>_config_var` Variable, the Teradata login from an Airflow
-  Connection read with `BaseHook.get_connection` (the Variable's `connection_id`).
+  Connection read with `airflow.sdk Connection.get` into the `TERADATA_*` environment variables, as the framework
+  does (the Variable's `connection_id`).
 - **`local/`** – a command line (`python run_sampling.py …`) reading the login from `dev.env`.
 
 What a sample selects is **rows holding SQL**: exclusions, priorities, levels and their

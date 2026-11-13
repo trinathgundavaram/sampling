@@ -128,7 +128,7 @@ def test_e_the_target_table_gets_every_source_column(raw, conn, settings):
                       "etl_is_del_ind, YEAR(etl_load_dt_tm) > 2020, smpl_run_id = (SELECT Smpl_Run_ID FROM "
                       "GOVT_RGLTRY_SamplingRun), smpl_run_ty FROM smpl_t ORDER BY 1")
     assert rows == [(n + 1, f"d{n:03d}", f"K{n}", "W1", "ALL", "Y", "N", True, True, "WKLY") for n in range(4)]
-    _run(conn, settings, run_key="W1")
+    _run(conn, settings, run_key="W1", rerun_reason="redo")
     assert _rows(raw, "SELECT etl_is_curr_ind, etl_is_del_ind, COUNT(*), COUNT(etl_last_updt_dt_tm) FROM smpl_t "
                       "GROUP BY 1, 2 ORDER BY 1") == [("N", "Y", 4, 4), ("Y", "N", 4, 4)]
     _run(conn, settings, run_key="W2")
@@ -262,8 +262,9 @@ def test_g_param_given_null_or_blank_falls_back_to_its_query(raw, conn, settings
     _config(raw.db, 4)
     set_config(raw.db, scope_sql_txt="batch = '{batch_id}'")
     insert_rule(raw.db, "PARAM", 1, "batch_id", seq_nbr=1, rule_sql_txt="SELECT MAX(batch) FROM u")
-    for value in (None, "", "  "):
-        out = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": value})
+    for i, value in enumerate((None, "", "  ")):
+        out = _run(conn, settings, run_key="{batch_id}", run_params={"batch_id": value},
+                   rerun_reason="again" if i else None)
         assert out["status"] == "COMPLETED" and out["run_key"] == "B2" and out["in_scope"] == 6
 
 
@@ -351,7 +352,7 @@ def test_names_and_columns_in_any_case(raw, conn, settings):
     assert out["status"] == "COMPLETED" and out["exclusions"] == {"none": 0}, out.get("error")
     assert _rows(raw, "SELECT case_id, code, etl_is_curr_ind, smpl_run_key, smpl_order_nbr FROM smpl_mixed "
                       "ORDER BY 5") == [("m0", "K", "Y", "R1", 1), ("m1", "K", "Y", "R1", 2)]
-    run_sampling(conn, settings, ("Umcm", "t1", "Wkly"), run_key="R1", as_of=AS_OF)
+    run_sampling(conn, settings, ("Umcm", "t1", "Wkly"), run_key="R1", as_of=AS_OF, rerun_reason="redo")
     assert _rows(raw, "SELECT etl_is_curr_ind, COUNT(*) FROM smpl_mixed GROUP BY 1 ORDER BY 1") == [("N", 2), ("Y", 2)]
 
 

@@ -41,6 +41,7 @@ SAMPLE_REQUIRED = ("smpl_run_key", "etl_is_curr_ind")
 OUTPUT_KEY_CHUNK = 50
 RULE_CLASSES = ("PARAM", "EXCLUSION", "PRIORITY", "LEVEL", "BUCKET", "CAP")
 _AUDIT_COLUMNS = ("load_dtts", "loaduser_id", "lastupdt_dtts", "lastupdt_id")
+_EFFECT_COLUMNS = ("active_ind", "eff_start_dt", "eff_end_dt")
 SAMPLE_KEY = ("project_cd", "table_nm", "run_ty")
 ALL_TABLES = "*"
 _SNAPSHOT_RULE_COLUMNS = ("rule_id", "project_cd", "table_nm", "run_ty", "rule_class_cd", "seq_nbr", "rule_nm",
@@ -161,17 +162,30 @@ def resolve_rules(rules: list, table: str, run_type: str) -> list:
     return [r for _, r in best.values()]
 
 
-def load_config(conn: Connection, s: Settings, key) -> Sample:
+IN_EFFECT = "Active_Ind = 1 AND Eff_Start_Dt <= ? AND Eff_End_Dt >= ?"
+
+
+def load_config(conn: Connection, s: Settings, key, rules_as_of: Optional[date] = None) -> Sample:
     db, (project, table, run_type) = s.meta_db, sample_key(key)
+    day = rules_as_of or s.today()
     rows = conn.query(f"SELECT * FROM {db}.GOVT_RGLTRY_SamplingConfig WHERE UPPER(Project_Cd) = ? "
-                      f"AND UPPER(Table_Nm) = ? AND UPPER(Run_Ty) = ? AND Active_Ind = 1", [project, table, run_type])
+                      f"AND UPPER(Table_Nm) = ? AND UPPER(Run_Ty) = ? AND {IN_EFFECT}",
+                      [project, table, run_type, day, day])
     if not rows:
-        raise ConfigError(f"no active GOVT_RGLTRY_SamplingConfig row for {project}.{table}.{run_type}")
+        raise ConfigError(f"no active GOVT_RGLTRY_SamplingConfig row for {project}.{table}.{run_type} in effect on "
+                          f"{day.isoformat()}")
     if len(rows) > 1:
-        raise ConfigError(f"{len(rows)} active GOVT_RGLTRY_SamplingConfig rows for {project}.{table}.{run_type}")
+        raise ConfigError(f"{len(rows)} active GOVT_RGLTRY_SamplingConfig rows for {project}.{table}.{run_type} in "
+                          f"effect on {day.isoformat()}: their Eff_Start_Dt / Eff_End_Dt overlap")
     rules = conn.query(f"SELECT * FROM {db}.GOVT_RGLTRY_SamplingRule WHERE UPPER(Project_Cd) = ? "
-                       f"AND UPPER(Table_Nm) IN (?, '*') AND UPPER(Run_Ty) IN (?, '*') AND Active_Ind = 1",
-                       [project, table, run_type])
+                       f"AND UPPER(Table_Nm) IN (?, '*') AND UPPER(Run_Ty) IN (?, '*') AND {IN_EFFECT}",
+                       [project, table, run_type, day, day])
+    seen, twice = set(), set()
+    for r in rules:
+        (twice if r["rule_id"] in seen else seen).add(r["rule_id"])
+    if twice:
+        raise ConfigError(f"Rule_ID {sorted(twice)} has more than one active row in effect on {day.isoformat()}: "
+                          f"their Eff_Start_Dt / Eff_End_Dt overlap")
     return build_sample(rows[0], resolve_rules(rules, table, run_type))
 
 
@@ -181,7 +195,7 @@ def snapshot_hash(snapshot: dict) -> str:
 
 def build_sample(config: dict, rules: list) -> Sample:
     def clean(row):
-        return {k: v for k, v in row.items() if k not in _AUDIT_COLUMNS and k != "active_ind"}
+        return {k: v for k, v in row.items() if k not in _AUDIT_COLUMNS and k not in _EFFECT_COLUMNS}
     snapshot = {"config": clean(config), "rules": sorted((clean(r) for r in rules), key=lambda r: r["rule_id"])}
     ordered = sorted((dict(r) for r in snapshot["rules"]),
                      key=lambda r: (r.get("seq_nbr") is not None, r.get("seq_nbr") or 0, r["rule_id"]))
@@ -1128,13 +1142,14 @@ def current_run(conn: Connection, s: Settings, key, run_key: str) -> Optional[di
 
 
 def _start_run(conn, s, run_id, run_key, sample: Sample, seed, as_of, params_text, triggered_by, started,
-               override_reason=None):
+               override_reason=None, rerun_reason=None, rules_day=None):
     config, now = sample.config, s.now()
     columns = ["Smpl_Run_ID", "Project_Cd", "Table_Nm", "Run_Ty", "Run_Key", "As_Of_Dt_Key", "Run_Stat", "Curr_Ind",
-               "Random_Seed_Nbr", "Run_Parm_Txt", "Config_Hash", "Override_Rsn_Txt", "Triggered_By", "Start_Dtts",
+               "Random_Seed_Nbr", "Run_Parm_Txt", "Config_Hash", "Override_Rsn_Txt", "Rerun_Rsn_Txt", "Rules_As_Of_Dt", "Triggered_By",
+               "Start_Dtts",
                *_RUN_CONFIG_COLUMNS, "Load_Dtts", "LastUpdt_Dtts"]
     values = [run_id, *sample.key, run_key, as_of, "RUNNING", 0, seed, params_text,
-              sample.config_hash, override_reason, triggered_by, started,
+              sample.config_hash, override_reason, rerun_reason, rules_day, triggered_by, started,
               *(config.get(c) for c in _RUN_CONFIG_COLUMNS), now, now]
     conn.execute(f"INSERT INTO {s.meta_db}.GOVT_RGLTRY_SamplingRun ({', '.join(columns)}) "
                  f"VALUES ({', '.join(['?'] * len(columns))})", values)
@@ -1286,10 +1301,12 @@ def _log_selection(label: str, summary: dict, topped: int) -> None:
 def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = None,
                  run_params: Optional[dict] = None, seed: Optional[int] = None, triggered_by: str = "SYSTEM",
                  as_of: Optional[date] = None, dry_run: bool = False, force_reason: Optional[str] = None,
-                 extra_filters: Optional[str] = None) -> dict:
+                 extra_filters: Optional[str] = None, rerun_reason: Optional[str] = None,
+                 rules_as_of: Optional[date] = None) -> dict:
     as_of = as_of or s.today()
     started = s.now()
-    sample = load_config(conn, s, key)
+    rules_day = rules_as_of or s.today()
+    sample = load_config(conn, s, key, rules_day)
     config, method = sample.config, sample.method
     project, table, run_type = sample.key
     rounding = _up(config.get("rounding_cd"), "FLOOR")
@@ -1337,7 +1354,7 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                "method": method, "seed": run_seed, "target_cnt": target, "params": params, "in_scope": None,
                "excluded": None, "candidates": 0, "selected": 0, "shortfall": None, "exclusions": {},
                "by_stratum": {}, "buckets": {}, "retired_runs": 0, "dry_run": dry_run,
-               "config_hash": sample.config_hash}
+               "config_hash": sample.config_hash, "rules_as_of": rules_day.isoformat()}
     log.info("%s | %s | starting | run_key %s | method %s | target %s | meta_db %s | host %s%s", STEP, label, run_key,
              method, target if target is not None else f"{config.get('target_val')} %", s.meta_db, conn.host,
              " | dry run" if dry_run else "")
@@ -1360,16 +1377,31 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         return summary
 
     force_reason = str(force_reason or "").strip()[:1000] or None
+    given = rerun_reason is not None
+    rerun_reason = str(rerun_reason or "").strip()[:1000] or None
     try:
-        final = None if early else current_run(conn, s, sample.key, run_key)
-        final = final if final and _up(final.get("run_stat")) == "FINAL" else None
+        live = None if early else current_run(conn, s, sample.key, run_key)
+        final = live if live and _up(live.get("run_stat")) == "FINAL" else None
         if not dry_run:
             _start_run(conn, s, run_id, run_key, sample, run_seed, as_of, params_text, triggered_by, started,
-                       force_reason if final else None)
+                       force_reason if final else None, rerun_reason, rules_day)
     except Exception as e:
         return fail("technical", "START_FAILURE", e, exc_info=True)
     if early:
         return fail(early[0], early[1], early[2])
+    if given and not rerun_reason:
+        return fail("config", "RERUN_REASON", "rerun_reason is blank: give the reason for the rerun, or remove it "
+                                              "for a regular run")
+    if live and not final and not rerun_reason:
+        return fail("config", "RERUN_REASON", f"run_key {run_key} already has a completed sample (run "
+                                              f"{live['smpl_run_id']}): to rerun it, set rerun_reason")
+    if not live and rerun_reason:
+        return fail("config", "RERUN_REASON", f"rerun_reason is set but run_key {run_key} has no sample yet: remove "
+                                              f"it for a regular run (was it left from an earlier rerun?)")
+    if live and rerun_reason:
+        summary["rerun_reason"] = rerun_reason
+        log.warning("%s | %s | rerun of run_key %s (current run %s): %s", STEP, label, run_key,
+                    live["smpl_run_id"], rerun_reason)
     if final:
         summary["finalized_run"] = final["smpl_run_id"]
         if not force_reason and not dry_run:
@@ -1663,11 +1695,12 @@ def replace_case(conn: Connection, s: Settings, key, run_key: str, case_key_text
 
 
 def discover_configs(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
-                     run_type: Optional[str] = None) -> list:
+                     run_type: Optional[str] = None, rules_as_of: Optional[date] = None) -> list:
     if not str(project or "").strip():
         raise ConfigError("give a project (and optionally a table and a run type): a run never samples every "
                           "project at once")
-    where, params = ["Active_Ind = 1", "UPPER(Project_Cd) = ?"], [_up(project)]
+    day = rules_as_of or s.today()
+    where, params = [IN_EFFECT, "UPPER(Project_Cd) = ?"], [day, day, _up(project)]
     for column, value in (("Table_Nm", table), ("Run_Ty", run_type)):
         if str(value or "").strip():
             where.append(f"UPPER({column}) = ?")
@@ -1685,7 +1718,7 @@ def _scope(project, table, run_type) -> dict:
 def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
               run_type: Optional[str] = None, **kwargs) -> dict:
     scope = _scope(project, table, run_type)
-    keys = discover_configs(conn, s, project, table, run_type)
+    keys = discover_configs(conn, s, project, table, run_type, kwargs.get("rules_as_of"))
     if not keys:
         raise ConfigError(f"no active GOVT_RGLTRY_SamplingConfig matches {scope}")
     runs = []
@@ -1707,12 +1740,13 @@ def run_scope(conn: Connection, s: Settings, project: Optional[str] = None, tabl
 
 def validate(conn: Connection, s: Settings, project: Optional[str] = None, table: Optional[str] = None,
              run_type: Optional[str] = None, run_params: Optional[dict] = None,
-             check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[str] = None) -> dict:
+             check_sql: bool = False, as_of: Optional[date] = None, extra_filters: Optional[str] = None,
+             rules_as_of: Optional[date] = None) -> dict:
     out = []
-    for key in discover_configs(conn, s, project, table, run_type):
+    for key in discover_configs(conn, s, project, table, run_type, rules_as_of):
         entry = {"project_cd": key[0], "table_nm": key[1], "run_ty": key[2]}
         try:
-            sample = load_config(conn, s, key)
+            sample = load_config(conn, s, key, rules_as_of)
         except ConfigError as e:
             out.append({**entry, "problems": [str(e)]})
             continue

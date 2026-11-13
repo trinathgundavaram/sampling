@@ -92,7 +92,7 @@ def test_purge_keeps_what_is_still_needed(raw, conn, settings):
     _sample(raw.db, keep_excluded_ind=1)
     insert_rule(raw.db, "EXCLUSION", 11, "not_w04", rule_sql_txt="case_id = 'w04'")
     run_sampling(conn, settings, key(1), run_key="OLD", as_of=AS_OF - timedelta(days=100))
-    run_sampling(conn, settings, key(1), run_key="OLD", as_of=AS_OF - timedelta(days=100))
+    run_sampling(conn, settings, key(1), run_key="OLD", as_of=AS_OF - timedelta(days=100), rerun_reason="redo")
     run_sampling(conn, settings, key(1), run_key="FIN", as_of=AS_OF - timedelta(days=100))
     finalize_run(conn, settings, key(1), "FIN", "auditor")
     run_sampling(conn, settings, key(1), run_key="NEW", as_of=AS_OF)

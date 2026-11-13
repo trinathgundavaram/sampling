@@ -95,7 +95,7 @@ def test_rerun_retires_the_earlier_run_of_the_same_run_key(raw, conn, settings):
     build_source(raw.db)
     um_config(raw.db)
     first = _run(conn, settings)
-    second = _run(conn, settings)
+    second = _run(conn, settings, rerun_reason="source corrected")
     assert "::attempt-2::" in second["smpl_run_id"] and second["retired_runs"] == 1
     curr = _rows(raw, "SELECT Smpl_Run_ID, Curr_Ind, COUNT(*) FROM GOVT_RGLTRY_SampleSelection GROUP BY 1, 2")
     assert {(r[0], r[1]) for r in curr} == {(first["smpl_run_id"], 0), (second["smpl_run_id"], 1)}

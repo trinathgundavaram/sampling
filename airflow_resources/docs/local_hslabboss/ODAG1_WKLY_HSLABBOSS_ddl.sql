@@ -21,12 +21,14 @@ CREATE MULTISET TABLE HSLABBOSS.GOVT_RGLTRY_SamplingConfig (
   Tgt_Schema_Nm          VARCHAR(128),
   Tgt_Table_Nm           VARCHAR(128),
   Active_Ind             SMALLINT       DEFAULT 1 NOT NULL,
+  Eff_Start_Dt           DATE           DEFAULT DATE '1900-01-01' NOT NULL,
+  Eff_End_Dt             DATE           DEFAULT DATE '9999-12-31' NOT NULL,
   Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
   LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty);
+UNIQUE PRIMARY INDEX (Project_Cd, Table_Nm, Run_Ty, Eff_Start_Dt);
 
 CREATE MULTISET TABLE HSLABBOSS.GOVT_RGLTRY_SamplingRule (
   Rule_ID                INTEGER        NOT NULL,
@@ -50,12 +52,14 @@ CREATE MULTISET TABLE HSLABBOSS.GOVT_RGLTRY_SamplingRule (
   History_Scope_Cd       VARCHAR(10),
   Rule_Desc              VARCHAR(1000),
   Active_Ind             SMALLINT       DEFAULT 1 NOT NULL,
+  Eff_Start_Dt           DATE           DEFAULT DATE '1900-01-01' NOT NULL,
+  Eff_End_Dt             DATE           DEFAULT DATE '9999-12-31' NOT NULL,
   Load_Dtts              TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   LoadUser_ID            VARCHAR(100)   DEFAULT USER NOT NULL,
   LastUpdt_Dtts          TIMESTAMP(6)   DEFAULT CURRENT_TIMESTAMP(6) NOT NULL,
   LastUpdt_ID            VARCHAR(100)   DEFAULT USER NOT NULL
 )
-UNIQUE PRIMARY INDEX (Rule_ID);
+UNIQUE PRIMARY INDEX (Rule_ID, Eff_Start_Dt);
 
 CREATE MULTISET TABLE HSLABBOSS.GOVT_RGLTRY_SamplingRun (
   Smpl_Run_ID            VARCHAR(250)   NOT NULL,
@@ -77,6 +81,8 @@ CREATE MULTISET TABLE HSLABBOSS.GOVT_RGLTRY_SamplingRun (
   Error_Txt              VARCHAR(4000),
   Config_Hash            CHAR(64),
   Override_Rsn_Txt       VARCHAR(1000),
+  Rerun_Rsn_Txt          VARCHAR(1000),
+  Rules_As_Of_Dt         DATE,
   Finalized_By           VARCHAR(100),
   Finalized_Dtts         TIMESTAMP(6),
   Triggered_By           VARCHAR(100),

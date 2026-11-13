@@ -112,6 +112,13 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 
 - **Never delete a row**: set `Active_Ind = 0` (1 = in use). `Rule_ID` is yours to choose: unique in the whole
   table (e.g. 1–99 for one sample, 101–199 for the next).
+- **Effective dates**: every config and rule row has `Eff_Start_Dt` and `Eff_End_Dt` (both inclusive, default
+  `1900-01-01` to `9999-12-31`). A run uses the rows that are active (`Active_Ind = 1`) and in effect on its
+  rules date (today, unless the run is given `rules_as_of`). To change a rule from a date on: set the old row's
+  `Eff_End_Dt` to the day before, and add a row with the same `Rule_ID` and the new `Eff_Start_Dt` (a config row
+  likewise, with the same `Project_Cd` / `Table_Nm` / `Run_Ty`). Two rows of one `Rule_ID` (or one sample) in
+  effect on the same day stop the run (`CONFIG_ERROR`). The dates are not part of `Config_Hash`: ending a row
+  alone does not change it.
 - **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the target table's columns are
   matched without regard to case (`umcm` = `UMCM`).
 - **SQL text**: every SQL column is a whole `SELECT`: every rule's `Rule_Sql_Txt` (PARAM, EXCLUSION,
@@ -160,6 +167,7 @@ GOVT_RGLTRY_SamplingRun.Smpl_Run_ID = Smpl_Run_ID of GOVT_RGLTRY_SamplingRunRule
 | `Keep_Excluded_Ind` | 1 (default) = store excluded rows with their reason too |
 | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | Optional: the target table's database and name (both or neither), `$env` allowed, [4.3](#43-the-target-table) |
 | `Active_Ind` | 1 = in use |
+| `Eff_Start_Dt`, `Eff_End_Dt` | First and last day the row is in effect (inclusive; default `1900-01-01`, `9999-12-31`) |
 
 The schedule is not a column: it is the Airflow Variable's (`schedule_interval`, per `runs` entry for timed runs).
 
@@ -332,7 +340,7 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
+| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, `Rerun_Rsn_Txt`, `Rules_As_Of_Dt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
 | `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Not_Selected_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
 
@@ -398,7 +406,7 @@ and counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `GOVT_RGLTRY_SamplingRun.Run_Stat` | `RUNNING`, `COMPLETED`, `FINAL` (finalised), `ERROR` |
-| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
+| `GOVT_RGLTRY_SamplingRun.Error_Ty` | `CONFIG_ERROR` (fix the rows, not retried) · `FINALIZED` (the cycle's sample is final, not retried) · `RERUN_REASON` (a rerun without `rerun_reason`, a blank one, or one given to a regular run; not retried, [10.6](#106-redo-a-cycle)) · `PARAM_FAILURE` · `PULL_FAILURE` · `QUERY_RULE_FAILURE` · `SELECT_FAILURE` · `OUTPUT_FAILURE` · `PERSIST_FAILURE` · `START_FAILURE` (the run could not start: reading the configuration or writing the run row; technical, retried) · `ABANDONED` (closed by `mark-failed`) |
 | `GOVT_RGLTRY_SampleSelection.Selection_Stat` | `SELECTED`, `SKIPPED`, `REPLACED`, `REPLACEMENT`, NULL (a candidate not picked, or excluded) |
 
 ### 6.4 Placeholders in SQL text
@@ -476,7 +484,7 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
   "Started by the GOVT_RGLTRY framework").
 - **Auditors** get `sample_ready_email` (counts, run key, target table, rules hash) with `notify_recipients`.
 - **Triggering** (UI "Trigger DAG w/ config", CLI, REST, or an upstream DAG): `project`, `table`, `run_type`,
-  `run_key`, `seed`, `as_of`, `dry_run`, `log_level` (`run` on a timed DAG); `run_params` and `extra_filters` (they reach
+  `run_key`, `seed`, `as_of`, `rules_as_of`, `dry_run`, `log_level` (`run` on a timed DAG); `run_params` and `extra_filters` (they reach
   the SQL) only when the Variable's `trigger_keys` lists them. `trigger_keys`, when set, limits all of them. The database, the Connection and the environment are never taken from a trigger.
 
 ```bash
@@ -495,9 +503,9 @@ A **scope** is `--project P [--table T] [--run-type R]`; a **sample** is all thr
 | Command | What it does | Writes |
 |---|---|---|
 | `test-connection` | Logs in, shows the session and which sampling tables exist | – |
-| `validate <scope> [--check-sql] [--run-param k=v]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
-| `show-config <sample>` | The config and the rules it uses, by class, and its problems (JSON) | – |
-| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--seed S] [--dry-run] [--force-reason R]` | Runs the sample(s); `--run-key` defaults to `SAMPLING_RUN_KEY`, then the as-of date; `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
+| `validate <scope> [--check-sql] [--run-param k=v] [--rules-as-of D]` | Checks the rows; `--check-sql` also runs the PARAM lookups and `EXPLAIN`s every query | – |
+| `show-config <sample> [--rules-as-of D]` | The config and the rules it uses, by class, and its problems (JSON) | – |
+| `run <scope> [--run-key K] [--run-param k=v] [--as-of D] [--rules-as-of D] [--seed S] [--dry-run] [--rerun-reason R] [--force-reason R]` | Runs the sample(s); `--run-key` defaults to `SAMPLING_RUN_KEY`, then the as-of date; `--rules-as-of` (or `SAMPLING_RULES_AS_OF`) uses the rules in effect on that date; `--rerun-reason` (or `SAMPLING_RERUN_REASON`) is required to run a run key again, and refused otherwise; `--force-reason` replaces a `FINAL` sample | yes, except `--dry-run` |
 | `finalize <sample> --run-key K [--by U]` | Makes the current sample of the cycle `FINAL` | run row |
 | `replace <sample> --run-key K --case-key C --reason R [--any-bucket] [--by U]` | Replaces one selected case by the next candidate of its bucket | selections, target table |
 | `runs [<scope>] [--run-key K] [--status S]` | Recent run rows (with `Config_Hash`, `Finalized_By`, `Override_Rsn_Txt`) | – |
@@ -569,6 +577,20 @@ The worker was killed mid-run (nothing of the run was written: the writes are on
 ### 10.6 Redo a cycle
 Run again with the same `run_key` (and `--seed` from the run row to reproduce a RANDOM draw). The earlier run
 turns `Curr_Ind = 0` everywhere, and `ETL_IS_CURR_IND = 'N'`, `ETL_IS_DEL_IND = 'Y'` in the target table.
+
+A rerun needs a reason, so a second trigger of a run key that already has a sample cannot replace it by accident:
+- Airflow: add `"rerun_reason": "<why>"` to the Variable (or the `runs` entry), run, then **remove it**. A trigger
+  cannot give it. Local: `--rerun-reason "<why>"` or `SAMPLING_RERUN_REASON`.
+- The reason is stored on the new run row (`Rerun_Rsn_Txt`) and logged.
+- A run key that already has a sample, run without a reason: `RERUN_REASON`, nothing replaced.
+- A reason that is blank or only spaces: `RERUN_REASON`.
+- A reason given to a run key that has no sample yet (a regular run, e.g. a reason left in the Variable):
+  `RERUN_REASON`. A failed run leaves no sample, so the run after it is a regular run.
+- A dry run follows the same rules.
+- A rerun uses the rules in effect today. To redo a cycle with the rules of another day, also give
+  `rules_as_of` (Variable, trigger, `--rules-as-of`); the run row keeps the date used (`Rules_As_Of_Dt`).
+  `as_of` (the business date) can be given the same way.
+- A `FINAL` sample still needs `--force-reason` ([10.8](#108-finalise-a-sample)).
 
 ### 10.7 Change a mix, a rule, a priority
 New rule rows, or `Active_Ind = 0` on the old ones, then

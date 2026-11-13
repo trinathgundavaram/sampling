@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from datetime import date, datetime
+from typing import Optional
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -117,13 +118,29 @@ def _filter_sample(args, where: list, params: list) -> None:
             params.append(str(value).strip().upper())
 
 
+def _day(value, name: str) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value).strip())
+    except ValueError:
+        raise ConfigError(f"{name} must be YYYY-MM-DD, got {value!r}") from None
+
+
+def _rules_as_of(args) -> Optional[date]:
+    given = getattr(args, "rules_as_of", None)
+    return _day(given if given is not None else os.environ.get(PREFIX + "RULES_AS_OF"), "rules_as_of")
+
+
 def cmd_run(conn, s, args) -> tuple:
     as_of = date.fromisoformat(args.as_of) if args.as_of else None
     run_key = args.run_key or os.environ.get(PREFIX + "RUN_KEY") or None
     out = run_scope(conn, s, **_scope(args), run_key=run_key, run_params=_run_params(args),
                     extra_filters=_filters(args), seed=args.seed,
                     as_of=as_of, triggered_by=args.triggered_by or f"local-{getpass.getuser()}",
-                    dry_run=args.dry_run, force_reason=args.force_reason)
+                    dry_run=args.dry_run, force_reason=args.force_reason,
+                    rerun_reason=args.rerun_reason if args.rerun_reason is not None
+                    else os.environ.get(PREFIX + "RERUN_REASON"), rules_as_of=_rules_as_of(args))
     problems = out["failed"] or any(r.get("shortfall") for r in out["runs"])
     return out, 1 if problems else 0
 
@@ -143,12 +160,12 @@ def cmd_replace(conn, s, args) -> tuple:
 
 def cmd_validate(conn, s, args) -> tuple:
     out = validate(conn, s, **_scope(args), run_params=_run_params(args), check_sql=args.check_sql,
-                   extra_filters=_filters(args))
+                   extra_filters=_filters(args), rules_as_of=_rules_as_of(args))
     return out, 0 if out["result"] == "VALID" else 1
 
 
 def cmd_show_config(conn, s, args) -> tuple:
-    sample = load_config(conn, s, _key(args))
+    sample = load_config(conn, s, _key(args), _rules_as_of(args))
     return {"config": sample.config, "params": sample.params,
             "exclusions": sample.exclusions, "priorities": sample.priorities, "levels": sample.levels,
             "caps": sample.caps, "unknown_rules": sample.stray, "problems": config_problems(sample)}, 0
@@ -238,6 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--triggered-by", help="recorded on the run row (default local-<user>)")
     r.add_argument("--dry-run", action="store_true", help="count and select, write nothing")
     r.add_argument("--force-reason", help="replace a FINAL sample of the run key (recorded on the run row)")
+    r.add_argument("--rules-as-of", help="use the rules and config in effect on this date YYYY-MM-DD (default SAMPLING_RULES_AS_OF, else today)")
+    r.add_argument("--rerun-reason", help="why the run key is run again (default SAMPLING_RERUN_REASON): required "
+                                          "when the run key already has a sample, refused when it has none")
 
     fz = sub.add_parser("finalize", help="make the current sample of a run key final")
     scope(fz, required=True)
@@ -257,9 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
     scope(v)
     params(v)
     v.add_argument("--check-sql", action="store_true", help="also run the parameter lookups and EXPLAIN every query")
+    v.add_argument("--rules-as-of", help="use the rules and config in effect on this date YYYY-MM-DD (default SAMPLING_RULES_AS_OF, else today)")
 
     sc = sub.add_parser("show-config", help="one sample with the rule rows it uses and its problems")
     scope(sc, required=True)
+    sc.add_argument("--rules-as-of", help="use the rules and config in effect on this date YYYY-MM-DD (default SAMPLING_RULES_AS_OF, else today)")
 
     for name, helptext in (("runs", "recent runs (GOVT_RGLTRY_SamplingRun)"), ("errors", "open errors: latest attempt failed")):
         sp = sub.add_parser(name, help=helptext)

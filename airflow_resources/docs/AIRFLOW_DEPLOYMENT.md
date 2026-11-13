@@ -4,7 +4,8 @@ A config-driven stratified sampling engine that runs from an Airflow DAG with it
 source tables in **Teradata**. It follows the layout and connection style of the GOVT_RGLTRY framework's
 Airflow package (`framework/airflow`, branch `feature/framework-package`): one DAG file, one DAG id, one
 `<name>_config_var` Variable, the Teradata login from the Airflow Connection named in its `connection_id`, read with
-`BaseHook.get_connection`.
+`airflow.sdk Connection.get` into `TERADATA_HOST` / `TERADATA_USER` / `TERADATA_PASSWORD` / `TERADATA_LOGMECH`, as
+the framework does.
 
 The engine itself (`sampling/engine.py`, `db.py`, `settings.py`) exists once, in `airflow/sampling`: the local
 version (`local/`, see [Local version](#local-version-command-line)) imports it from there. Only `dags.py` imports
@@ -45,8 +46,8 @@ local/                                      the local version (command line, dev
    | `GOVT_RGLTRY_UMCM_SAMPLING` | `govt_rgltry_umcm_sampling_config_var` | `govt_rgltry_umcm_sampling.py` |
 
 2. **One Airflow Connection**: Teradata, named by the Variable's `connection_id`. The
-   bridge reads it with `BaseHook.get_connection` and passes host, login, password and logmech straight to the
-   connection (they are not put in the environment); the engine opens one Teradata
+   bridge reads it with `airflow.sdk Connection.get` and sets `TERADATA_HOST`, `TERADATA_USER`,
+   `TERADATA_PASSWORD` and `TERADATA_LOGMECH` in the task's environment, as the framework does; the engine opens one Teradata
    session and uses it for the metadata tables and for the source tables (`Src_Schema_Nm` / `Src_Table_Nm` of the
    configuration rows, so they may sit in any database that login can read).
 3. **A task runs one sampling scope** in-process: every active sample of a `project`, optionally only one `table`
@@ -89,10 +90,12 @@ times (daily, weekly, monthly: see [Timed runs](#timed-runs)).
 
 ### Airflow Connection
 
-**Teradata** - read with `BaseHook.get_connection`: the Connection named by the Variable's `connection_id`
+**Teradata** - read with `airflow.sdk Connection.get`: the Connection named by the Variable's `connection_id`
 (falls back to the framework's `td_conn_var`, then `govt_rgltry_teradata`). `connection_type`, when given, must be `teradata` (the only one: the engine reads and writes Teradata).
-Host, login and password are passed to the Teradata connection directly, never through the environment; extra
-`logmech` is the logon mechanism (else `TERADATA_LOGMECH`, else LDAP). The password is never logged.
+Host, login and password go into `TERADATA_HOST`, `TERADATA_USER` and `TERADATA_PASSWORD` of the task's
+environment (as in the framework), and the engine connects from them; extra `logmech` sets `TERADATA_LOGMECH` (else
+the one already set, else LDAP). The log line `Loaded Teradata connection '<id>': host=… user=… logmech=… (password
+not logged)` shows what was used; the password is never logged.
 
 | Field | Value |
 |---|---|
@@ -141,6 +144,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `extra_filters` | Optional SQL condition (or a list of them) on the rows `Scope_Sql_Txt` returns, for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `As_Of_Dt_Key`, `Smpl_Cycle_Dt_Key` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
+| `rules_as_of` | `YYYY-MM-DD`: use the config and rule rows in effect on this date (`Eff_Start_Dt` / `Eff_End_Dt`). Default: today. Stored on the run row as `Rules_As_Of_Dt` |
+| `rerun_reason` | Why a run key that already has a sample is run again. Required for that rerun, refused (`RERUN_REASON`) on a regular run and when blank. Variable or `runs` entry only, never a trigger: set it, run, remove it |
 | `runs` | Optional list of scopes, e.g. `[{"name": "weekly", "run_type": "WKLY"}, {"name": "odag1_monthly", "table": "ODAG1", "run_type": "MNT", "run_params": {...}}]`. Each entry is layered over the Variable (an entry naming only a run type samples the Variable's project and table at that run type). Without `schedule_interval` in the entries: one task each, all on the Variable's schedule. With it: [timed runs](#timed-runs) |
 | `schedule_interval` | Cron (Central time) or null for manual / triggered only. In a `runs` entry: that entry's own times |
 | `schedule_timezone` | Default `America/Chicago` |
@@ -157,15 +162,15 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `notify_recipients` | Adds `sample_ready_email` after a successful run (the auditors): per sample its run key, status, selected / target, shortfall, target table and rules hash. Counts and names only, never case data |
 | `trigger_dags` | DAG ids started after a successful run (passing `project`, `table`, `run_type`, `run_key`, `as_of`) |
 | `trigger_run_params` | Optional list of keys an upstream DAG passes that become run parameters (`{name}` tokens in the rules), e.g. the framework's `["run_type", "table"]` |
-| `trigger_keys` | Optional list of the keys a trigger may set (default: `project`, `table`, `run_type`, `run_key`, `seed`, `as_of`, `dry_run`, `log_level`; `run_params` and `extra_filters` reach the SQL, so a trigger sets them only when listed here). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
+| `trigger_keys` | Optional list of the keys a trigger may set (default: `project`, `table`, `run_type`, `run_key`, `seed`, `as_of`, `rules_as_of`, `dry_run`, `log_level`; `run_params` and `extra_filters` reach the SQL, so a trigger sets them only when listed here). Use it when an upstream DAG passes values this DAG must not take - the framework passes its own `project` - e.g. `["run_key", "as_of"]` |
 | `snow_assignment_group` | ServiceNow assignment group of the failure ticket |
 | `owner`, `tags`, `pool` | As usual |
 
 ### Triggering a run with values (Trigger DAG w/ config, CLI `-c`, REST API)
 
 A trigger may change only the scope and the run's inputs: `project`, `table`, `run_type`, `run_key`,
-`run_params`, `extra_filters`, `seed`, `as_of`, `dry_run`, `log_level` (and `run` on a timed DAG). Anything else (the
-database, the Connection, the environment) is ignored with a warning - set it in the Variable. Examples:
+`run_params`, `extra_filters`, `seed`, `as_of`, `rules_as_of`, `dry_run`, `log_level` (and `run` on a timed DAG). Anything else (the
+database, the Connection, the environment, `rerun_reason`) is ignored with a warning - set it in the Variable. Examples:
 
 ```json
 {"table": "ODAG1", "run_type": "WKLY", "run_key": "2026-10-30", "run_params": {"pull_date": "2026-10-30"}}
@@ -226,7 +231,17 @@ DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no cod
 ## What the log shows
 
 `sampling <version> | settings {...} | scope {...} | run_key=... as_of=...`, the Teradata host and user (never the
-password), the candidate pull SQL of each sample, then the report:
+password), every configured SQL as it runs, then the report. Each SQL entry has the framework's layout: the
+SQL with `?` for each parameter, every parameter with its value (`DATE '…'` for a date), and the statement as sent:
+
+```
+INFO - SAMPLING | UMCM.ODAG1.WKLY | pull
+    SQL:         SELECT … WHERE BTCH_ID = ? AND ETL_IS_CURR_IND = 'Y'
+    parameters:  batch_id = '20261111'
+    with values: SELECT … WHERE BTCH_ID = '20261111' AND ETL_IS_CURR_IND = 'Y'
+```
+
+The report:
 
 ```json
 {
@@ -274,6 +289,8 @@ python run_sampling.py mark-failed --run-id <run_id>
 | `timezone`, `chunk_rows`, `access_lock` | `SAMPLING_TIMEZONE`, `SAMPLING_CHUNK_ROWS`, `SAMPLING_ACCESS_LOCK` |
 | `log_level` | `SAMPLING_LOG_LEVEL` (console plus one file per run in `local/logs`, or `SAMPLING_LOG_DIR`) |
 | `run_key` | `--run-key`, else `SAMPLING_RUN_KEY` (set it to `{batch_id}` for ODAG1), else the as-of date |
+| `rerun_reason` | `--rerun-reason`, else `SAMPLING_RERUN_REASON` |
+| `rules_as_of` | `--rules-as-of`, else `SAMPLING_RULES_AS_OF` |
 | scope (`--project`, `--table`, `--run-type`), `run_key`, `run_params`, `extra_filters`, `as_of`, `seed`, `dry_run` | command options (`--filter "SQL"`, repeat, for `extra_filters`) |
 
 Exit codes: 0 = done, 1 = done with problems (a sample failed or fell short, validation found problems),
