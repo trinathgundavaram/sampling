@@ -709,11 +709,11 @@ def _history(conn: Connection, s: Settings, sample: Sample, rule: dict, run_key:
     if scope == "SAMPLE":
         where.append("UPPER(Run_Ty) = ?")
         params.append(run_type)
-    rows = conn.query(f"SELECT Case_Key, MAX({selected}) AS sel, MAX({left_out}) AS left_out "
+    rows = conn.query(f"SELECT Case_Key, MAX({selected}) AS sel_ind, MAX({left_out}) AS left_out "
                       f"FROM {s.meta_db}.GOVT_RGLTRY_SampleSelection WHERE {' AND '.join(where)} GROUP BY Case_Key",
                       seen + params)
-    out = {"selected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 1},
-           "unselected": {r["case_key"] for r in rows if int(r["sel"] or 0) == 0 and int(r["left_out"] or 0) == 0}}
+    out = {"selected": {r["case_key"] for r in rows if int(r["sel_ind"] or 0) == 1},
+           "unselected": {r["case_key"] for r in rows if int(r["sel_ind"] or 0) == 0 and int(r["left_out"] or 0) == 0}}
     cache[(scope, days, ahead)] = out
     return out
 
