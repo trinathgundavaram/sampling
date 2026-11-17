@@ -29,7 +29,7 @@ Two files:
 | V_SMPL_DSH_BATCH | One row per framework batch | RequestControl, SampleRun |
 | V_SMPL_DSH_RETENTION | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
 
-Derived fields in the universe and sample views follow the rule table: functional area (rules 232 to 244), request type, IP/PAC type, determination (Partially Approved counts as Approved), expedited or standard, network, the SHRPA flags (auto-approve is exactly `DME / No Auth Required - Auto Approve` or `No Auth Required - Auto Approve`), diabetic supplies, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The expected exclusion follows rules 211 to 214: an auth is excluded only when every one of its codes is auto-approved, needs no PA or is a diabetic supply.
+Derived fields in the universe and sample views follow the rule table: functional area (rules 232 to 244), request type, IP/PAC type, determination, expedited or standard, network, the SHRPA flags (auto-approve is exactly `DME / No Auth Required - Auto Approve` or `No Auth Required - Auto Approve`), diabetic supplies, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The expected exclusion follows rules 211 to 214: an auth is excluded only when every one of its codes is auto-approved, needs no PA or is a diabetic supply.
 
 ## Dashboards and requirements
 

@@ -666,10 +666,19 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
             continue
         text = substitute_params(_expand(s.resolve_env(_text(p), identifier=False), params), params)
         rows = conn.query(text)
-        value = next(iter(rows[0].values()), None) if rows else None
-        if value is None:
+        values = list(rows[0].items()) if rows else []
+        if not values or values[0][1] is None:
             raise LookupError(f"run parameter {name}: its rule_sql_txt returned no value")
-        params[name] = _param_text(value)
+        params[name] = _param_text(values[0][1])
+        for column, value in values[1:]:
+            extra = str(column).lower()
+            if extra in BUILT_IN_PARAMS:
+                raise ValueError(f"PARAM rule {name}: column {extra} is set by the engine, give it another name")
+            if extra in passed:
+                continue
+            if value is None:
+                raise LookupError(f"run parameter {extra}: PARAM rule {name} returned no value for it")
+            params[extra] = _param_text(value)
     return params
 
 
@@ -1631,6 +1640,10 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
                 history[p["rule_id"]] = _history(conn, s, sample, p, run_key, as_of, cache, as_seen=params.get(AS_SEEN))
     except Exception as e:
         return fail("technical", "PULL_FAILURE", e, exc_info=True)
+    if not rows:
+        given = ", ".join(f"{k}={v}" for k, v in sorted(params.items()) if k not in BUILT_IN_PARAMS and k != AS_SEEN)
+        return fail("config", "EMPTY_SCOPE", f"the scope returned no rows for this run ({given or 'no parameters'}): "
+                                             f"the source has no current rows that match them")
 
     try:
         for r in rows:
