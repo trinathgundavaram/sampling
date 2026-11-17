@@ -298,7 +298,7 @@ A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at mo
 **CAP** – a limit across the whole sample, where a bucket's `Max_Val` or the diversity cap only limit one bucket at
 a time. `Rule_Sql_Txt` is a `SELECT`: `Rule_Ty` `QUERY` (default) returns the key columns of the cases it limits (at
 most `Max_Val` of them: "at most 10 out-of-network"), `PER_VALUE` the key columns and a value (at most `Max_Val` per
-value: "at most 3 of one CPT code"; a case it does not return, NULL, or a blank value, is not limited). `Parent_Path_Txt`: only the
+value: "at most 3 of one CPT code"; a case it does not return, NULL, or a blank value, is not limited), `PER_BUCKET` the key columns of the cases it limits, counted per bucket: `Level_Nbr` names a LEVEL, each case's bucket is its deepest bucket at or above that level, and a `PCT` `Max_Val` is a percentage of that bucket's target, rounded down ("at most 75 % expedited in each functional area"; `Level_Nbr` is only used by `PER_BUCKET`). `Parent_Path_Txt`: only the
 cases of the buckets under it (`Denied` = the denials, `*` default = the whole sample). `Max_Ty` + `Max_Val` (required):
 `CNT` a number, `PCT` a percentage of the sample's target. After the buckets have selected, the cases are taken in
 priority order; one that would exceed a cap gives way to the next candidate of its own bucket that fits every cap
@@ -401,7 +401,7 @@ and counts per bucket, are a `GROUP BY` on it.
 | Column | Values |
 |---|---|
 | `GOVT_RGLTRY_SamplingRule.Rule_Class_Cd` | `PARAM`, `EXCLUSION`, `PRIORITY`, `LEVEL`, `BUCKET`, `CAP` |
-| `Rule_Ty` (CAP) | `QUERY` (default), `PER_VALUE` |
+| `Rule_Ty` (CAP) | `QUERY` (default), `PER_VALUE`, `PER_BUCKET` |
 | `Table_Nm`, `Run_Ty` (rule) | a table / run type, or `*` = all of them |
 | `Rule_Ty` (EXCLUSION) | `QUERY` (default), `PRIOR_SELECTION` |
 | `Rule_Ty` (PRIORITY) | `QUERY` (default), `EXPRESSION`, `PRIOR_CANDIDATE`, `PRIOR_SELECTION` |

@@ -29,7 +29,8 @@ EXCLUSION_TYPES = (QUERY, "PRIOR_SELECTION")
 PRIORITY_TYPES = (QUERY, "EXPRESSION", "PRIOR_CANDIDATE", "PRIOR_SELECTION")
 BUCKET_TYPES = (QUERY,)
 PER_VALUE = "PER_VALUE"
-CAP_TYPES = (QUERY, PER_VALUE)
+PER_BUCKET = "PER_BUCKET"
+CAP_TYPES = (QUERY, PER_VALUE, PER_BUCKET)
 HISTORY_TYPES = ("PRIOR_CANDIDATE", "PRIOR_SELECTION")
 HISTORY_SCOPES = ("SAMPLE", "TABLE", "PROJECT")
 SHORTFALL_POLICIES = ("TOPUP", "NONE")
@@ -62,7 +63,7 @@ _USED = {"PARAM": {"rule_sql_txt"},
          "LEVEL": {"rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd"},
          "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "quota_val", "max_ty",
                     "max_val"},
-         "CAP": {"rule_ty", "rule_sql_txt", "parent_path_txt", "max_ty", "max_val"}}
+         "CAP": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "max_ty", "max_val"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 _STATEMENT_WORDS = ("INSERT", "INS", "UPDATE", "UPD", "DELETE", "DEL", "MERGE", "UPSERT", "REPLACE", "DROP",
                     "CREATE", "ALTER",
@@ -327,6 +328,11 @@ def config_problems(sample: Sample) -> list:
         if not _text(cap):
             problems.append(f"CAP rule {name}: rule_sql_txt is empty (a SELECT of the cases it limits)")
         problems += [f"CAP rule {name}: {p}" for p in _amount_problems(cap, "max_ty", "max_val", required=True)]
+        if kind == PER_BUCKET and cap.get("level_nbr") not in orders:
+            problems.append(f"CAP rule {name}: PER_BUCKET needs level_nbr, the level_nbr of a LEVEL rule "
+                            f"(the deepest stratum at or above that level is the bucket)")
+        elif kind != PER_BUCKET and cap.get("level_nbr") not in (None, ""):
+            problems.append(f"CAP rule {name}: level_nbr is only used by rule_ty PER_BUCKET")
 
     db, table = _text(c, "tgt_schema_nm"), _text(c, "tgt_table_nm")
     if bool(db) != bool(table):
@@ -821,6 +827,17 @@ def select(rows: list, n: int, method: str, rng: random.Random, cap: Optional[in
     raise ConfigError(f"unknown smpl_method_cd {method!r}")
 
 
+def _level_group(level: dict, path: str) -> dict:
+    by_pattern = {}
+    for b in level["buckets"]:
+        if _matches(path, b.get("parent_path_txt")):
+            by_pattern.setdefault(_up(b.get("parent_path_txt"), "*"), []).append(b)
+    if not by_pattern:
+        return {}
+    best = min(by_pattern, key=_specificity)
+    return {_norm(b["rule_nm"]): b for b in by_pattern[best]}
+
+
 class Stratifier:
     def __init__(self, sample: Sample, seed, rounding_cd: str):
         self.levels = sample.levels
@@ -892,14 +909,7 @@ class Stratifier:
         self.notes = [n for n in self.notes if not n.startswith(prefix)]
 
     def _group(self, level: dict, path: str) -> dict:
-        by_pattern = {}
-        for b in level["buckets"]:
-            if _matches(path, b.get("parent_path_txt")):
-                by_pattern.setdefault(_up(b.get("parent_path_txt"), "*"), []).append(b)
-        if not by_pattern:
-            return {}
-        best = min(by_pattern, key=_specificity)
-        return {_norm(b["rule_nm"]): b for b in by_pattern[best]}
+        return _level_group(level, path)
 
     def _allocate(self, rows: list, target: int, index: int, path: str) -> list:
         while index < len(self.levels) and not _matches(path, self.levels[index].get("parent_path_txt")):
@@ -1017,16 +1027,42 @@ def _under(path: str, pattern) -> bool:
 
 
 class Caps:
-    def __init__(self, sample: Sample, target: int, rounding_cd: str):
+    def __init__(self, sample: Sample, target: int, rounding_cd: str, bucket_targets: Optional[dict] = None):
+        self.sample = sample
+        self.target = target
+        self.bucket_targets = bucket_targets or {}
         self.rules = []
+        self.report, self.report_rule = {}, {}
         for c in sample.caps:
-            limit = amount(c, "max_ty", "max_val", target, rounding_cd)
-            if limit == 0 and _up(c.get("max_ty"), "CNT") == "PCT" and (_number(c.get("max_val")) or 0) > 0:
-                limit = 1
-            self.rules.append((c, limit, _col(c), _up(c.get("rule_ty"), QUERY) == PER_VALUE))
+            kind = _up(c.get("rule_ty"), QUERY)
+            limit = None
+            if kind != PER_BUCKET:
+                limit = amount(c, "max_ty", "max_val", target, rounding_cd)
+                if limit == 0 and _up(c.get("max_ty"), "CNT") == "PCT" and (_number(c.get("max_val")) or 0) > 0:
+                    limit = 1
+                self._report(str(c["rule_nm"]), c, limit)
+            self.rules.append((c, limit, _col(c), kind))
         self.counts = [{} for _ in self.rules]
-        self.report = {str(c["rule_nm"]): {"limit": limit, "over": 0, "replaced": 0} for c, limit, _, _ in self.rules}
         self._groups = {}
+
+    def _report(self, name: str, cap: dict, limit) -> str:
+        if name not in self.report:
+            self.report[name] = {"limit": limit, "over": 0, "replaced": 0}
+            self.report_rule[name] = cap
+        return name
+
+    def limit(self, i: int, group: str) -> int:
+        cap, limit, _, kind = self.rules[i]
+        if kind != PER_BUCKET:
+            return limit
+        of = self.bucket_targets.get(group, self.target if group == "ALL" else 0)
+        return amount(cap, "max_ty", "max_val", of, "FLOOR")
+
+    def name(self, i: int, group: str) -> str:
+        cap, _, _, kind = self.rules[i]
+        if kind != PER_BUCKET:
+            return str(cap["rule_nm"])
+        return self._report(f"{cap['rule_nm']}: {group}", cap, self.limit(i, group))
 
     def groups(self, row: dict) -> list:
         known = self._groups.get(row["_key"])
@@ -1036,40 +1072,72 @@ class Caps:
 
     def _find_groups(self, row: dict) -> list:
         out = []
-        for i, (cap, _, col, per_value) in enumerate(self.rules):
+        for i, (cap, _, col, kind) in enumerate(self.rules):
             if not _under(row.get("_path"), cap.get("parent_path_txt")):
                 continue
             value = row.get(col)
-            if per_value and value is not None and str(value).strip():
+            if kind == PER_VALUE and value is not None and str(value).strip():
                 out.append((i, _norm(value)))
-            elif not per_value and value == 1:
+            elif kind == PER_BUCKET and value == 1:
+                out.append((i, bucket_of(self.sample, row.get("_path"), cap.get("level_nbr"))))
+            elif kind == QUERY and value == 1:
                 out.append((i, ""))
         return out
 
     def blocking(self, row: dict) -> Optional[str]:
         hit = self._hit(row)
-        return None if hit is None else str(self.rules[hit[0]][0]["rule_nm"])
+        return None if hit is None else self.name(*hit)
 
     def why(self, row: dict) -> Optional[str]:
         hit = self._hit(row)
         if hit is None:
             return None
         i, group = hit
-        cap, limit, _, per_value = self.rules[i]
+        cap, _, _, kind = self.rules[i]
+        limit = self.limit(i, group)
+        if kind == PER_BUCKET:
+            return f"Over cap {cap['rule_nm']}: bucket {group} already has its {limit}"
         where = _label(cap.get("parent_path_txt")) if _up(cap.get("parent_path_txt"), "*") != "*" else "the sample"
-        if per_value:
+        if kind == PER_VALUE:
             return f"Over cap {cap['rule_nm']}: {group} already has {limit} in {where}"
         return f"Over cap {cap['rule_nm']}: {where} already has its {limit}"
 
     def _hit(self, row: dict):
         for i, group in self.groups(row):
-            if self.counts[i].get(group, 0) >= self.rules[i][1]:
+            if self.counts[i].get(group, 0) >= self.limit(i, group):
                 return i, group
         return None
 
     def take(self, row: dict) -> None:
         for i, group in self.groups(row):
+            if self.rules[i][3] == PER_BUCKET:
+                self.name(i, group)
             self.counts[i][group] = self.counts[i].get(group, 0) + 1
+
+
+def stratum_levels(sample: Sample, path: str) -> list:
+    out, prefix, index, levels = [], "", 0, sample.levels
+    if not path or path == "ALL":
+        return out
+    for part in str(path).split("/"):
+        while index < len(levels) and (not _matches(prefix, levels[index].get("parent_path_txt"))
+                                       or (not levels[index]["value_level"] and not _level_group(levels[index], prefix))):
+            index += 1
+        if index >= len(levels):
+            break
+        prefix = f"{prefix}/{part}" if prefix else part
+        out.append((prefix, levels[index].get("level_nbr")))
+        index += 1
+    return out
+
+
+def bucket_of(sample: Sample, path: str, level_nbr) -> str:
+    deepest = _number(level_nbr)
+    found = "ALL"
+    for prefix, nbr in stratum_levels(sample, path):
+        if deepest is not None and _number(nbr) is not None and _number(nbr) <= deepest:
+            found = prefix
+    return found
 
 
 def apply_caps(caps: Caps, strat: "Stratifier", candidates: list, chosen: list) -> list:
@@ -1344,10 +1412,9 @@ def run_stats(sample: Sample, strat: "Stratifier", caps: "Caps", counts: dict, m
 
     out = [stat("BUCKET", path, Leaf_Ind=1 if path in strat.leaves else 0, Candidate_Cnt=n["candidates"],
                 Target_Cnt=n["target"], Selected_Cnt=n["selected"]) for path, n in strat.nodes.items()]
-    for cap, limit, _, _ in caps.rules:
-        report = caps.report[str(cap["rule_nm"])]
-        out.append(stat("CAP", cap["rule_nm"], Rule_ID=rid(cap), Limit_Cnt=limit, Over_Cnt=report["over"],
-                        Replaced_Cnt=report["replaced"]))
+    for name, report in caps.report.items():
+        out.append(stat("CAP", name, Rule_ID=rid(caps.report_rule[name]), Limit_Cnt=report["limit"],
+                        Over_Cnt=report["over"], Replaced_Cnt=report["replaced"]))
     out += [stat("EXCLUSION", x["rule_nm"], Rule_ID=rid(x), Case_Cnt=counts.get(str(x["rule_nm"]), 0))
             for x in sample.exclusions]
     out += [stat("RULE", f"{rule['rule_class_cd']} {rule['rule_nm']}", Rule_ID=rid(rule), Case_Cnt=n)
@@ -1586,8 +1653,9 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         target = resolve_target(config, len(candidates), rounding)
         summary["target_cnt"] = target
         strat = Stratifier(sample, run_seed, rounding)
-        caps = Caps(sample, target, rounding)
-        chosen = apply_caps(caps, strat, candidates, strat.run(candidates, target))
+        picked = strat.run(candidates, target)
+        caps = Caps(sample, target, rounding, {path: n["target"] for path, n in strat.nodes.items()})
+        chosen = apply_caps(caps, strat, candidates, picked)
         extra = []
         if len(chosen) < target and _up(config.get("shortfall_cd"), "TOPUP") == "TOPUP":
             taken = {r["_key"] for r in chosen}
@@ -2038,7 +2106,12 @@ def _within_caps(conn: Connection, s: Settings, sample: Sample, params: dict, ru
     key_queries = [(r, text) for r, text in build_queries(sample, s, params)["key_queries"]
                    if r["rule_class_cd"] == "CAP"]
     mark_query_rules(conn, s, sample, list(cases.values()), key_queries, params)
-    caps = Caps(sample, int(run.get("target_cnt") or len(kept) + 1), _up(run.get("rounding_cd"), "FLOOR"))
+    buckets = {}
+    if any(_up(c.get("rule_ty"), QUERY) == PER_BUCKET for c in sample.caps):
+        stats = conn.query(f"SELECT Stat_Nm, Target_Cnt FROM {s.meta_db}.GOVT_RGLTRY_SamplingRunStat "
+                           f"WHERE Smpl_Run_ID = ? AND Stat_Ty = 'BUCKET'", [run["smpl_run_id"]])
+        buckets = {str(r["stat_nm"]).rstrip(): int(r["target_cnt"] or 0) for r in stats}
+    caps = Caps(sample, int(run.get("target_cnt") or len(kept) + 1), _up(run.get("rounding_cd"), "FLOOR"), buckets)
     for r in kept:
         caps.take(cases[r["case_key"]])
     out = [r for r in pool if caps.blocking(cases[r["case_key"]]) is None]
