@@ -256,7 +256,7 @@ INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm,
 VALUES (241, 'UMCM', 'ODAG1', 'WKLY', 'LEVEL', 1, 'program', 1, '*', 'SKIP');
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Quota_Val, Rule_Sql_Txt)
 VALUES (242, 'UMCM', 'ODAG1', 'WKLY', 'BUCKET', 1, 'Behavioral Health', 1, '*', 'PCT', 21,
-        'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY
+        'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY, a.AUTHZN_REVSN_NUM
          FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 a
          JOIN REF_$ENV.BH_PROC_CODES c ON c.PROC_CD = a.PROC_CD AND c.ACT_IND = 1
          JOIN REF_$ENV.PROVIDER p ON p.PROV_ID = a.SVC_PROV_ID
@@ -310,7 +310,7 @@ within the caps. The run report's `caps` gives each rule's `limit`, how many cas
 ```sql
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Parent_Path_Txt, Max_Ty, Max_Val, Rule_Sql_Txt)
 VALUES (260, 'UMCM', 'ODAG1', 'WKLY', 'CAP', 2, 'OON_DENIALS', 'Denied', 'CNT', 10,
-        'SELECT AUTHZN_ID, SRC_DATA_KEY FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1
+        'SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REVSN_NUM FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1
          WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND SVC_PROV_TY = ''<non-par>''');
 ```
 

@@ -29,7 +29,7 @@ Two files:
 | V_SMPL_DSH_BATCH | One row per framework batch | RequestControl, SampleRun |
 | V_SMPL_DSH_RETENTION | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
 
-Derived fields in the universe and sample views follow the rule table: functional area (rules 232 to 244), request type, IP/PAC type, determination (Partially Approved counts as Approved), expedited or standard, network, the SHRPA flags (auto-approve is exactly `DME / No Auth Required - Auto Approve` or `No Auth Required - Auto Approve`), diabetic supplies, initial authorization, the clinical auditor flag and auditor type. The expected exclusion follows rules 211 to 214: an auth is excluded only when every one of its codes is auto-approved, needs no PA or is a diabetic supply.
+Derived fields in the universe and sample views follow the rule table: functional area (rules 232 to 244), request type, IP/PAC type, determination (Partially Approved counts as Approved), expedited or standard, network, the SHRPA flags (auto-approve is exactly `DME / No Auth Required - Auto Approve` or `No Auth Required - Auto Approve`), diabetic supplies, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The expected exclusion follows rules 211 to 214: an auth is excluded only when every one of its codes is auto-approved, needs no PA or is a diabetic supply.
 
 ## Dashboards and requirements
 
@@ -59,7 +59,7 @@ Derived fields in the universe and sample views follow the rule table: functiona
 
 1. Clinical auditor flag: a denial needs a clinical auditor, every other case an administrative one. SHRPA's clinical review columns are not used (the requirement to skip codes SHRPA says need no clinical review was removed 2026-11-16).
 2. ODAG1 date columns are text. They are read with `TRYCAST(OREPLACE(TRIM(x), '/', '-') AS DATE)`, which needs Teradata 16.20 or later and dates in year-month-day order. A different format needs a `FORMAT` clause in those casts in the SQL.
-3. A run's Run_Key is the framework BTCH_ID, which is how the universe joins to SampleSelection.
+3. A run's Run_Key is the framework BTCH_ID, which is how the universe joins to SampleSelection. The case key is `AUTHZN_ID`, `SRC_DATA_KEY` and `AUTHZN_REVSN_NUM` (2026-11-16), built the way the engine writes `Case_Key`.
 4. The deadline uses the run's As_Of date; if that is not the Friday of the week, the deadline moves with it.
 5. The timeframe defaults (14 and 3 days) are placeholders; set them from the contract.
 6. Only MBR_ID is shown from the member; no names or addresses. Restrict the workbook on the server like any PHI report.
