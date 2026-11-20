@@ -11,7 +11,7 @@ Two files:
 
 1. Run `ODAG1_dashboard_views.sql` in HSLABBOSS. The views use `REPLACE VIEW`, so it can be run again. The HSLABBOSS DDL (`local_hslabboss/ODAG1_WKLY_HSLABBOSS_ddl.sql`) drops these views, so run this file again after the DDL and DML.
 2. Open the workbook in Tableau Desktop (2023.3 or later).
-3. Each data source points at server `TERADATA_SERVER`. Replace it with the Teradata host (Data > each source > Edit connection), sign in, and save.
+3. Each data source points at the placeholder server `TERADATA_SERVER`, database `HSLABBOSS`. On first open, Tableau cannot reach it: choose Edit Connection, enter the production Teradata host, set Authentication to **LDAP**, sign in with your network user and password, and save the workbook locally. Do not commit the host name to git.
 4. Publish to Tableau Server and set extracts to refresh weekly on Friday after the sampling run, and monthly on the 1st after the refinement run.
 
 ## The views
