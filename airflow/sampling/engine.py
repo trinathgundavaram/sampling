@@ -48,21 +48,21 @@ SAMPLE_KEY = ("project_cd", "table_nm", "run_ty")
 ALL_TABLES = "*"
 _SNAPSHOT_RULE_COLUMNS = ("rule_id", "project_cd", "table_nm", "run_ty", "rule_class_cd", "seq_nbr", "rule_nm",
                           "rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
-                          "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd",
+                          "quota_val", "min_quota_cnt", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd",
                           "rule_desc")
-_RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scope_sql_txt", "target_ty",
+_RUN_CONFIG_COLUMNS = ("src_schema_nm", "src_table_nm", "key_columns_txt", "scope_sql_txt", "run_key_txt", "target_ty",
                        "target_val", "min_target_cnt", "max_target_cnt", "smpl_method_cd", "rounding_cd",
                        "diversity_sql_txt", "diversity_cap_ty", "diversity_cap_val", "shortfall_cd",
                        "keep_excluded_ind", "tgt_schema_nm", "tgt_table_nm")
 STEP = "SAMPLING"
 _RULE_COLUMNS = ("rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd", "quota_cd",
-                 "quota_val", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd")
+                 "quota_val", "min_quota_cnt", "max_ty", "max_val", "sort_dir_cd", "lookback_days", "history_scope_cd")
 _USED = {"PARAM": {"rule_sql_txt"},
          "EXCLUSION": {"rule_ty", "rule_sql_txt", "lookback_days", "history_scope_cd"},
          "PRIORITY": {"rule_ty", "rule_sql_txt", "sort_dir_cd", "lookback_days", "history_scope_cd"},
          "LEVEL": {"rule_sql_txt", "level_nbr", "parent_path_txt", "unlisted_cd"},
-         "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "quota_val", "max_ty",
-                    "max_val"},
+         "BUCKET": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "quota_cd", "quota_val",
+                    "min_quota_cnt", "max_ty", "max_val"},
          "CAP": {"rule_ty", "rule_sql_txt", "level_nbr", "parent_path_txt", "max_ty", "max_val"}}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$")
 _STATEMENT_WORDS = ("INSERT", "INS", "UPDATE", "UPD", "DELETE", "DEL", "MERGE", "UPSERT", "REPLACE", "DROP",
@@ -91,10 +91,10 @@ _CURRENT_ROWS_RE = re.compile(r"\{current_rows(?::([A-Za-z_][A-Za-z0-9_]*))?\}",
 def current_rows(as_seen: Optional[datetime] = None, alias: Optional[str] = None) -> str:
     a = f"{alias}." if alias else ""
     if as_seen is None:
-        return f"{a}ETL_IS_CURR_IND = 'Y' AND {a}ETL_IS_DEL_IND = 'N'"
+        return f"UPPER(TRIM({a}ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM({a}ETL_IS_DEL_IND)) = 'N'"
     at = f"TIMESTAMP '{as_seen:%Y-%m-%d %H:%M:%S.%f}'"
-    return (f"{a}ETL_LOAD_DT_TM <= {at} AND ({a}ETL_IS_CURR_IND = 'Y' OR {a}ETL_LAST_UPDT_DT_TM > {at}) "
-            f"AND ({a}ETL_IS_DEL_IND = 'N' OR {a}ETL_LAST_UPDT_DT_TM > {at})")
+    return (f"{a}ETL_LOAD_DT_TM <= {at} AND (UPPER(TRIM({a}ETL_IS_CURR_IND)) = 'Y' OR {a}ETL_LAST_UPDT_DT_TM > {at}) "
+            f"AND (UPPER(TRIM({a}ETL_IS_DEL_IND)) = 'N' OR {a}ETL_LAST_UPDT_DT_TM > {at})")
 
 
 def _expand(text: str, params: dict) -> str:
@@ -321,6 +321,7 @@ def config_problems(sample: Sample) -> list:
         problems.append(f"LEVEL rules repeat a level_nbr: {orders}")
     for lvl in sample.levels:
         problems += _level_problems(lvl)
+    problems += _parent_path_problems(sample.levels)
     for cap in sample.caps:
         name, kind = cap.get("rule_nm"), _up(cap.get("rule_ty"), QUERY)
         if kind not in CAP_TYPES:
@@ -517,6 +518,12 @@ def _level_problems(lvl: dict) -> list:
             out.append(f"{what}: CNT needs quota_val, a whole number >= 0 (cases)")
         elif mode in ("ALL", "REMAINDER") and b.get("quota_val") not in (None, ""):
             out.append(f"{what}: quota_val is not used with quota_cd {mode}")
+        least = _number(b.get("min_quota_cnt"))
+        if b.get("min_quota_cnt") not in (None, ""):
+            if mode != "PCT":
+                out.append(f"{what}: min_quota_cnt is only used with quota_cd PCT")
+            elif not _whole(least) or least < 0:
+                out.append(f"{what}: min_quota_cnt must be a whole number >= 0 (cases)")
         out += [f"{what}: {p}" for p in _amount_problems(b, "max_ty", "max_val")]
         group = groups.setdefault(_up(b.get("parent_path_txt"), "*"), {})
         if _norm(bname) in group:
@@ -532,6 +539,42 @@ def _level_problems(lvl: dict) -> list:
         total = sum(_number(b.get("quota_val")) or 0 for b in group.values() if _up(b.get("quota_cd"), "PCT") == "PCT")
         if total > 100 + 1e-6:
             out.append(f"level {name} under {parent!r}: the PCT quota_val values add up to {total:g}, more than 100")
+    return out
+
+
+def _parent_path_problems(levels: list) -> list:
+    if None in [lvl.get("level_nbr") for lvl in levels]:
+        return []
+    reached, used = {}, {}
+
+    def walk(index: int, path: str) -> None:
+        while index < len(levels) and not _matches(path, levels[index].get("parent_path_txt")):
+            index += 1
+        if index >= len(levels) or levels[index]["value_level"]:
+            return
+        reached.setdefault(index, set()).add(path)
+        group = _level_group(levels[index], path)
+        if not group:
+            return walk(index + 1, path)
+        used.setdefault(index, set()).add(_up(next(iter(group.values())).get("parent_path_txt"), "*"))
+        for name in [*(str(b["rule_nm"]).rstrip() for b in group.values()), OTHER_BUCKET]:
+            walk(index + 1, f"{path}/{name}" if path else name)
+
+    walk(0, "")
+    out = []
+    for index, lvl in enumerate(levels):
+        if any(levels[i]["value_level"] for i in range(index)) or lvl["value_level"]:
+            continue
+        if index not in reached:
+            out.append(f"level {lvl.get('rule_nm')}: parent_path_txt {lvl.get('parent_path_txt') or '*'!r} matches "
+                       f"no bucket path of the levels above, so the level never applies")
+            continue
+        for pattern in sorted({_up(b.get("parent_path_txt"), "*") for b in lvl["buckets"]} - used.get(index, set())):
+            names = sorted({str(b["rule_nm"]).rstrip() for b in lvl["buckets"]
+                            if _up(b.get("parent_path_txt"), "*") == pattern})
+            out.append(f"level {lvl.get('rule_nm')}: buckets {', '.join(names)} under parent_path_txt {pattern!r} "
+                       f"never apply: it matches none of the paths this level splits "
+                       f"({', '.join(sorted(p or 'the whole sample' for p in reached[index]))})")
     return out
 
 
@@ -649,7 +692,8 @@ def _set_rule_column(rows: list, rule: dict, found: dict, value_rule: bool) -> N
         row[col] = found.get(row["_key"]) if value_rule else (1 if row["_key"] in found else 0)
 
 
-def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date) -> dict:
+def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, as_of: date,
+                   executed: Optional[dict] = None) -> dict:
     project, table, run_type = sample.key
     given_names = {str(k).lower() for k in (given or {})}
     passed = {str(k).lower() for k, v in (given or {}).items() if v is not None and str(v).strip() != ""}
@@ -665,6 +709,8 @@ def resolve_params(conn: Connection, s: Settings, sample: Sample, given: dict, a
         if name.lower() in passed:
             continue
         text = substitute_params(_expand(s.resolve_env(_text(p), identifier=False), params), params)
+        if executed is not None:
+            executed[p["rule_id"]] = text
         rows = conn.query(text)
         values = list(rows[0].items()) if rows else []
         if not values or values[0][1] is None:
@@ -858,6 +904,7 @@ class Stratifier:
         self.target = 0
         self.leaves = {}
         self.nodes = {}
+        self.empty_leaves = set()
         self.ceilings = {}
         self.notes = []
 
@@ -968,10 +1015,32 @@ class Stratifier:
         chosen = {}
         targets = {}
         left, counted = target, 0
+        fixed = [k for kind in ("CNT", "PCT") for k in in_order if mode(k) == kind]
+        shares, wants = {}, {}
+        for key in fixed:
+            value = _number(group[key].get("quota_val")) or 0
+            if mode(key) == "CNT":
+                shares[key] = wants[key] = int(round(value))
+            else:
+                shares[key] = round_target(target * value / 100, self.rounding)
+                wants[key] = max(shares[key], int(_number(group[key].get("min_quota_cnt")) or 0))
+        flexible = [k for k in in_order if mode(k) in ("ALL", "REMAINDER")] + sharing
+        spare = max(0, target - sum(shares.values())) / len(flexible) if flexible else 0
+        for key in [k for k in fixed if wants[k] > shares[k]]:
+            size = {k: wants[k] for k in fixed if k != key and wants[k] == shares[k] and wants[k] > 0}
+            size.update({k: spare for k in flexible if spare > 0})
+            if not size:
+                continue
+            donor = max(size, key=lambda k: size[k])
+            raised = wants[key] - shares[key]
+            if donor in wants:
+                wants[donor] -= min(raised, wants[donor])
+            self.notes.append(f"{sub(key)}: raised to its minimum of {wants[key]} (its share is {shares[key]}); "
+                              f"{sub(donor)}, the largest bucket beside it, gives up {raised}")
         for kind in ("CNT", "PCT"):
             for key in (k for k in in_order if mode(k) == kind):
                 value = _number(group[key].get("quota_val")) or 0
-                want = int(round(value)) if kind == "CNT" else round_target(target * value / 100, self.rounding)
+                want, share = wants[key], shares[key]
                 t = min(want, left)
                 if t < want:
                     self.notes.append(f"{sub(key)}: quota {kind} {value:g} ({want}) cut to {t}: the quotas under "
@@ -979,7 +1048,7 @@ class Stratifier:
                 if cap(key) is not None:
                     t = min(t, cap(key))
                 left -= t
-                counted += t if kind == "CNT" else 0
+                counted += t if kind == "CNT" else (t - share if want != share else 0)
                 targets[key] = t
                 chosen[key] = self._allocate(buckets[key], t, index + 1, sub(key))
         for key in sharing:
@@ -1025,9 +1094,25 @@ class Stratifier:
             if cap(key) is not None:
                 self.ceilings[sub(key)] = cap(key)
         picked = [r for key in sorted(buckets) for r in chosen[key]]
+        for key, spec in group.items():
+            if key not in buckets:
+                name = str(spec["rule_nm"]).rstrip()
+                self._empty(index + 1, f"{path}/{name}" if path else name)
         if path:
             self.nodes[path] = {"candidates": len(rows), "target": target, "selected": len(picked)}
         return picked
+
+    def _empty(self, index: int, path: str) -> None:
+        while index < len(self.levels) and not _matches(path, self.levels[index].get("parent_path_txt")):
+            index += 1
+        group = self._group(self.levels[index], path) if index < len(self.levels) else {}
+        if index < len(self.levels) and not self.levels[index]["value_level"] and not group:
+            return self._empty(index + 1, path)
+        for spec in group.values():
+            self._empty(index + 1, f"{path}/{str(spec['rule_nm']).rstrip()}")
+        if not group:
+            self.empty_leaves.add(path)
+        self.nodes[path] = {"candidates": 0, "target": 0, "selected": 0}
 
 
 def _under(path: str, pattern) -> bool:
@@ -1277,6 +1362,23 @@ def _start_run(conn, s, run_id, run_key, sample: Sample, seed, as_of, params_tex
                      [[run_id, *(r.get(c) for c in _SNAPSHOT_RULE_COLUMNS), now, now] for r in rules], s.chunk_rows)
 
 
+def _record_executed_sql(conn, s, run_id, queries: dict, executed: dict):
+    rules = dict(executed)
+    diversity = None
+    for rule, text in queries["key_queries"]:
+        if rule is DIVERSITY_RULE:
+            diversity = text
+        else:
+            rules[rule["rule_id"]] = text
+    conn.execute(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRun SET Exec_Scope_Sql_Txt = ?, Exec_Diversity_Sql_Txt = ? "
+                 f"WHERE Smpl_Run_ID = ?",
+                 [queries["pull"], diversity, run_id])
+    if rules:
+        conn.executemany(f"UPDATE {s.meta_db}.GOVT_RGLTRY_SamplingRunRule SET Exec_Rule_Sql_Txt = ? "
+                         f"WHERE Smpl_Run_ID = ? AND Rule_ID = ?",
+                         [[text, run_id, rid] for rid, text in rules.items()], s.chunk_rows)
+
+
 def _stored_error(message: str) -> str:
     return " ".join(str(message or "").split())[:ERROR_TEXT_MAX]
 
@@ -1419,7 +1521,7 @@ def run_stats(sample: Sample, strat: "Stratifier", caps: "Caps", counts: dict, m
     def stat(kind, name, **cols):
         return {"Stat_Ty": kind, "Stat_Nm": str(name)[:1000], **cols}
 
-    out = [stat("BUCKET", path, Leaf_Ind=1 if path in strat.leaves else 0, Candidate_Cnt=n["candidates"],
+    out = [stat("BUCKET", path, Leaf_Ind=1 if path in strat.leaves or path in strat.empty_leaves else 0, Candidate_Cnt=n["candidates"],
                 Target_Cnt=n["target"], Selected_Cnt=n["selected"]) for path, n in strat.nodes.items()]
     for name, report in caps.report.items():
         out.append(stat("CAP", name, Rule_ID=rid(caps.report_rule[name]), Limit_Cnt=report["limit"],
@@ -1512,17 +1614,26 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
     run_seed = None
     if method in ("RANDOM", "SYSTEMATIC"):
         run_seed = int(seed) if seed not in (None, "") else random.SystemRandom().getrandbits(63)
-    template = str(run_key or "{as_of_date}")
+    configured_key = "" if replay else _text(config, "run_key_txt")
+    passed_key = str(run_key or "").strip()
+    template = configured_key or passed_key or "{as_of_date}"
 
-    early = None
+    early, executed = None, {}
+    if configured_key and passed_key and passed_key != configured_key:
+        early = ("config", "CONFIG_ERROR", f"run_key {passed_key!r} was passed, but the sample's config sets it "
+                                           f"(Run_Key_Txt {configured_key!r}): remove run_key from the trigger "
+                                           f"or Variable")
+    params = dict(run_params or {})
     try:
-        if replay:
+        if early:
+            pass
+        elif replay:
             if not replay.get("run_parm_txt"):
                 raise ValueError(f"run {replay['smpl_run_id']} stored no run parameters, so it cannot be replayed")
             params, run_key = json.loads(replay["run_parm_txt"]), replay["run_key"]
             params[AS_SEEN] = replay["start_dtts"]
         else:
-            params = resolve_params(conn, s, sample, run_params, as_of)
+            params = resolve_params(conn, s, sample, run_params, as_of, executed)
             run_key = substitute_params(template, params, escape=False)
     except ValueError as e:
         early, params = ("config", "CONFIG_ERROR", e), dict(run_params or {})
@@ -1625,6 +1736,11 @@ def run_sampling(conn: Connection, s: Settings, key, run_key: Optional[str] = No
         summary["tgt_table_nm"] = queries.get("tgt_table_nm")
     except (ValueError, KeyError) as e:
         return fail("config", "CONFIG_ERROR", e)
+    if not dry_run:
+        try:
+            _record_executed_sql(conn, s, run_id, queries, executed)
+        except Exception as e:
+            return fail("technical", "START_FAILURE", e, exc_info=True)
 
     try:
         log_sql(f"{STEP} | {label} | pull", queries["pull_template"], queries["pull"], params)
@@ -2109,7 +2225,8 @@ def run_sample(conn: Connection, s: Settings, run: dict) -> Sample:
     config = {**{k: run.get(k) for k in SAMPLE_KEY}, **{k: run.get(k) for k in _RUN_CONFIG_COLUMNS}}
     rules = conn.query(f"SELECT * FROM {s.meta_db}.GOVT_RGLTRY_SamplingRunRule WHERE Smpl_Run_ID = ?",
                        [run["smpl_run_id"]])
-    return build_sample(config, [{k: v for k, v in r.items() if k != "smpl_run_id"} for r in rules])
+    return build_sample(config, [{k: v for k, v in r.items() if k not in ("smpl_run_id", "exec_rule_sql_txt")}
+                                 for r in rules])
 
 
 def _within_caps(conn: Connection, s: Settings, sample: Sample, params: dict, run: dict, rows: list, old: dict,

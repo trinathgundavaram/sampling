@@ -70,7 +70,7 @@ One run = one `GOVT_RGLTRY_SamplingConfig` row (a task may run several, see [8](
 | 6a. Order | PRIORITY rule 1, then 2, … then the key columns | PRIORITY rules | |
 | 7. Stratify | Level by level, each parent's target is split between its buckets (CNT, then PCT, then ALL, then REMAINDER; equal shares water-filled) | LEVEL and BUCKET rules | |
 | 8. Select | Per leaf bucket: RANKED (first in order), RANDOM (seeded shuffle) or SYSTEMATIC (every k-th); rotating across `Diversity_Sql_Txt` values | `Smpl_Method_Cd`, `Diversity_Sql_Txt`, `Diversity_Cap_Ty` / `_Val` | `SELECT_FAILURE` |
-| 8a. Caps | Across the buckets: a case over a CAP rule (3 of one CPT code, 10 OON denials …) gives way to the next candidate of its own bucket within every cap; none left = the sample is short | CAP rules | |
+| 8a. Caps | Across the buckets: a case over a CAP rule (3 of one CPT code, 10 OON cases …) gives way to the next candidate of its own bucket within every cap; none left = the sample is short | CAP rules | |
 | 9. Top up | `TOPUP`: a short sample is filled from the other candidates in priority order (the diversity cap and the CAP rules still hold) | `Shortfall_Cd` | |
 | 10. Target table | The selected cases' source rows (every column) are read back from the source; the table's columns are checked against the source ([4.3](#43-the-target-table)) | `Tgt_Schema_Nm`, `Tgt_Table_Nm` | `CONFIG_ERROR` (columns), `OUTPUT_FAILURE` |
 | 11. Persist | **One transaction**: selections (and excluded rows) with their bucket path, the target table rows; the earlier current run of the same sample and `Run_Key` → `Curr_Ind = 0`; run row → `COMPLETED`, current, with its counts | `Keep_Excluded_Ind` | `PERSIST_FAILURE` (nothing half written) |
@@ -95,7 +95,7 @@ timestamp, `_Dt_Key` date) and every table has its audit columns `Load_Dtts`, `L
 | `GOVT_RGLTRY_SamplingConfig` | One row per sample (project + table + run type) | you |
 | `GOVT_RGLTRY_SamplingRule` | One row per rule: PARAM, EXCLUSION, PRIORITY, LEVEL, BUCKET, CAP; of one sample, or shared (`*`) | you |
 | `GOVT_RGLTRY_SamplingRun` | One row per run attempt: outcome, totals, errors, the configuration it used | engine |
-| `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was) | engine |
+| `GOVT_RGLTRY_SamplingRunRule` | One row per rule a run used (a copy, as it was, plus the SQL as executed in `Exec_Rule_Sql_Txt`) | engine |
 | `GOVT_RGLTRY_SampleSelection` | One row per case considered: candidate, selected, excluded | engine |
 | `GOVT_RGLTRY_SamplingRunStat` | One row per bucket, cap, exclusion, query rule, not-picked reason, top-up and note of a completed run ([10.10](#1010-find-what-to-refine)) | engine |
 | `GOVT_RGLTRY_SamplingRefinement` | One row per finding or total of a refinement report: what to refine, and the reviewer's decision ([10.10](#1010-find-what-to-refine)) | engine (`refine`), reviewer (`review`) |
@@ -117,8 +117,9 @@ GOVT_RGLTRY_SamplingRefinement (Project_Cd, Table_Nm, Run_Ty) = the sample of Sa
 
 ### 4.0 How to make entries
 
-- **Never delete a row**: set `Active_Ind = 0` (1 = in use). `Rule_ID` is yours to choose: unique in the whole
-  table (e.g. 1–99 for one sample, 101–199 for the next).
+- **Never delete a row**: set `Active_Ind = 0` (1 = in use). `Rule_ID` is unique in the whole table, across
+  every project: a new rule takes the next number after the highest one there
+  (`SELECT MAX(Rule_ID) + 1 FROM <meta_db>.GOVT_RGLTRY_SamplingRule`), so ODAG1 has 1–44 and the next rules start at 45.
 - **Effective dates**: every config and rule row has `Eff_Start_Dt` and `Eff_End_Dt` (both inclusive, default
   `1900-01-01` to `9999-12-31`). A run uses the rows that are active (`Active_Ind = 1`) and in effect on its
   rules date (today, unless the run is given `rules_as_of`). To change a rule from a date on: set the old row's
@@ -128,6 +129,10 @@ GOVT_RGLTRY_SamplingRefinement (Project_Cd, Table_Nm, Run_Ty) = the sample of Sa
   alone does not change it.
 - **Names in any case**: `Project_Cd`, `Table_Nm`, `Run_Ty`, the key columns and the target table's columns are
   matched without regard to case (`umcm` = `UMCM`).
+- **Values in any case**: write each comparison of a text column in the rules' SQL as `UPPER(TRIM(col)) = 'UPPER VALUE'`
+  (`UPPER(TRIM(AUTHZN_REQ_DETRMTN_TY)) = 'DENIED'`, `UPPER(TRIM(RUN_TY)) = UPPER('{batch_run_ty}')`), so `Denied`,
+  `DENIED` and `denied ` all match. `{current_rows}` already does this. Digit-only keys used for the primary index
+  (`BTCH_ID = '{batch_id}'`) stay a plain match.
 - **SQL text**: every SQL column is a whole `SELECT`: every rule's `Rule_Sql_Txt` (PARAM, EXCLUSION,
   PRIORITY, LEVEL, BUCKET, 4.2), and the config's `Scope_Sql_Txt` (the run's source rows) and `Diversity_Sql_Txt`
   (the key columns and a value) (4.1). Only `extra_filters`, given when a run is triggered, is a condition. Quotes are
@@ -162,6 +167,7 @@ GOVT_RGLTRY_SamplingRefinement (Project_Cd, Table_Nm, Run_Ty) = the sample of Sa
 | `Smpl_Desc` | Optional description |
 | `Src_Schema_Nm`, `Src_Table_Nm` | The source table (or view) to sample from: its database and its name, each a plain name, `$env` allowed |
 | `Key_Columns_Txt` | Comma separated column names that identify one case (plain names only). Must be unique within the scope (checked every run) |
+| `Run_Key_Txt` | Optional: the run key, from the run's parameters (`{batch_id}`), so every run is tied to its batch. When set, a `run_key` passed by the Variable, a trigger or `--run-key` must be empty or the same text, else the run is a `CONFIG_ERROR`; NULL = the passed `run_key`, else the as-of date |
 | `Scope_Sql_Txt` | A `SELECT` of this run's source rows (any joins), e.g. `SELECT * FROM EXPORT_FEED_$ENV_T.ODAG1 WHERE BTCH_ID = '{batch_id}' AND ETL_IS_CURR_IND = 'Y'`. It must return the key columns, one row per case; the target table gets the rows (and columns) it returns. NULL = every row of the source |
 | `Target_Ty` | `CNT` (default): `Target_Val` cases / `PCT`: `Target_Val` % of the candidates (the cases left after the scope and the exclusions) |
 | `Target_Val` | The sample size: `150` (CNT) or `5` = 5 % (PCT) |
@@ -201,6 +207,7 @@ The others, by class:
 | `Unlisted_Cd` | | | | `SHARE` (default) / `REMAINDER` / `SKIP` | |
 | `Quota_Cd` | | | | | `PCT` (default) / `CNT` / `ALL` / `REMAINDER` |
 | `Quota_Val` | | | | | PCT: 0 to 100 (% of the parent's target); CNT: a number of cases |
+| `Min_Quota_Cnt` | | | | | optional, PCT only: never fewer than this many cases, however small the parent (2 % of 20 rounds to 0; `Min_Quota_Cnt` 1 makes it 1) |
 | `Max_Ty`, `Max_Val` | | | | | optional cap: `CNT` a number, or `PCT` a % of the bucket's candidates |
 | `Sort_Dir_Cd` | | | EXPRESSION: `ASC` (default) / `DESC` | | |
 | `Lookback_Days`, `History_Scope_Cd` | | PRIOR_SELECTION | PRIOR_* | | |
@@ -257,7 +264,7 @@ VALUES (241, 'UMCM', 'ODAG1', 'WKLY', 'LEVEL', 1, 'program', 1, '*', 'SKIP');
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Level_Nbr, Parent_Path_Txt, Quota_Cd, Quota_Val, Rule_Sql_Txt)
 VALUES (242, 'UMCM', 'ODAG1', 'WKLY', 'BUCKET', 1, 'Behavioral Health', 1, '*', 'PCT', 21,
         'SELECT a.AUTHZN_ID, a.SRC_DATA_KEY, a.AUTHZN_REVSN_NUM
-         FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1 a
+         FROM EXPORT_FEED_$ENV_T.SDO_GOVT_RGLTRY_CLNCL_AUD_UM_AUTHZN_ODAG1 a
          JOIN REF_$ENV.BH_PROC_CODES c ON c.PROC_CD = a.PROC_CD AND c.ACT_IND = 1
          JOIN REF_$ENV.PROVIDER p ON p.PROV_ID = a.SVC_PROV_ID
          WHERE a.BTCH_ID = ''{batch_id}'' AND p.PROV_TY IN (''PSY'', ''LCSW'')');
@@ -284,7 +291,10 @@ How a parent's target T is split:
 
 1. CNT buckets: `Quota_Val` cases each, then PCT buckets: `round(T × Quota_Val / 100)`, both in `Seq_Nbr` order
    and never more than what is left of T: when the quotas add up to more than T (fixed numbers under a small
-   percentage target, say), the later buckets are cut and the run report's `notes` says which. Unlisted SHARE
+   percentage target, say), the later buckets are cut and the run report's `notes` says which. A PCT bucket
+   with `Min_Quota_Cnt` takes at least that many: the cases it adds come from the largest bucket beside it under
+   the same parent (a REMAINDER, ALL or SHARE bucket gives them up from what it would share), so the parent's
+   total stays the same; `notes` names the bucket that gave them up. Unlisted SHARE
    buckets: `round((T × (1 − Σ PCT / 100) − Σ CNT) / n)`.
 2. ALL buckets share what is left of T after step 1, equally, each up to what it has.
 3. REMAINDER buckets share T minus what was *actually* selected in 1 and 2 – so a short PCT or CNT bucket's unused
@@ -293,7 +303,12 @@ How a parent's target T is split:
    the rest again. 20 between buckets of 2, 50 and 50 cases → 2, 9, 9.
 5. `Max_Ty` / `Max_Val` caps a bucket at every step: `CNT` a number, `PCT` a percentage of the bucket's candidates.
 
-A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at most.
+A level's PCT `Quota_Val` values under one `Parent_Path_Txt` add up to 100 at most. A level's or bucket's
+`Parent_Path_Txt` must match a bucket path of the levels above (`validate` and every run check it): a pattern that
+matches none, or buckets under a pattern that a more specific one always overrides, would never apply and are a
+`CONFIG_ERROR`, not a silent skip. A share that rounds to 0 (2 % of 20) selects nothing: when a bucket must have a
+case, give it `Min_Quota_Cnt` 1 (ODAG1's Dismissed: `PCT` 2, `Min_Quota_Cnt` 1 gives 1 in an area of 20 and 4 in
+an area of 200, with no change to the rules when the sample grows).
 
 **CAP** – a limit across the whole sample, where a bucket's `Max_Val` or the diversity cap only limit one bucket at
 a time. `Rule_Sql_Txt` is a `SELECT`: `Rule_Ty` `QUERY` (default) returns the key columns of the cases it limits (at
@@ -310,7 +325,7 @@ within the caps. The run report's `caps` gives each rule's `limit`, how many cas
 ```sql
 INSERT INTO {{META_DB}}.GOVT_RGLTRY_SamplingRule (Rule_ID, Project_Cd, Table_Nm, Run_Ty, Rule_Class_Cd, Seq_Nbr, Rule_Nm, Parent_Path_Txt, Max_Ty, Max_Val, Rule_Sql_Txt)
 VALUES (260, 'UMCM', 'ODAG1', 'WKLY', 'CAP', 2, 'OON_DENIALS', 'Denied', 'CNT', 10,
-        'SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REVSN_NUM FROM EXPORT_FEED_$ENV_T.SDO_CMPLNC_CLNCL_AUD_UM_AUTHZN_ODAG1
+        'SELECT AUTHZN_ID, SRC_DATA_KEY, AUTHZN_REVSN_NUM FROM EXPORT_FEED_$ENV_T.SDO_GOVT_RGLTRY_CLNCL_AUD_UM_AUTHZN_ODAG1
          WHERE BTCH_ID = ''{batch_id}'' AND ETL_IS_CURR_IND = ''Y'' AND SVC_PROV_TY = ''<non-par>''');
 ```
 
@@ -348,10 +363,10 @@ it. OUTPUT rules are no longer used (a row of that class is reported: set `Activ
 
 | Table | One row per | Columns to read |
 |---|---|---|
-| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, `Rerun_Rsn_Txt`, `Rules_As_Of_Dt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`) |
-| `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started |
+| `GOVT_RGLTRY_SamplingRun` | run attempt | `Run_Stat`, `Curr_Ind`, `Project_Cd` / `Table_Nm` / `Run_Ty`, `Run_Key`, `As_Of_Dt_Key`, `Random_Seed_Nbr`, `Run_Parm_Txt`, the counts (`In_Scope_Cnt`, `Excluded_Cnt`, `Candidate_Cnt`, `Target_Cnt` – the number of cases the run targeted, a PCT target resolved – `Selected_Cnt`, `Shortfall_Cnt`), `Error_Ty`, `Error_Txt` (one line), `Config_Hash`, `Finalized_By` / `Finalized_Dtts`, `Override_Rsn_Txt`, `Rerun_Rsn_Txt`, `Rules_As_Of_Dt`, and the configuration it used (`Src_Schema_Nm` … `Tgt_Table_Nm`); `Exec_Scope_Sql_Txt` / `Exec_Diversity_Sql_Txt` (`CLOB`, the whole text): the pull and diversity SQL as executed, written before the pull so a failed run shows them too (`Scope_Sql_Txt` / `Diversity_Sql_Txt` keep the configured text) |
+| `GOVT_RGLTRY_SamplingRunRule` | rule a run used | every rule column, as it was when the run started (the configured SQL, which revalidation and replacements reuse); `Exec_Rule_Sql_Txt` (`CLOB`, the whole text): the SQL as executed, with `$ENV`, `{current_rows}` and the parameters filled in (NULL for a rule that runs no SQL of its own) |
 | `GOVT_RGLTRY_SampleSelection` | candidate and excluded row of a run | `Selected_Ind`, `Selection_Order_Nbr`, `Bucket_Rank_Nbr`, `Priority_Rank_Nbr`, `Excluded_Ind`, `Exclusion_Rsn_Txt`, `Not_Selected_Rsn_Txt`, `Stratum_Path_Txt`, `Selection_Stat`, `Linked_Case_Key`, `Stat_Rsn_Txt` / `Stat_By` / `Stat_Dtts`, `Curr_Ind` |
-| `GOVT_RGLTRY_SamplingRunStat` | figure of a completed run | `Stat_Ty` with `Stat_Nm`, numbered by `Stat_Seq_Nbr`: `BUCKET` (a bucket path; `Leaf_Ind`, `Candidate_Cnt`, `Target_Cnt`, `Selected_Cnt` after caps and top-up), `CAP` (`Rule_ID`, `Limit_Cnt`, `Over_Cnt` picks it blocked, `Replaced_Cnt`), `EXCLUSION` (`Case_Cnt` excluded by it, the first rule that hit), `RULE` (`<class> <name>`, `Case_Cnt` pulled cases its SELECT returned), `NOT_PICKED` (a reason kind, `Case_Cnt`), `TOPUP` (`Case_Cnt` taken by the top-up), `NOTE` (`Stat_Txt`, the engine's note, also in the task log). Written in the run's own transaction; a failed run, a dry run or a kept retry writes none. Never purged |
+| `GOVT_RGLTRY_SamplingRunStat` | figure of a completed run | `Stat_Ty` with `Stat_Nm`, numbered by `Stat_Seq_Nbr`: `BUCKET` (a bucket path, the parent buckets with `Leaf_Ind` 0 after their children; every configured bucket is written, one with no cases with 0 in each count; `Leaf_Ind`, `Candidate_Cnt`, `Target_Cnt`, `Selected_Cnt` after caps and top-up), `CAP` (`Rule_ID`, `Limit_Cnt`, `Over_Cnt` picks it blocked, `Replaced_Cnt`), `EXCLUSION` (`Case_Cnt` excluded by it, the first rule that hit), `RULE` (`<class> <name>`, `Case_Cnt` pulled cases its SELECT returned), `NOT_PICKED` (a reason kind, `Case_Cnt`), `TOPUP` (`Case_Cnt` taken by the top-up), `NOTE` (`Stat_Txt`, the engine's note, also in the task log). Written in the run's own transaction; a failed run, a dry run or a kept retry writes none. Never purged |
 | `GOVT_RGLTRY_SamplingRefinement` | refinement report (`refine`) | `Refine_ID` (one per sample per report) with `Finding_Seq_Nbr`, the sample, `Window_Start_Dt` / `Window_End_Dt`, `Run_Cnt` (runs looked at), `Finding_Ty` (`SHORT_BUCKET`, `CAP_BLOCKS`, `DEAD_RULE`, `EXCLUSION_SWING`, or a total: `NOT_PICKED`, `TOPUP`, `REPLACED`), `Finding_Nm` (the bucket, cap, rule or reason), `Rule_ID`, `Short_Run_Cnt`, `Missing_Cnt`, `Blocked_Cnt`, `Lost_Cnt`, `Case_Cnt`, `Prior_Avg_Val`, `Last_As_Of_Dt`, `Finding_Txt` (the finding in words), `Threshold_Txt`, `Report_Dtts`, `Triggered_By`, `Engine_Version_Txt`, `Review_By` / `Review_Dtts` / `Review_Txt`. Never purged |
 | `GOVT_RGLTRY_SamplingRevalidation` | replay of a run (`revalidate`) | `Reval_ID`, `Smpl_Run_ID` and its sample / `Run_Key` / `As_Of_Dt_Key`, `Source_As_Of_Dtts` (the run's start: the source is read as it was then), `Reval_Stat` (`MATCH`, `DIFFERENT`, `SOURCE_CHANGED`, `FAILED`), `Orig_Selected_Cnt`, `Replay_Selected_Cnt`, `Same_Cnt`, `Only_Orig_Cnt`, `Only_Replay_Cnt`, `Missing_Cnt`, `Diff_Txt` (the differing case keys, cut at 4000 characters), `Config_Hash` of the run, `Engine_Version_Txt` of the replay, `Error_Txt`, `Signoff_By` / `Signoff_Dtts` / `Signoff_Txt`. Never purged |
 
@@ -427,7 +442,7 @@ and counts per bucket, are a `GROUP BY` on it.
 | `{as_of_date}` | The run's business date `YYYY-MM-DD` |
 | `{run_key}` | The run key |
 | `{project_cd}`, `{table_nm}`, `{run_ty}` | The sample's project, table and run type (upper case) |
-| `{current_rows}` / `{current_rows:a}` | The current version of a row: `ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N'` (with `a.` in front of each column for the alias `a`). In a replay (10.11) the version that was current when the run started: `ETL_LOAD_DT_TM <= t AND (ETL_IS_CURR_IND = 'Y' OR ETL_LAST_UPDT_DT_TM > t) AND (ETL_IS_DEL_IND = 'N' OR ETL_LAST_UPDT_DT_TM > t)`. Write it, not the condition itself, in every SQL that reads a table keeping old row versions, or a replay reads that table as it is now |
+| `{current_rows}` / `{current_rows:a}` | The current version of a row: `UPPER(TRIM(ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM(ETL_IS_DEL_IND)) = 'N'` (with `a.` in front of each column for the alias `a`). In a replay (10.11) the version that was current when the run started: `ETL_LOAD_DT_TM <= t AND (UPPER(TRIM(ETL_IS_CURR_IND)) = 'Y' OR ETL_LAST_UPDT_DT_TM > t) AND (UPPER(TRIM(ETL_IS_DEL_IND)) = 'N' OR ETL_LAST_UPDT_DT_TM > t)`. Write it, not the condition itself, in every SQL that reads a table keeping old row versions, or a replay reads that table as it is now |
 | `{name}` / `$name` | A `run_params` value or a PARAM rule. Inside quotes (`'{batch_id}'`) any value is safe (quotes are doubled). Outside quotes (`n < {top}`) the value may only be a number, a date or a name (letters, digits, `_ . : -`), else the run is a `CONFIG_ERROR` |
 | Reserved | `as_of_date`, `project_cd`, `table_nm`, `run_ty`, `run_key`, `extra_filters`, `current_rows` are set by the engine: a `run_params` value or a PARAM rule of that name is a `CONFIG_ERROR` |
 
@@ -461,7 +476,7 @@ section D.
 | Requirement | Rows |
 |---|---|
 | Sample only after the batch is closed | the PARAM `batch_id` lookup takes only closed batches: `… GROUP BY Btch_ID HAVING MIN(<closed>) = 1` |
-| Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `Scope_Sql_Txt` `SELECT * FROM <source> WHERE BTCH_ID = '{batch_id}'`, Variable `run_key` `"{batch_id}"` |
+| Sample only this week's batch | PARAM `batch_id` = `SELECT MAX(...)`, `Scope_Sql_Txt` `SELECT * FROM <source> WHERE BTCH_ID = '{batch_id}'`, config `Run_Key_Txt` `{batch_id}` |
 | One batch lookup for every table and run type | a PARAM row with `Table_Nm` / `Run_Ty` `*` whose SQL uses `{project_cd}`, `{table_nm}`, `{run_ty}` |
 | A daily, a weekly and a monthly sample of one table | three config rows (`Run_Ty` `DLY`, `WKLY`, `MNT`); shared rules `Run_Ty` `*`, the differences a row per run type; Variable `runs` entries with their own `schedule_interval` |
 | The monthly sample has its own mix | its LEVEL / BUCKET rows with `Run_Ty` `MNT` (the same `Rule_Nm` replaces the shared row) |
@@ -501,7 +516,7 @@ Full reference in [AIRFLOW_DEPLOYMENT.md](AIRFLOW_DEPLOYMENT.md).
   the SQL) only when the Variable's `trigger_keys` lists them. `trigger_keys`, when set, limits all of them. The database, the Connection and the environment are never taken from a trigger.
 
 ```bash
-airflow dags trigger GOVT_RGLTRY_UMCM_SAMPLING -c '{"run_key": "{batch_id}", "dry_run": true}'
+airflow dags trigger GOVT_RGLTRY_UMCM_SAMPLING -c '{"dry_run": true}'
 ```
 
 ## 9. Local command line

@@ -151,8 +151,8 @@ A JSON object; keys are not case sensitive. Example (`airflow_resources/examples
 | `load_env` | DEV / QA / INT / UAT / PROD: replaces `$env` in every configured table name and SQL text (default DEV). `environment` is accepted too |
 | `env_value` | Replacement text for `$env` when the environment's default does not fit (e.g. `uat`) |
 | `project` / `table` / `run_type` | **The scope**: every active sample of the project (required), optionally only one table and / or one run type. Matched against `GOVT_RGLTRY_SamplingConfig` (`Project_Cd`, `Table_Nm`, `Run_Ty`) in any case |
-| `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). Default: the as-of date (`YYYY-MM-DD`). A rerun with the same `run_key` replaces the earlier sample as the current one |
-| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name; a null or blank value counts as not given, so the PARAM rule's query runs. `{run_key}`, `{as_of_date}`, `{project_cd}`, `{table_nm}` and `{run_ty}` (the sample's own) are always available |
+| `run_key` | Which logical run this is; may hold parameters, e.g. `"{batch_id}"` (a PARAM rule's lookup). A sample whose config sets `Run_Key_Txt` (ODAG1: `{batch_id}`) always uses it: leave `run_key` out, since a different value fails the run (`CONFIG_ERROR`), so the run is always tied to its batch. Without either, the as-of date (`YYYY-MM-DD`). A rerun with the same run key replaces the earlier sample as the current one, and needs a rerun reason |
+| `run_params` | JSON object of values for `{key}` / `$key` tokens in any configured SQL. A value given here wins over the config's PARAM rule of the same name; a null or blank value counts as not given, so the PARAM rule's query runs. A passed value skips its PARAM rule as a whole, so pass the rule's other columns too: an older ODAG1 batch needs `{"batch_id": "20261030", "batch_run_ty": "WKLY"}`, and `batch_id` alone fails the run (`CONFIG_ERROR`: no value for `batch_run_ty`). `{run_key}`, `{as_of_date}`, `{project_cd}`, `{table_nm}` and `{run_ty}` (the sample's own) are always available |
 | `extra_filters` | Optional SQL condition (or a list of them) on the rows `Scope_Sql_Txt` returns, for the run: which load, batch or SCD2 version of an incremental table to read, e.g. `"ETL_IS_CURR_IND = 'Y'"`. May use `{batch_id}` and other run parameters; checked like any configured SQL. The Variable's, a `runs` entry's and a trigger's conditions are all ANDed |
 | `as_of` | Business date `YYYY-MM-DD` of the run (default: the DAG run's time in Central time) -> `As_Of_Dt_Key`, `Smpl_Cycle_Dt_Key` |
 | `seed` | RANDOM / SYSTEMATIC seed (default: a new one per run, stored on the run row) |
@@ -196,7 +196,7 @@ database, the Connection, the environment, `rerun_reason`) is ignored with a war
 
 ```json
 {"table": "ODAG1", "run_type": "WKLY", "run_key": "2026-10-30", "run_params": {"pull_date": "2026-10-30"}}
-{"table": "ODAG1", "run_type": "WKLY", "run_key": "B42", "extra_filters": "BTCH_ID = 'B42'"}
+{"table": "ODAG1", "run_type": "WKLY", "run_params": {"batch_id": "20261030", "batch_run_ty": "WKLY"}}
 {"run_type": "MNT", "as_of": "2026-10-01", "run_key": "BACKFILL_2026_10"}
 {"table": "ODAG1", "dry_run": "true"}
 {"run": "weekly, monthly"}
@@ -229,13 +229,13 @@ DAG fails). To sample after a framework step (which one: OPEN_ITEMS Q11), no cod
    its own, not this DAG's scope), and `"trigger_run_params": [...]` for any of its values the rules use.
 3. Give the samples a PARAM rule for the batch (e.g. the latest closed batch of the framework's control table for
    `{project_cd}` / `{table_nm}` / `{run_ty}`: one row with `Table_Nm` / `Run_Ty` `*` serves every sample of the
-   project) and `"run_key": "{batch_id}"`, with `retries` and `retry_delay_minutes` covering how late the batch
+   project) and the config's `Run_Key_Txt` `{batch_id}` (not a Variable `run_key`), with `retries` and `retry_delay_minutes` covering how late the batch
    can be. The control table's name is configuration (the
    rule's SQL), never code.
 
 ```json
 {"schedule_interval": null, "trigger_keys": ["as_of"], "trigger_run_params": ["run_type"],
- "run_key": "{batch_id}", "retries": 6, "retry_delay_minutes": 30}
+ "retries": 6, "retry_delay_minutes": 30}
 ```
 
 ## DAG
@@ -310,7 +310,7 @@ python run_sampling.py mark-failed --run-id <run_id>
 | `load_env` / `env_value` | `SAMPLING_ENVIRONMENT` / `SAMPLING_ENV_VALUE` |
 | `timezone`, `chunk_rows`, `access_lock` | `SAMPLING_TIMEZONE`, `SAMPLING_CHUNK_ROWS`, `SAMPLING_ACCESS_LOCK` |
 | `log_level` | `SAMPLING_LOG_LEVEL` (console plus one file per run in `local/logs`, or `SAMPLING_LOG_DIR`) |
-| `run_key` | `--run-key`, else `SAMPLING_RUN_KEY` (set it to `{batch_id}` for ODAG1), else the as-of date |
+| `run_key` | The config's `Run_Key_Txt` (ODAG1: `{batch_id}`; then leave these unset), else `--run-key`, else `SAMPLING_RUN_KEY`, else the as-of date |
 | `rerun_reason` | `--rerun-reason`, else `SAMPLING_RERUN_REASON` |
 | `rules_as_of` | `--rules-as-of`, else `SAMPLING_RULES_AS_OF` |
 | scope (`--project`, `--table`, `--run-type`), `run_key`, `run_params`, `extra_filters`, `as_of`, `seed`, `dry_run` | command options (`--filter "SQL"`, repeat, for `extra_filters`) |

@@ -9,7 +9,7 @@ Two files:
 
 ## Setup
 
-1. Run `ODAG1_dashboard_views.sql` in HSLABBOSS. The views use `REPLACE VIEW`, so it can be run again.
+1. Run `ODAG1_dashboard_views.sql` in HSLABBOSS. The views use `REPLACE VIEW`, so it can be run again. The HSLABBOSS DDL (`local_hslabboss/ODAG1_WKLY_HSLABBOSS_ddl.sql`) drops these views, so run this file again after the DDL and DML.
 2. Open the workbook in Tableau Desktop (2023.3 or later).
 3. Each data source points at server `TERADATA_SERVER`. Replace it with the Teradata host (Data > each source > Edit connection), sign in, and save.
 4. Publish to Tableau Server and set extracts to refresh weekly on Friday after the sampling run, and monthly on the 1st after the refinement run.
@@ -18,7 +18,7 @@ Two files:
 
 | View | Grain | Built from |
 |---|---|---|
-| V_SMPL_DSH_UNIVERSE | One row per current ODAG1 universe row | ODAG1, SHRPA, SampleSelection |
+| V_SMPL_DSH_UNIVERSE | One row per current ODAG1 universe row | ODAG1, SampleSelection |
 | V_SMPL_DSH_DQ | One row per universe row and issue | V_SMPL_DSH_UNIVERSE |
 | V_SMPL_DSH_SAMPLE | One row per current sampled case | ODAG1_Sample, SampleRun, SampleSelection, RunStat |
 | V_SMPL_DSH_RUN | One row per run, reruns included | SampleRun |
@@ -29,7 +29,7 @@ Two files:
 | V_SMPL_DSH_BATCH | One row per framework batch | RequestControl, SampleRun |
 | V_SMPL_DSH_RETENTION | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
 
-Derived fields in the universe and sample views follow the rule table: functional area (rules 232 to 244), request type, IP/PAC type, determination, expedited or standard, network, the SHRPA flags (auto-approve is exactly `DME / No Auth Required - Auto Approve` or `No Auth Required - Auto Approve`), diabetic supplies, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The expected exclusion follows rules 211 to 214: an auth is excluded only when every one of its codes is auto-approved, needs no PA or is a diabetic supply.
+Derived fields in the universe and sample views follow the rule table: functional area (rules 6 to 17; Concurrent Review, rule 11, comes before the areas read from `ISS_DESC`, as in the engine), request type, IP/PAC type, determination, expedited or standard, network, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The universe holds the batch's `WKLY` rows only, as the engine's scope does (`RUN_TY` = the batch's run type). The expected exclusion follows rule 3: any row whose `AUTHZN_REVSN_NUM` is not 1, or is empty, is excluded (the SHRPA auto-approved and no-PA exclusions 211 and 212 were dropped on 2026-11-18, so the views no longer read SHRPA).
 
 ## Dashboards and requirements
 
@@ -59,10 +59,12 @@ Derived fields in the universe and sample views follow the rule table: functiona
 
 1. Clinical auditor flag: a denial needs a clinical auditor, every other case an administrative one. SHRPA's clinical review columns are not used (the requirement to skip codes SHRPA says need no clinical review was removed 2026-11-16).
 2. ODAG1 date columns are text. They are read with `TRYCAST(OREPLACE(TRIM(x), '/', '-') AS DATE)`, which needs Teradata 16.20 or later and dates in year-month-day order. A different format needs a `FORMAT` clause in those casts in the SQL.
-3. A run's Run_Key is the framework BTCH_ID, which is how the universe joins to SampleSelection. The case key is `AUTHZN_ID`, `SRC_DATA_KEY` and `AUTHZN_REVSN_NUM` (2026-11-16), built the way the engine writes `Case_Key`.
+3. A run's Run_Key is the framework BTCH_ID, which is how the universe joins to SampleSelection. The case key is `AUTHZN_ID`, `SRC_DATA_KEY` and `AUTHZN_REVSN_NUM` (2026-11-16), built exactly the way the engine writes `Case_Key` (`AUTHZN_ID=…|SRC_DATA_KEY=…|AUTHZN_REVSN_NUM=…`, trailing `.` of a decimal dropped, `NULL` for a missing value), so a sampled case always finds its row.
 4. The deadline uses the run's As_Of date; if that is not the Friday of the week, the deadline moves with it.
 5. The timeframe defaults (14 and 3 days) are placeholders; set them from the contract.
 6. Only MBR_ID is shown from the member; no names or addresses. Restrict the workbook on the server like any PHI report.
+7. Every comparison of a text value in the views is case-insensitive (`UPPER(TRIM(col)) = 'UPPER VALUE'`), like the rules: `Denied` and `DENIED` count the same.
+8. The dashboard derives each case's functional area itself. The universe view also shows the engine's area (`Engine_Area`, the first part of the case's bucket path) and `Area_Check` (`Agrees` / `Differs` / `Not stratified`); the data quality view lists every case where they differ, so a rule change the views do not follow shows up instead of skewing the counts.
 
 ## Not covered (no data yet)
 

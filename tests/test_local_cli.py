@@ -28,7 +28,9 @@ def test_the_schema_has_the_five_tables():
     schema = (ROOT / "sql" / "schema.sql").read_text()
     tables = [s.split()[3] for s in schema.split(";") if s.strip().startswith("CREATE MULTISET TABLE")]
     assert len(tables) == 8 and all(t.startswith("{{META_DB}}.GOVT_RGLTRY_") for t in tables)
-    assert "CLOB" not in schema and "INDEX GOVT" not in schema.upper() and "--" not in schema
+    clobs = [line.split()[0] for line in schema.splitlines() if " CLOB" in line]
+    assert clobs == ["Exec_Scope_Sql_Txt", "Exec_Diversity_Sql_Txt", "Exec_Rule_Sql_Txt"]
+    assert "INDEX GOVT" not in schema.upper() and "--" not in schema
     assert not (ROOT / "sql" / "seed").exists() and not (ROOT / "sql" / "schema_drop.sql").exists()
 
 

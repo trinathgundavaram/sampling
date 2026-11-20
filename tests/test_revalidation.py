@@ -43,18 +43,18 @@ def _reval_rows(raw):
 
 
 def test_current_rows_expands_to_the_current_filter_or_the_version_at_a_time():
-    assert current_rows() == "ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N'"
+    assert current_rows() == "UPPER(TRIM(ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM(ETL_IS_DEL_IND)) = 'N'"
     at = current_rows(datetime(2026, 8, 7, 9, 30))
     assert "ETL_LOAD_DT_TM <= TIMESTAMP '2026-08-07 09:30:00.000000'" in at
     assert "ETL_LAST_UPDT_DT_TM > TIMESTAMP '2026-08-07 09:30:00.000000'" in at
-    assert current_rows(alias="s") == "s.ETL_IS_CURR_IND = 'Y' AND s.ETL_IS_DEL_IND = 'N'"
+    assert current_rows(alias="s") == "UPPER(TRIM(s.ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM(s.ETL_IS_DEL_IND)) = 'N'"
     assert current_rows(datetime(2026, 8, 7), "s").count("s.ETL_") == 5
 
 
 def test_the_placeholder_takes_an_alias_and_any_case():
     from sampling.engine import _expand
     assert _expand("WHERE {CURRENT_ROWS:o} AND {current_rows}", {}) == \
-        "WHERE (o.ETL_IS_CURR_IND = 'Y' AND o.ETL_IS_DEL_IND = 'N') AND (ETL_IS_CURR_IND = 'Y' AND ETL_IS_DEL_IND = 'N')"
+        "WHERE (UPPER(TRIM(o.ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM(o.ETL_IS_DEL_IND)) = 'N') AND (UPPER(TRIM(ETL_IS_CURR_IND)) = 'Y' AND UPPER(TRIM(ETL_IS_DEL_IND)) = 'N')"
 
 
 def test_a_normal_run_reads_only_current_rows(raw, conn, settings):

@@ -107,6 +107,7 @@ def create_tables(db):
         stmt = (stmt.replace("CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP").replace("TIMESTAMP(6)", "TIMESTAMP")
                 .replace("DEFAULT USER", "DEFAULT 'tester'"))
         stmt = re.sub(r"\bFLOAT\b", "DOUBLE", stmt)
+        stmt = re.sub(r"\bCLOB\b", "VARCHAR", stmt)
         stmt = re.sub(r"--[^\n]*", "", stmt)
         db.execute(stmt)
 
