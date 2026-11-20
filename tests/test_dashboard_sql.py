@@ -68,6 +68,14 @@ def test_odag1_data_file_has_the_record_key_and_no_angle_brackets():
     assert "AS Src_Data_Key_Txt" in text and "HSLABBOSS.SDO_GOVT_RGLTRY_CLNCL_AUD_UM_AUTHZN_ODAG1 o" in text
 
 
+def test_odag1_data_file_takes_report_dates_from_request_control():
+    text = (DOCS / "custom_sql" / "16_ODAG1_data.sql").read_text()
+    assert "LEFT JOIN (" in text and "FROM HSLABBOSS.GOVT_RGLTRY_RequestControl" in text
+    assert "c.Rc_Btch_ID = TRIM(o.BTCH_ID) AND c.Rc_Run_Ty = UPPER(TRIM(o.RUN_TY))" in text
+    for a in ("Odag1_Rpt_Start_Dt", "Odag1_Rpt_End_Dt", "Odag1_Rpt_Version", "Odag1_Req_Dt"):
+        assert f" AS {a}" in text, a
+
+
 def test_gre_files_read_hsabc_v():
     for f in sorted((DOCS / "custom_sql").glob("*_GRE_*.sql")):
         dbs = set(re.findall(r"\b(HS\w+)\.", f.read_text()))
