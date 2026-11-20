@@ -1,0 +1,3 @@
+SELECT a.run_id AS GA_Run_ID, a.rule_group AS GA_Rule_Group, a.rule_variant AS GA_Rule_Variant, a.project_name AS GA_Project_Name, a.process_name AS GA_Process_Name, a.run_key AS GA_Run_Key, CAST(SUBSTR(a.run_params, 1, 2000) AS VARCHAR(2000)) AS GA_Run_Params, a.started_at AS GA_Started_Dtts, a.ended_at AS GA_Ended_Dtts, CAST(a.started_at AS DATE) AS GA_Run_Dt, a.status AS GA_Status, a.total_rules AS GA_Total_Rules, a.rules_succeeded AS GA_Rules_Succeeded, a.rules_errored AS GA_Rules_Errored, a.triggered_by AS GA_Triggered_By, CAST(1 AS INTEGER) AS GA_Run_Cnt
+FROM HSABC_V.gre_rule_audit a
+WHERE UPPER(TRIM(a.rule_group)) LIKE 'ODAG1%'

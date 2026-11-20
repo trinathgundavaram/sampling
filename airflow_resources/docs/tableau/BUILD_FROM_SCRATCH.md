@@ -1,108 +1,154 @@
 # ODAG1 Sampling dashboard: build it from scratch in Tableau
 
-This guide builds the whole workbook by hand in Tableau Desktop: the data source, the 5 parameters, the 16 calculated fields, the 50 worksheets and the 9 dashboards. It uses the 10 Custom SQL files already in `airflow_resources/docs/tableau/custom_sql/` plus the ODAG1 data table itself. Nothing is created in Teradata: Tableau only reads.
+This guide builds the whole workbook by hand in Tableau Desktop: one data source with 16 tables, 9 parameters, 32 calculated fields, 28 worksheets and **4 dashboards**. Only the 4 dashboards are visible at the end: every worksheet is hidden, and the dashboards are linked by buttons and click actions.
 
-Not in this guide yet: the GRE tables (rules, exceptions, results and the others) and the dashboards for requirements 1 and 2. Their table names, columns and requirement text are not in this repository; they are added once they are known.
+Nothing is created in Teradata: Tableau only reads. The sampling tables and the ODAG1 table are read from **HSLABBOSS**; the GRE rules engine tables from **HSABC_V**.
 
-Follow the parts in order. Type every name exactly as written: the calculated fields refer to fields and parameters by name.
+Follow the parts in order and type every name exactly as written, because the calculated fields refer to fields and parameters by name.
 
 ## Contents
 
-1. [Before you start](#part-1-before-you-start)
-2. [The data source](#part-2-the-data-source)
-3. [The parameters](#part-3-the-parameters)
-4. [The calculated fields](#part-4-the-calculated-fields)
-5. [The worksheets](#part-5-the-worksheets)
-6. [The dashboards](#part-6-the-dashboards)
-7. [Final checks](#part-7-final-checks)
+1. Before you start
+2. The data source
+3. The parameters
+4. The calculated fields
+5. The worksheets
+6. The dashboards
+7. The actions (links between sheets)
+8. Hide the sheets and check
+9. What each requirement uses
+
+The four dashboards:
+
+| Dashboard | What it shows | Requirements |
+|---|---|---|
+| 1 Weekly sample | The weekly sample for one batch: KPIs, mix, targets and caps, universe funnel, CPT codes, prioritized case list | Requirement 4 (4.01 sample selection, 4.03 sample output: prioritized cases, functional area, clinical auditor, universe risks) and 10.02 (targets and caps). |
+| 2 Universe risks and errors | Universe risks and errors from the GRE rules engine and the engine's own checks, with the full ODAG1 record of whatever you click | Requirement 2 (2.01 to 2.04: risks and errors by rule, result type, category, risk level and priority, with the full ODAG1 record) and 1.03 (every universe field). |
+| 3 Operations and controls | Universe pulls, sampling runs, batches, revalidation, GRE runs and errors, refinement, retention | Requirement 1 (1.02 pulls by frequency), 2.06 and 4.04 (runs on schedule), 3 and 6 (storage and retention), 8 (revalidation, human sign-off, refinement) and 10.01. |
+| 4 Trends and configuration | Monthly and weekly trends with aberration alerts, and the sampling and GRE rule configuration | Requirement 7 (7.01 to 7.04: trends, aberrations over the alert threshold, high-risk frequency), 2.03 and 4.02 (one-year look back), 9 and 10.02 (configuration). |
 
 ## Part 1: Before you start
 
-1. Pull the repository so the Custom SQL files are on the PC:
+1. Pull the repository on the PC (PowerShell):
 
    ```
    git -C C:\Script\frameworks\GOV_RGLTRY\Sampling pull
    ```
 
-2. Open the folder `C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\custom_sql\`. Each file holds one complete query: open it in Notepad, press **Ctrl+A**, **Ctrl+C**, and paste it into Tableau.
-3. Have your Teradata server name, user name and password ready.
-4. Start Tableau Desktop and choose **File > New**. Save it straight away (**File > Save As**, type **Tableau Workbook (*.twb)**) as `C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\ODAG1_Sampling_Dashboard_v2.twb`, and press **Ctrl+S** often.
+2. Open `C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\custom_sql\`. Each of the 16 files holds one complete query: open it in Notepad, **Ctrl+A**, **Ctrl+C**, and paste it into Tableau.
+3. Your Teradata user needs SELECT on **HSLABBOSS** and **HSABC_V**.
+4. Start Tableau Desktop, **File > New**, and save straight away (**File > Save As**, type **Tableau Workbook (*.twb)**) as `C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\ODAG1_Sampling_Dashboard_v2.twb`. Press **Ctrl+S** often.
 
 ## Part 2: The data source
 
 ### 2.1 Connect
 
-1. On the Start page, under **Connect > To a Server**, choose **Teradata** (under *More...* if it is not listed).
-2. Enter the server, choose your authentication, enter user name and password, **Sign In**.
-3. On the Data Source page, in **Database**, choose **HSLABBOSS**.
-4. Leave the connection **Live** (top right).
+1. On the Start page, **Connect > To a Server > Teradata** (under *More...* if not listed).
+2. Enter the server, your authentication, user name and password, **Sign In**.
+3. On the Data Source page, in **Database**, choose **HSLABBOSS**. Leave the connection **Live**.
 
-### 2.2 Add the 10 tables
+### 2.2 Add the 16 tables
 
-Each table is a Custom SQL query. For the first one, drag **New Custom SQL** (at the bottom of the left pane) onto the empty canvas. For every other one, drag **New Custom SQL** so it lands next to the table named in *Drag onto*: Tableau then draws a relationship line between them. In the dialog paste the file, click **OK**, then rename the table: click the table's drop-down arrow on the canvas, **Rename**, type the name.
+Every table is a Custom SQL query. The queries name their database in full, so the one connection reads HSLABBOSS and HSABC_V. For the first table, drag **New Custom SQL** (bottom of the left pane) onto the empty canvas. For every other one, drag **New Custom SQL** so it lands next to the table in *Drag onto*; Tableau draws a relationship line. Paste the file, **OK**, then rename the table (its drop-down arrow on the canvas, **Rename**). In **Edit Relationship**, pick the left field and the right field, keep **=**, and close.
 
-| Step | File in `custom_sql\` | Rename the table to | Drag onto | Relationship (left table field = new table field) |
+| Step | File | Rename to | Drag onto | Relationship (left = right) |
 |---|---|---|---|---|
-| 1 | `01_Universe.sql` | Universe | the empty canvas | none, this is the first table |
+| 1 | `01_Universe.sql` | Universe | the empty canvas | none, first table |
 | 2 | `02_Runs.sql` | Runs | Universe | `Smpl_Run_ID` = `Runs_Smpl_Run_ID` |
 | 3 | `04_Sample.sql` | Sample | Universe | `Case_Key` = `Smp_Case_Key` |
 | 4 | `06_Universe_risks_and_errors.sql` | Universe risks and errors | Universe | `Case_Key` = `DQ_Case_Key` |
-| 5 | `05_Run_figures.sql` | Run figures | Runs | `Runs_Smpl_Run_ID` = `Stat_Smpl_Run_ID` |
-| 6 | `07_Revalidation.sql` | Revalidation | Runs | `Runs_Smpl_Run_ID` = `Reval_Smpl_Run_ID` |
-| 7 | `09_Batches.sql` | Batches | Runs | `Runs_Smpl_Run_ID` = `Batch_Smpl_Run_ID` |
-| 8 | `10_Retention.sql` | Retention | Runs | `Model_Link` = `Retention_Link` |
-| 9 | `03_Rules.sql` | Rules | Run figures | `Stat_Rule_ID` = `Rule_ID` |
-| 10 | `08_Refinement.sql` | Refinement | Rules | `Rule_ID` = `Refine_Rule_ID` |
-| 11 | none: the table itself, `SDO_GOVT_RGLTRY_CLNCL_AUD_UM_AUTHZN_ODAG1` | ODAG1 | Universe | four pairs, see below |
+| 5 | `16_ODAG1_data.sql` | ODAG1 data | Universe | four pairs, see below |
+| 6 | `05_Run_figures.sql` | Run figures | Runs | `Runs_Smpl_Run_ID` = `Stat_Smpl_Run_ID` |
+| 7 | `07_Revalidation.sql` | Revalidation | Runs | `Runs_Smpl_Run_ID` = `Reval_Smpl_Run_ID` |
+| 8 | `09_Batches.sql` | Batches | Runs | `Runs_Smpl_Run_ID` = `Batch_Smpl_Run_ID` |
+| 9 | `10_Retention.sql` | Retention | Runs | `Model_Link` = `Retention_Link` |
+| 10 | `03_Rules.sql` | Rules | Run figures | `Stat_Rule_ID` = `Rule_ID` |
+| 11 | `08_Refinement.sql` | Refinement | Rules | `Rule_ID` = `Refine_Rule_ID` |
+| 12 | `11_GRE_rules.sql` | GRE rules | Runs | `Model_Link` = `GRE_Link` |
+| 13 | `12_GRE_results.sql` | GRE results | GRE rules | `GR_Rule_ID` = `GS_Rule_ID` |
+| 14 | `13_GRE_exceptions.sql` | GRE exceptions | GRE rules | `GR_Rule_ID` = `GX_Rule_ID` |
+| 15 | `15_GRE_rule_errors.sql` | GRE rule errors | GRE rules | `GR_Rule_ID` = `GE_Rule_ID` |
+| 16 | `14_GRE_rule_audit.sql` | GRE rule audit | GRE results | `GS_Run_ID` = `GA_Run_ID` |
 
-Step 11 adds the actual ODAG1 data table, every row and every version, not only the current weekly rows the Universe query keeps. Do not use New Custom SQL for it: type `SDO_GOVT_RGLTRY_CLNCL_AUD_UM_AUTHZN_ODAG1` in the **Table** search box on the left and drag the table onto Universe. Its columns have the same names as Universe's, so Tableau shows them with ` (ODAG1)` after the name, for example `BTCH_ID (ODAG1)`. That is expected for this table only. In **Edit Relationship** click **Add more fields** until there are four pairs:
+**ODAG1 data** (step 5) is the ODAG1 table itself, every row, version and pull (daily, weekly, monthly), plus a few helper columns. Its columns have the same names as Universe's, so Tableau shows them with ` (ODAG1 data)` after the name. That is expected for this table only. In **Edit Relationship** click **Add more fields** until there are four pairs:
 
-| Universe | ODAG1 |
+| Universe | ODAG1 data |
 |---|---|
-| `BTCH_ID` | `BTCH_ID (ODAG1)` |
-| `AUTHZN_ID` | `AUTHZN_ID (ODAG1)` |
-| `SRC_DATA_KEY` | `SRC_DATA_KEY (ODAG1)` |
-| `AUTHZN_REVSN_NUM` | `AUTHZN_REVSN_NUM (ODAG1)` |
+| `BTCH_ID` | `BTCH_ID (ODAG1 data)` |
+| `AUTHZN_ID` | `AUTHZN_ID (ODAG1 data)` |
+| `SRC_DATA_KEY` | `SRC_DATA_KEY (ODAG1 data)` |
+| `AUTHZN_REVSN_NUM` | `AUTHZN_REVSN_NUM (ODAG1 data)` |
 
-Setting a relationship: after you drop the new table, the **Edit Relationship** dialog opens (or click the line between the two tables). Pick the left field from the left list and the right field from the right list, keep the operator **=**, close the dialog. Leave **Performance Options** as they are.
+Check after each table: click it and look at the grid at the bottom. Apart from ODAG1 data, no field name may end in brackets (for example `Stat_Run_Key (Runs)`). If one does, that table got the wrong query: its drop-down, **Edit Custom SQL Query**, paste the right file.
 
-Check after each table: click the table, and the data grid at the bottom shows its columns. Apart from the ODAG1 table, no field name may end in brackets (for example `Stat_Run_Key (Runs)`). Every query names its columns uniquely, so a bracket means a query was pasted into the wrong table: open that table's drop-down, **Edit Custom SQL Query**, and paste the right file.
-
-The finished canvas looks like this:
+The finished canvas:
 
 ```
 Universe ─┬─ Runs ─┬─ Run figures ── Rules ── Refinement
           │        ├─ Revalidation
           │        ├─ Batches
-          │        └─ Retention
+          │        ├─ Retention
+          │        └─ GRE rules ─┬─ GRE results ── GRE rule audit
+          │                      ├─ GRE exceptions
+          │                      └─ GRE rule errors
           ├─ Sample
-          ├─ ODAG1
-          └─ Universe risks and errors
+          ├─ Universe risks and errors
+          └─ ODAG1 data
 ```
 
-### 2.3 Name the data source
+Finally click the data source name at the top left and rename it **ODAG1 Sampling**.
 
-At the top left of the Data Source page, click the data source name and rename it **ODAG1 Sampling**.
+Which table holds what:
 
-Table sizes for reference (number of columns): Universe 74, Runs 42, Rules 23, Sample 69, Run figures 32, Universe risks and errors 14, Revalidation 27, Refinement 27, Batches 15, Retention 4.
+| Table | Holds |
+|---|---|
+| Universe | the current weekly ODAG1 universe, one row per case, with derived area, determination, timeliness, the engine's data checks and the sampling outcome |
+| Runs | one row per sampling run: status, counts, timings, reasons, delivery |
+| Sample | the selected cases with their bucket, weight and reason |
+| Run figures | targets, caps, candidates and selections per bucket and cap |
+| Universe risks and errors | one row per data issue the sampling engine found in the weekly universe |
+| Revalidation, Refinement, Batches, Retention | internal controls, framework batches and stored rows by year |
+| Rules | the sampling configuration |
+| GRE rules, GRE results, GRE exceptions, GRE rule audit, GRE rule errors | the rules engine: data validation rules for ODAG1 and ODAG1_FILE, results per rule and run, one exception per record per rule, runs, and rules that failed to run |
+| ODAG1 data | every row of the ODAG1 table, for the record drill-through and the universe pulls |
 
 ## Part 3: The parameters
 
-Go to **Sheet 1**. In the Data pane, click the small arrow at the top (next to the search box), **Create Parameter...**. Create these 5:
+Go to **Sheet 1**. Two of the parameters take their starting value from a calculated field, so create those two fields first. In the Data pane click the arrow at the top, **Create Calculated Field...**, type the name, paste the formula, **OK**:
 
-| Name | Data type | Current value | Allowable values | Minimum | Maximum | Step size |
-|---|---|---|---|---|---|---|
-| Alert threshold (% change) | Float | 0.2 | Range | 0 | 1 | 0.05 |
-| Standard decision days | Integer | 14 | Range | 1 | 60 | 1 |
-| Expedited decision days | Integer | 3 | Range | 1 | 14 | 1 |
-| Delivery deadline hour (Friday, CT) | Integer | 15 | Range | 0 | 23 | 1 |
-| Weekly target | Integer | 150 | Range | 1 | 1000 | 1 |
+- **Latest batch** (uses Runs):
 
-After each one, right-click it in the Parameters list and choose **Show Parameter**. You can close the card again; the dashboards show the sliders later.
+  ```
+  { MAX([Run_Key]) }
+  ```
+
+- **Latest GRE run** (uses GRE results):
+
+  ```
+  { MAX([GS_Run_Key]) }
+  ```
+
+Now create the parameters: Data pane arrow, **Create Parameter...**.
+
+| Name | Data type | Value when workbook opens | Allowable values | Settings |
+|---|---|---|---|---|
+| Alert threshold (% change) | Float | 0.2 | Range | Minimum 0, Maximum 1, Step size 0.05 |
+| Standard decision days | Integer | 14 | Range | Minimum 1, Maximum 60, Step size 1 |
+| Expedited decision days | Integer | 3 | Range | Minimum 1, Maximum 14, Step size 1 |
+| Delivery deadline hour (Friday, CT) | Integer | 15 | Range | Minimum 0, Maximum 23, Step size 1 |
+| Weekly target | Integer | 150 | Range | Minimum 1, Maximum 1000, Step size 1 |
+| Batch | String | Latest batch | List | When workbook opens, take the values from field **Run_Key** (Runs) |
+| GRE run | String | Latest GRE run | List | When workbook opens, take the values from field **GS_Run_Key** (GRE results) |
+| Selected record | String | (leave empty) | All |  |
+| High-risk compliance flags | Integer | 3 | Range | Minimum 1, Maximum 20, Step size 1 |
+
+For **Batch** and **GRE run**: in *Value when workbook opens* pick the calculated field (**Latest batch**, **Latest GRE run**); under *Allowable values* choose **List**, then **When workbook opens** and pick the field named in the table. The drop-downs then always list the current batches and runs and open on the latest.
+
+**Selected record** holds the record you click; the click actions fill it (Part 7). **High-risk compliance flags** is how many Compliance Flags make a record high risk (requirement 2.04 says *high volume* without a number; 3 is a starting value you can change on the dashboard).
 
 ## Part 4: The calculated fields
 
-In the Data pane, click the arrow at the top, **Create Calculated Field...**. Type the name, paste the formula, **OK**. Create them in this order (later ones use earlier ones).
+Create these in this order (later ones use earlier ones). A field that uses one table's columns only must stay that way; do not mix tables in one row-level formula.
 
 ### Candidates
 
@@ -200,797 +246,704 @@ SUM([Smp_Case_Cnt]) - [Weekly target]
 SUM(IF [Smp_Determination] = 'Denied' AND [Smp_OON_Ind] = 1 THEN 1 ELSE 0 END)
 ```
 
-Fields in `[brackets]` that are not parameters or calculated fields are columns of the tables in Part 2, with the names exactly as they come from the SQL.
+### In batch (Universe)
+
+Uses Universe.
+
+```
+[BTCH_ID] = [Batch]
+```
+
+### In batch (Sample)
+
+Uses Sample.
+
+```
+[SMPL_RUN_KEY] = [Batch]
+```
+
+### In batch (Run figures)
+
+Uses Run figures.
+
+```
+[Stat_Run_Key] = [Batch]
+```
+
+### In batch (Issues)
+
+Uses Universe risks and errors.
+
+```
+[DQ_BTCH_ID] = [Batch]
+```
+
+### In GRE run (results)
+
+Uses GRE results.
+
+```
+[GS_Run_Key] = [GRE run]
+```
+
+### In GRE run (exceptions)
+
+Uses GRE exceptions.
+
+```
+[GX_Run_Key] = [GRE run]
+```
+
+### Record key (Sample)
+
+Uses Sample.
+
+```
+REGEXP_REPLACE(STR([Smp_SRC_DATA_KEY]), '[.]0*$', '')
+```
+
+### Record key (Issues)
+
+Uses Universe risks and errors.
+
+```
+REGEXP_REPLACE(STR([DQ_SRC_DATA_KEY]), '[.]0*$', '')
+```
+
+### Selected record row
+
+Uses ODAG1 data.
+
+```
+[Src_Data_Key_Txt] = [Selected record]
+```
+
+### Compliance flags (record)
+
+Uses GRE exceptions.
+
+```
+{ FIXED [GX_Run_Key], [GX_Src_Key_Value] : SUM(IF CONTAINS(UPPER([GX_Severity]), 'COMPLIANCE') THEN [GX_Exception_Cnt] ELSE 0 END) }
+```
+
+### Errors and timeliness (record)
+
+Uses GRE exceptions.
+
+```
+{ FIXED [GX_Run_Key], [GX_Src_Key_Value] : SUM(IF CONTAINS(UPPER([GX_Severity]), 'VALIDATION') OR CONTAINS(UPPER([GX_Severity]), 'TIMELI') THEN [GX_Exception_Cnt] ELSE 0 END) }
+```
+
+### Record risk
+
+Uses GRE exceptions.
+
+```
+IF [Errors and timeliness (record)] >= 1 OR [Compliance flags (record)] >= [High-risk compliance flags] THEN 'High'
+ELSEIF [Compliance flags (record)] >= 1 THEN 'Medium'
+ELSE 'Low' END
+```
+
+### Risk order
+
+Uses GRE exceptions.
+
+```
+[Errors and timeliness (record)] * 1000 + [Compliance flags (record)]
+```
+
+### High-risk records
+
+Uses GRE exceptions.
+
+```
+COUNTD(IF [Record risk] = 'High' THEN [GX_Src_Key_Value] END)
+```
+
+Notes:
+
+- **In batch (...)** and **In GRE run (...)** are the filters behind the Batch and GRE run drop-downs. The sampling run key is the batch id, so one Batch value works for Universe, Sample, Run figures and the engine checks.
+- **Record key (...)**, `GX_Src_Data_Key` and `Src_Data_Key_Txt` are the same ODAG1 `SRC_DATA_KEY` written as text without a trailing `.0`, so a click on a case, an engine check or a GRE risk finds the ODAG1 rows.
+- **Record risk** follows requirement 2.04: **High** when a record has a Data Validation Error or a Timeliness result, or at least *High-risk compliance flags* Compliance Flags; **Medium** when it has any Compliance Flag; **Low** otherwise. **Risk order** only sorts the list: records with errors or timeliness results first, then by number of Compliance Flags.
+- The result type comes from the GRE rule's `severity` (Compliance Flag, Data Validation Error, Timeliness) and the category from `issue_category_name`; the exceptions query brings both onto every exception as `GX_Severity` and `GX_Issue_Category`.
 
 ## Part 5: The worksheets
 
-General rules for every sheet:
+General rules:
 
-- Drag fields from the **Data** pane (left). Fields are grouped by table; type the field name in the search box to find it fast.
-- A plain name like `Functional_Area` on a shelf means the field as a dimension (blue pill).
-- `SUM(Field)` means drag the measure; Tableau sums it by default. `AVG(Field)` means drag it, then right-click the pill, **Measure**, **Average**.
-- If you drag a numeric column that should be a dimension, right-click the pill and choose **Dimension**.
-- Calculated fields from Part 4 appear under their own name (for example `Clinical auditor cases`).
-- The run or batch filter (**All** values) is needed so the dashboard drop-down can control the sheet.
+- Drag fields from the **Data** pane; type the name in its search box to find it.
+- A plain name means the field as a dimension (blue). `SUM(x)` is the default for a measure. For `AVG`, `MIN`, `MAX`, `COUNTD`, right-click the pill, **Measure**, and pick it. `ATTR(x)`: right-click, **Attribute**.
+- A filter on a calculated True/False field: tick **True** only.
+- In lists, **Rows** take many fields; that is intended. Widen columns on the dashboard if text is cut.
+- Build the sheets in this order; each says which dashboard it goes on.
 
-### 5.1 KPI Selected
+### Sheets for 1 Weekly sample
 
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
+#### 5.1 Sample KPIs
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **KPI Selected**.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Smp_Case_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Click **Text** on the Marks card, click **...**, select all the text, set the font size to **26** and **bold**, OK.
-1. Double-click the sheet title and replace it with: **Cases selected**
+Tables: Sample.
 
-### 5.2 KPI Clinical
+1. Create a new worksheet and rename its tab **Sample KPIs**.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text** on the Marks card.
+1. On the **Measure Values** card (below Marks), drag every pill off, then drag in, in this order: `SUM(Smp_Case_Cnt)`, `Selected vs target`, `Clinical auditor cases`, `Expedited cases`, `Out-of-network denials`, `SUM(Smp_OON_Ind)`.
+1. Right-click each column header, **Edit Alias...**, and rename them: **Selected**, **Vs weekly target**, **Need clinical auditor**, **Expedited**, **OON denials**, **Out of network**.
+1. Click **Text** on the Marks card, **...**, select all, font size **20**, **bold**, OK. Set **Fit** (toolbar) to **Entire View**.
+1. Drag `In batch (Sample)` onto **Filters**, tick only **True**, OK.
+1. Double-click the title, type `Weekly sample, batch` and a space, then click **Insert > Parameters.Batch**, OK.
 
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
+#### 5.2 Sample mix
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **KPI Clinical**.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `Clinical auditor cases` onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Click **Text** on the Marks card, click **...**, select all the text, set the font size to **26** and **bold**, OK.
-1. Double-click the sheet title and replace it with: **Need a clinical auditor**
+Tables: Sample.
 
-### 5.3 KPI Expedited
-
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **KPI Expedited**.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `Expedited cases` onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Click **Text** on the Marks card, click **...**, select all the text, set the font size to **26** and **bold**, OK.
-1. Double-click the sheet title and replace it with: **Expedited**
-
-### 5.4 KPI OON
-
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **KPI OON**.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Smp_OON_Ind)` onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Click **Text** on the Marks card, click **...**, select all the text, set the font size to **26** and **bold**, OK.
-1. Double-click the sheet title and replace it with: **Out of network**
-
-### 5.5 KPI Vs Target
-
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **KPI Vs Target**.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `Selected vs target` onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Click **Text** on the Marks card, click **...**, select all the text, set the font size to **26** and **bold**, OK.
-1. Double-click the sheet title and replace it with: **Selected minus the weekly target**
-
-### 5.6 Sample by area
-
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Sample by area**.
+1. Create a new worksheet and rename its tab **Sample mix**.
 1. **Columns:** `SUM(Smp_Case_Cnt)`.
-1. **Rows:** `Smp_Functional_Area`.
-1. **Marks** card: choose **Bar** from the drop-down.
+1. **Rows:** drag, in this order, `Smp_Functional_Area`.
+1. On the Marks card choose **Bar**.
 1. Drag `Smp_Determination` onto **Color** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Sort `Smp_Functional_Area`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, field `SUM(Smp_Case_Cnt)`.
-1. Double-click the sheet title and replace it with: **Selected cases by functional area and determination**
+1. Drag `Expedited cases` onto **Tooltip** on the Marks card.
+1. Drag `Out-of-network denials` onto **Tooltip** on the Marks card.
+1. Drag `Clinical auditor cases` onto **Tooltip** on the Marks card.
+1. Drag `In batch (Sample)` onto **Filters**, tick only **True**, OK.
+1. Sort `Smp_Functional_Area`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, `SUM(Smp_Case_Cnt)`, close.
+1. Double-click the title and type: **Sample by functional area and determination (click a bar to filter the case list)**
 
-### 5.7 Target vs selected
+#### 5.3 Targets and caps
 
-Uses the table(s): Run figures. Goes on dashboard **1 Weekly sample**.
+Tables: Run figures.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Target vs selected**.
-1. **Columns:** `SUM(Leaf_Target_Cnt)` and then `SUM(Leaf_Selected_Cnt)` and then `SUM(Leaf_Candidate_Cnt)` (side by side on the same shelf, separate axes).
-1. **Rows:** `Path_Level_1`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Stat_Run_Key` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Target, selected and candidates per functional area**
+1. Create a new worksheet and rename its tab **Targets and caps**.
+1. **Rows:** drag, in this order, `Stat_Kind`, `Stat_Nm`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `SUM(Stat_Target_Cnt)`, `SUM(Stat_Selected_Cnt)`, `SUM(Stat_Candidate_Cnt)`, `SUM(Limit_Cnt)`, `SUM(Over_Cnt)`, `SUM(Replaced_Cnt)`, `SUM(Stat_Case_Cnt)`, `AVG(Stat_Sampling_Fraction)` (right-click the pill: **Measure > Average**).
+1. Right-click each column header, **Edit Alias...**: **Target**, **Selected**, **Candidates**, **Cap limit**, **Over cap**, **Replaced**, **Cases**, **Sampling fraction**.
+1. Drag `ATTR(Stat_Txt)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `Stat_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**) onto **Detail** on the Marks card.
+1. Drag `In batch (Run figures)` onto **Filters**, tick only **True**, OK.
+1. Drag `Run_Curr_Ind` onto **Filters**, tick only **1**, OK.
+1. Drag `Stat_Kind` onto **Filters**, tick every value except **Parent bucket**, OK.
+1. Double-click the title and type: **Targets, caps and what was picked (click a bucket to filter the case list)**
 
-### 5.8 Determination mix
+#### 5.4 Case list
 
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
+Tables: Sample.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Determination mix**.
-1. **Columns:** `SUM(Smp_Case_Cnt)`.
-1. **Rows:** `Smp_Determination`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Smp_Processing` onto **Color** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Determination mix, expedited first**
+1. Create a new worksheet and rename its tab **Case list**.
+1. **Rows:** drag, in this order, `SMPL_ORDER_NBR` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Smp_Case_Key`, `Smp_Functional_Area`, `Smp_Determination`, `Smp_Processing`, `Smp_Network`, `Smp_Auditor_Type`, `Smp_CPT_List`, `SMPL_STRATUM_PATH`, `Selection_Stat`, `Stat_Rsn_Txt`.
+1. On the Marks card choose **Text**.
+1. Drag `AVG(Design_Weight)` (right-click the pill: **Measure > Average**) onto **Text** on the Marks card.
+1. Drag `Record key (Sample)` onto **Detail** on the Marks card.
+1. Drag `In batch (Sample)` onto **Filters**, tick only **True**, OK.
+1. Sort `SMPL_ORDER_NBR`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Ascending**, close.
+1. Double-click the title and type: **Cases to audit, in priority order (click a case to open its ODAG1 record)**
 
-### 5.9 OON by area
+#### 5.5 Universe funnel
 
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
+Tables: Universe.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **OON by area**.
-1. **Columns:** `SUM(Smp_OON_Ind)`.
-1. **Rows:** `Smp_Functional_Area`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Out-of-network cases per area (cap 10 per area's denials)**
+1. Create a new worksheet and rename its tab **Universe funnel**.
+1. **Columns:** `SUM(Case_Cnt)`.
+1. **Rows:** drag, in this order, `Sample_Status`, `Exclusion_Rsn_Txt`.
+1. On the Marks card choose **Bar**.
+1. Drag `Exclusion_Check` onto **Color** on the Marks card.
+1. Drag `SUM(Case_Cnt)` onto **Label** on the Marks card.
+1. Drag `In batch (Universe)` onto **Filters**, tick only **True**, OK.
+1. Double-click the title and type: **Universe to sample: in scope, excluded, candidates, selected**
 
-### 5.10 Case list
+#### 5.6 Universe by area
 
-Uses the table(s): Sample. Goes on dashboard **1 Weekly sample**.
+Tables: Universe.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Case list**.
-1. **Rows:** `SMPL_ORDER_NBR` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete), then `Smp_AUTHZN_ID`, then `Smp_Functional_Area`, then `Smp_IP_PAC_Type`, then `Smp_Determination`, then `Smp_Processing`, then `Smp_Network`, then `Smp_Auditor_Type`, then `Smp_CPT_List`, then `Selection_Stat`, then `SMPL_STRATUM_PATH`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `AVG(Design_Weight)` (right-click the pill, Measure, Avg) onto **Text (Label)** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Cases to audit, in priority order (with the stratum weight)**
-
-### 5.11 Universe heat map
-
-Uses the table(s): Universe. Goes on dashboard **2 Universe and funnel**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Universe heat map**.
+1. Create a new worksheet and rename its tab **Universe by area**.
 1. **Columns:** `Determination`.
-1. **Rows:** `Functional_Area`.
-1. **Marks** card: choose **Square** from the drop-down.
+1. **Rows:** drag, in this order, `Functional_Area`.
+1. On the Marks card choose **Square**.
 1. Drag `SUM(Case_Cnt)` onto **Color** on the Marks card.
-1. Drag `SUM(Case_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Universe: functional area by determination**
+1. Drag `SUM(Case_Cnt)` onto **Label** on the Marks card.
+1. Drag `Universe share (candidates)` onto **Tooltip** on the Marks card.
+1. Drag `Sample share` onto **Tooltip** on the Marks card.
+1. Drag `AVG(Decision_Days)` (right-click the pill: **Measure > Average**) onto **Tooltip** on the Marks card.
+1. Drag `Late decision rate` onto **Tooltip** on the Marks card.
+1. Drag `Denial rate` onto **Tooltip** on the Marks card.
+1. Drag `In batch (Universe)` onto **Filters**, tick only **True**, OK.
+1. Double-click the title and type: **Universe by functional area and determination (click to filter the funnel and CPT codes)**
 
-### 5.12 What the sample did
+#### 5.7 Top CPT codes
 
-Uses the table(s): Universe. Goes on dashboard **2 Universe and funnel**.
+Tables: Universe.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **What the sample did**.
+1. Create a new worksheet and rename its tab **Top CPT codes**.
 1. **Columns:** `SUM(Case_Cnt)`.
-1. **Rows:** `Sample_Status`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Universe rows: selected, not selected, excluded, skipped**
+1. **Rows:** drag, in this order, `CPT_First`.
+1. On the Marks card choose **Bar**.
+1. Drag `Sample_Status` onto **Color** on the Marks card.
+1. Drag `In batch (Universe)` onto **Filters**, tick only **True**, OK.
+1. Drag `CPT_First` onto **Filters**, open the **Top** tab, **By field**: Top **15** by **Case_Cnt**, **Sum**, OK. Then right-click the **In batch (Universe)** filter pill and choose **Add to Context** so the top 15 is within the batch.
+1. Sort `CPT_First`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, `SUM(Case_Cnt)`, close.
+1. Double-click the title and type: **Top 15 CPT codes in the universe**
+
+### Sheets for 2 Universe risks and errors
+
+#### 5.8 Risk KPIs
+
+Tables: GRE exceptions.
+
+1. Create a new worksheet and rename its tab **Risk KPIs**.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text** on the Marks card.
+1. On the **Measure Values** card (below Marks), drag every pill off, then drag in, in this order: `SUM(GX_Exception_Cnt)`, `COUNTD(GX_Src_Key_Value)` (right-click the pill: **Measure > Count (Distinct)**), `High-risk records`, `SUM(GX_Open_Ind)`, `COUNTD(GX_Rule_ID)` (right-click the pill: **Measure > Count (Distinct)**).
+1. Right-click each column header, **Edit Alias...**, and rename them: **Risks and errors**, **Records**, **High-risk records**, **Open**, **Rules hit**.
+1. Click **Text** on the Marks card, **...**, select all, font size **20**, **bold**, OK. Set **Fit** (toolbar) to **Entire View**.
+1. Drag `In GRE run (exceptions)` onto **Filters**, tick only **True**, OK.
+1. Double-click the title, type `Universe risks and errors, GRE run` and a space, then click **Insert > Parameters.GRE run**, OK.
+
+#### 5.9 Results by type
+
+Tables: GRE exceptions.
+
+1. Create a new worksheet and rename its tab **Results by type**.
+1. **Columns:** `SUM(GX_Exception_Cnt)`.
+1. **Rows:** drag, in this order, `GX_Severity`, `GX_Issue_Category`.
+1. On the Marks card choose **Bar**.
+1. Drag `GX_Severity` onto **Color** on the Marks card.
+1. Drag `SUM(GX_Exception_Cnt)` onto **Label** on the Marks card.
+1. Drag `In GRE run (exceptions)` onto **Filters**, tick only **True**, OK.
+1. Double-click the title and type: **By result type (Compliance Flag, Data Validation Error, Timeliness) and category**
+
+#### 5.10 GRE results by rule
+
+Tables: GRE results, GRE rules.
+
+1. Create a new worksheet and rename its tab **GRE results by rule**.
+1. **Columns:** `SUM(GS_Failed_Records)`.
+1. **Rows:** drag, in this order, `GR_Dgr_Nbr` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GR_Rule_Nm`.
+1. On the Marks card choose **Bar**.
+1. Drag `GS_Status` onto **Color** on the Marks card.
+1. Drag `GR_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**) onto **Detail** on the Marks card.
+1. Drag `AVG(GS_Failure_Pct)` (right-click the pill: **Measure > Average**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GS_Threshold_Pct_Used)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `SUM(GS_Total_Records)` onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GS_Error_Message)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GR_Severity)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GR_Business_Rule)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `In GRE run (results)` onto **Filters**, tick only **True**, OK.
+1. Sort `GR_Rule_Nm`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, `SUM(GS_Failed_Records)`, close.
+1. Double-click the title and type: **Every rule in the run: pass, warn, fail, error (click a rule to filter the list)**
+
+#### 5.11 Risk and error list
+
+Tables: GRE exceptions.
+
+1. Create a new worksheet and rename its tab **Risk and error list**.
+1. **Rows:** drag, in this order, `Risk order` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Record risk`, `GX_Src_Data_Key`, `GX_Severity`, `GX_Issue_Category`, `GX_Dgr_Nbr` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GX_Rule_Nm`, `GX_Element_Name`, `GX_Src_Key_Value`, `GX_Exception_Flag`, `GX_Batch`, `GX_Load_Dt` (right-click the pill: **Exact Date**, then **Discrete**).
+1. On the Marks card choose **Text**.
+1. Drag `SUM(GX_Exception_Cnt)` onto **Text** on the Marks card.
+1. Drag `Record risk` onto **Color** on the Marks card.
+1. Drag `GX_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**) onto **Detail** on the Marks card.
+1. Drag `ATTR(GX_Business_Rule)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `In GRE run (exceptions)` onto **Filters**, tick only **True**, OK.
+1. Sort `Risk order`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
+1. Right-click the `Risk order` pill and untick **Show Header** (it only sets the order).
+1. Double-click the title and type: **Risks and errors by record, highest risk first (click a row to open the ODAG1 record)**
+
+#### 5.12 Engine checks
+
+Tables: Universe risks and errors.
+
+1. Create a new worksheet and rename its tab **Engine checks**.
+1. **Rows:** drag, in this order, `Severity_Txt`, `Issue_Txt`, `Record key (Issues)`, `DQ_AUTHZN_ID`, `Column_Nm`, `Value_Txt`, `DQ_Functional_Area`, `DQ_Determination`, `DQ_Sample_Status`.
+1. On the Marks card choose **Text**.
+1. Drag `SUM(Issue_Cnt)` onto **Text** on the Marks card.
+1. Drag `In batch (Issues)` onto **Filters**, tick only **True**, OK.
+1. **Analysis > Totals > Add All Subtotals** and **Show Column Grand Totals**, so each issue type shows its count.
+1. Double-click the title and type: **Checks the sampling engine ran on the weekly universe (click a row to open the ODAG1 record)**
+
+#### 5.13 ODAG1 record
+
+Tables: ODAG1 data.
+
+1. Create a new worksheet and rename its tab **ODAG1 record**.
+1. In the Data pane, under **ODAG1 data**, click the first column (`BTCH_ID (ODAG1 data)`), then **Shift+click** the last original column of the table (the one just above `Src_Data_Key_Txt`). Drag the whole selection onto **Rows**. Tableau asks whether to add all of them: **Add all members**. These are every column of the ODAG1 table.
+1. Drag `Src_Data_Key_Txt` and `Odag1_Run_Ty` to the front of **Rows** so the key and pull type show first.
+1. Drag `ODAG1 data (Count)` onto **Text** on the Marks card.
+1. Drag `Selected record row` onto **Filters**, tick only **True**, OK.
+1. Double-click the title, type `ODAG1 record` and a space, then click **Insert > Parameters.Selected record** and type `: every version and every pull`, OK.
+
+### Sheets for 3 Operations and controls
+
+#### 5.14 Universe pulls
+
+Tables: ODAG1 data.
+
+1. Create a new worksheet and rename its tab **Universe pulls**.
+1. **Rows:** drag, in this order, `Odag1_Run_Ty`, `BTCH_ID (ODAG1 data)`, `Odag1_Batch_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `FILE_NM (ODAG1 data)`, `UNVRS_VRSN_CD (ODAG1 data)`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `ODAG1 data (Count)`, `COUNTD(AUTHZN_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**), `MIN(Odag1_Determination_Dt)` (right-click the pill: **Measure > Minimum**), `MAX(Odag1_Determination_Dt)` (right-click the pill: **Measure > Maximum**).
+1. Right-click each column header, **Edit Alias...**: **Rows**, **Authorizations**, **Decisions from**, **Decisions to**.
+1. Drag `Odag1_Curr_Ind` onto **Filters**, tick only **Y**, OK.
+1. Drag `Odag1_Del_Ind` onto **Filters**, tick only **N**, OK.
+1. Sort `BTCH_ID (ODAG1 data)`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
+1. Double-click the title and type: **Universe pulls: daily, weekly and monthly (click a weekly pull to make it the batch)**
 
-### 5.13 Exclusions
+#### 5.15 Run log
 
-Uses the table(s): Run figures. Goes on dashboard **2 Universe and funnel**.
+Tables: Runs.
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Exclusions**.
-1. **Columns:** `SUM(Stat_Case_Cnt)`.
-1. **Rows:** `Stat_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Stat_Run_Key` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Drag `Stat_Ty` onto **Filters**, tick only **EXCLUSION**, OK.
-1. Sort `Stat_Nm`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, field `SUM(Stat_Case_Cnt)`.
-1. Double-click the sheet title and replace it with: **Cases removed by each exclusion**
+1. Create a new worksheet and rename its tab **Run log**.
+1. **Rows:** drag, in this order, `Run_Key`, `Run_Ty`, `Run_Kind`, `Run_Stat`, `Delivery`, `Start_Dtts` (right-click the pill: **Exact Date**, then **Discrete**), `Triggered_By`, `Run_Weekday`, `Error_Txt`, `Rerun_Rsn_Txt`, `Override_Rsn_Txt`, `Finalized_By`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `SUM(Selected_Cnt)`, `SUM(Target_Cnt)`, `SUM(Shortfall_Cnt)`, `SUM(Duration_Min)`, `SUM(Config_Changed_Ind)`.
+1. Right-click each column header, **Edit Alias...**: **Selected**, **Target**, **Shortfall**, **Minutes**, **Config changed**.
+1. Sort `Run_Key`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
+1. Double-click the title and type: **Sampling runs (click a run to make its batch current)**
 
-### 5.14 Universe vs sample share
+#### 5.16 Batches
 
-Uses the table(s): Universe. Goes on dashboard **2 Universe and funnel**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Universe vs sample share**.
-1. **Columns:** `Universe share (candidates)` and then `Sample share` (side by side on the same shelf, separate axes).
-1. **Rows:** `Functional_Area`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Share of candidates vs share of the sample, per area**
+Tables: Batches.
 
-### 5.15 Sampling fraction
+1. Create a new worksheet and rename its tab **Batches**.
+1. **Rows:** drag, in this order, `Batch_Btch_ID`, `Batch_Run_Ty`, `Batch_Batch_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `Batch_Status`, `Sampled_Status`, `Batch_Run_Stat`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `SUM(Source_Cnt)`, `SUM(Closed_Source_Cnt)`, `SUM(Batch_Selected_Cnt)`.
+1. Right-click each column header, **Edit Alias...**: **Sources**, **Sources closed**, **Selected**.
+1. Sort `Batch_Btch_ID`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
+1. Double-click the title and type: **Framework batches and whether each was sampled**
 
-Uses the table(s): Run figures. Goes on dashboard **2 Universe and funnel**.
+#### 5.17 Revalidation
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Sampling fraction**.
-1. **Columns:** `AVG(Stat_Sampling_Fraction)` (right-click the pill, Measure, Avg).
-1. **Rows:** `Stat_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Stat_Run_Key` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Drag `Stat_Kind` onto **Filters**, tick only **Leaf bucket**, OK.
-1. Double-click the sheet title and replace it with: **Sampling fraction per stratum (selected / candidates)**
+Tables: Revalidation.
 
-### 5.16 Exclusion check
+1. Create a new worksheet and rename its tab **Revalidation**.
+1. **Rows:** drag, in this order, `Reval_Run_Key`, `Reval_Dtts` (right-click the pill: **Exact Date**, then **Discrete**), `Reval_Stat`, `Signed_Off`, `Signoff_By`, `Reval_Error_Txt`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `SUM(Orig_Selected_Cnt)`, `SUM(Replay_Selected_Cnt)`, `SUM(Same_Cnt)`, `SUM(Only_Orig_Cnt)`, `SUM(Only_Replay_Cnt)`, `SUM(Missing_Cnt)`, `SUM(Days_To_Signoff)`.
+1. Right-click each column header, **Edit Alias...**: **Original**, **Replay**, **Same**, **Only original**, **Only replay**, **Missing**, **Days to sign-off**.
+1. Drag `ATTR(Diff_Txt)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Double-click the title and type: **Six-monthly revalidation against history and sign-off**
 
-Uses the table(s): Universe. Goes on dashboard **2 Universe and funnel**.
+#### 5.18 GRE run log
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Exclusion check**.
-1. **Columns:** `SUM(Case_Cnt)`.
-1. **Rows:** `Exclusion_Check`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Engine exclusions vs the dashboard's own check of the rules**
+Tables: GRE rule audit.
 
-### 5.17 Issues by type
+1. Create a new worksheet and rename its tab **GRE run log**.
+1. **Rows:** drag, in this order, `GA_Run_Key`, `GA_Rule_Group`, `GA_Status`, `GA_Started_Dtts` (right-click the pill: **Exact Date**, then **Discrete**), `GA_Triggered_By`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `SUM(GA_Total_Rules)`, `SUM(GA_Rules_Succeeded)`, `SUM(GA_Rules_Errored)`.
+1. Right-click each column header, **Edit Alias...**: **Rules**, **Succeeded**, **Errored**.
+1. Drag `ATTR(GA_Run_Params)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Sort `GA_Run_Key`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
+1. Double-click the title and type: **GRE rules engine runs (click a run to make it the GRE run)**
 
-Uses the table(s): Universe risks and errors. Goes on dashboard **3 Universe risks and errors**.
+#### 5.19 GRE errors
 
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Issues by type**.
-1. **Columns:** `SUM(Issue_Cnt)`.
-1. **Rows:** `Issue_Txt`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Severity_Txt` onto **Color** on the Marks card.
-1. Drag `DQ_BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Sort `Issue_Txt`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, field `SUM(Issue_Cnt)`.
-1. Double-click the sheet title and replace it with: **Risks and errors found in the universe report**
+Tables: GRE rule errors.
 
-### 5.18 Issues by week
+1. Create a new worksheet and rename its tab **GRE errors**.
+1. **Rows:** drag, in this order, `GE_Run_Key`, `GE_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GE_Error_Type`, `GE_Error_Message`, `GE_Occurred_Dtts` (right-click the pill: **Exact Date**, then **Discrete**).
+1. On the Marks card choose **Text**.
+1. Drag `SUM(GE_Error_Cnt)` onto **Text** on the Marks card.
+1. Double-click the title and type: **GRE rules that failed to run**
+
+#### 5.20 Refinement
+
+Tables: Refinement.
 
-Uses the table(s): Universe risks and errors. Goes on dashboard **3 Universe risks and errors**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Issues by week**.
-1. **Columns:** `WEEK(DQ_Batch_Dt)` continuous (green): in the date menu pick the second **Week Number** group's **Week** (the one showing Week 5, 2015).
-1. **Rows:** `SUM(Issue_Cnt)`.
-1. **Marks** card: choose **Line** from the drop-down.
-1. Drag `Severity_Txt` onto **Color** on the Marks card.
-1. Drag `DQ_BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Issues per weekly batch**
-
-### 5.19 Decision timeliness
-
-Uses the table(s): Universe. Goes on dashboard **3 Universe risks and errors**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Decision timeliness**.
-1. **Columns:** `SUM(Case_Cnt)`.
-1. **Rows:** `Processing`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Late decision` onto **Color** on the Marks card.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Decisions within the timeframe (days set by the parameters)**
-
-### 5.20 Average decision days
-
-Uses the table(s): Universe. Goes on dashboard **3 Universe risks and errors**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Average decision days**.
-1. **Columns:** `AVG(Decision_Days)` (right-click the pill, Measure, Avg).
-1. **Rows:** `Functional_Area`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Processing` onto **Color** on the Marks card.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Average days from request to decision**
-
-### 5.21 Issue list
-
-Uses the table(s): Universe risks and errors. Goes on dashboard **3 Universe risks and errors**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Issue list**.
-1. **Rows:** `DQ_BTCH_ID`, then `DQ_AUTHZN_ID`, then `Issue_Txt`, then `Severity_Txt`, then `Column_Nm`, then `Value_Txt`, then `DQ_Functional_Area`, then `DQ_Sample_Status`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Issue_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `DQ_BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Every row with a risk or error**
-
-### 5.22 Delivery
-
-Uses the table(s): Runs. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Delivery**.
-1. **Columns:** `SUM(Run_Cnt)`.
-1. **Rows:** `Delivery`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Run_Version` onto **Filters**, tick only **Current**, OK.
-1. Double-click the sheet title and replace it with: **Samples delivered by the Friday deadline**
-
-### 5.23 Run duration
-
-Uses the table(s): Runs. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Run duration**.
-1. **Columns:** `WEEK(As_Of_Dt_Key)` continuous (green): in the date menu pick the second **Week Number** group's **Week** (the one showing Week 5, 2015).
-1. **Rows:** `SUM(Duration_Min)`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Run_Stat` onto **Color** on the Marks card.
-1. Double-click the sheet title and replace it with: **Minutes per run, by week**
-
-### 5.24 Batches
-
-Uses the table(s): Batches. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Batches**.
-1. **Columns:** `SUM(Batch_Cnt)`.
-1. **Rows:** `Batch_Status`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Sampled_Status` onto **Color** on the Marks card.
-1. Double-click the sheet title and replace it with: **Framework batches: closed and sampled**
-
-### 5.25 Batch list
-
-Uses the table(s): Batches. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Batch list**.
-1. **Rows:** `Batch_Btch_ID`, then `Batch_Status`, then `Sampled_Status`, then `Batch_Run_Stat`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Batch_Selected_Cnt)` onto **Text (Label)** on the Marks card.
-1. Double-click the sheet title and replace it with: **Batches and their samples**
-
-### 5.26 Reruns and overrides
-
-Uses the table(s): Runs. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Reruns and overrides**.
-1. **Rows:** `Run_Key`, then `Run_Kind`, then `Rerun_Rsn_Txt`, then `Override_Rsn_Txt`, then `Triggered_By`, then `Run_Version`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Selected_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `Run_Kind` onto **Filters**, tick only **Rerun**, **Override**, OK.
-1. Double-click the sheet title and replace it with: **Reruns and overrides with their reasons**
-
-### 5.27 Errors
-
-Uses the table(s): Runs. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Errors**.
-1. **Rows:** `Run_Key`, then `Run_Stat`, then `Error_Ty`, then `Error_Txt`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Run_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `Run_Stat` onto **Filters**, tick only **ERROR**, **FAILED**, OK.
-1. Double-click the sheet title and replace it with: **Failed runs**
-
-### 5.28 Run day
-
-Uses the table(s): Runs. Goes on dashboard **4 Operations and delivery**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Run day**.
-1. **Columns:** `SUM(Run_Cnt)`.
-1. **Rows:** `Run_Weekday`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Run_Kind` onto **Color** on the Marks card.
-1. Double-click the sheet title and replace it with: **Runs per weekday (4.04: every Friday)**
-
-### 5.29 Universe volume
-
-Uses the table(s): Runs. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Universe volume**.
-1. **Columns:** `MONTH(As_Of_Dt_Key)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `SUM(In_Scope_Cnt)`.
-1. **Marks** card: choose **Line** from the drop-down.
-1. Drag `Run_Version` onto **Filters**, tick only **Current**, OK.
-1. Double-click the sheet title and replace it with: **Universe rows in scope per month**
-
-### 5.30 Volume change
-
-Uses the table(s): Runs. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Volume change**.
-1. **Columns:** `MONTH(As_Of_Dt_Key)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `In-scope change vs prior month`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Aberration (Runs)` onto **Color** on the Marks card.
-1. Drag `Run_Version` onto **Filters**, tick only **Current**, OK.
-1. Double-click the sheet title and replace it with: **Change against the prior month (alert over the threshold)**
-
-### 5.31 Denial rate
-
-Uses the table(s): Universe. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Denial rate**.
-1. **Columns:** `MONTH(Batch_Dt)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `Denial rate`.
-1. **Marks** card: choose **Line** from the drop-down.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Denial rate of the universe per month**
-
-### 5.32 Late decisions trend
-
-Uses the table(s): Universe. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Late decisions trend**.
-1. **Columns:** `QUARTER(Batch_Dt)` continuous (green): in the date menu pick the second **Quarter** (the one showing Q2 2015).
-1. **Rows:** `Late decision rate`.
-1. **Marks** card: choose **Line** from the drop-down.
-1. Drag `Processing` onto **Color** on the Marks card.
-1. Drag `BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Late decision rate per quarter**
-
-### 5.33 Sample mix trend
-
-Uses the table(s): Sample. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Sample mix trend**.
-1. **Columns:** `MONTH(SMPL_CYCLE_DT)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `SUM(Smp_Case_Cnt)`.
-1. **Marks** card: choose **Area** from the drop-down.
-1. Drag `Smp_Functional_Area` onto **Color** on the Marks card.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Sampled cases per month by area**
-
-### 5.34 Risk trend
-
-Uses the table(s): Universe risks and errors. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Risk trend**.
-1. **Columns:** `YEAR(DQ_Batch_Dt)` discrete (blue): in the date menu pick the first **Year**, then `QUARTER(DQ_Batch_Dt)` discrete (blue): in the date menu pick the first **Quarter**.
-1. **Rows:** `SUM(Issue_Cnt)`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Severity_Txt` onto **Color** on the Marks card.
-1. Drag `DQ_BTCH_ID` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **Universe risks and errors by year and quarter**
-
-### 5.35 Shortfall trend
-
-Uses the table(s): Runs. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Shortfall trend**.
-1. **Columns:** `MONTH(As_Of_Dt_Key)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `SUM(Shortfall_Cnt)`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Run_Version` onto **Filters**, tick only **Current**, OK.
-1. Double-click the sheet title and replace it with: **Cases short of the target per month**
-
-### 5.36 Top CPT codes
-
-Uses the table(s): Sample. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Top CPT codes**.
-1. **Columns:** `SUM(Smp_Case_Cnt)`.
-1. **Rows:** `Smp_CPT_First`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Sort `Smp_CPT_First`: click the pill's arrow, **Sort**, Sort By **Field**, **Descending**, field `SUM(Smp_Case_Cnt)`.
-1. Double-click the sheet title and replace it with: **Procedure codes most often in the sample**
-
-### 5.37 OON denials trend
-
-Uses the table(s): Sample. Goes on dashboard **5 Trends and aberrations**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **OON denials trend**.
-1. **Columns:** `MONTH(SMPL_CYCLE_DT)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `Out-of-network denials`.
-1. **Marks** card: choose **Line** from the drop-down.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Double-click the sheet title and replace it with: **High-risk cases: out-of-network denials sampled per month**
-
-### 5.38 Revalidation status
-
-Uses the table(s): Revalidation. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Revalidation status**.
-1. **Columns:** `SUM(Reval_Cnt)`.
-1. **Rows:** `Reval_Stat`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Signed_Off` onto **Color** on the Marks card.
-1. Double-click the sheet title and replace it with: **Revalidation results (8.01) and sign-off**
-
-### 5.39 Revalidation list
-
-Uses the table(s): Revalidation. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Revalidation list**.
-1. **Rows:** `Reval_Run_Key`, then `Reval_Stat`, then `Signed_Off`, then `Signoff_By`, then `Diff_Txt`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Same_Cnt)` onto **Text (Label)** on the Marks card.
-1. Double-click the sheet title and replace it with: **Each replay: cases that matched**
-
-### 5.40 Refinement findings
-
-Uses the table(s): Refinement. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Refinement findings**.
-1. **Columns:** `SUM(Finding_Cnt)`.
-1. **Rows:** `Finding_Ty`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Review_Status` onto **Color** on the Marks card.
-1. Drag `Row_Kind` onto **Filters**, tick only **Finding**, OK.
-1. Double-click the sheet title and replace it with: **Refinement findings (8.03): open and reviewed**
-
-### 5.41 Open findings
-
-Uses the table(s): Refinement. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Open findings**.
-1. **Rows:** `Refine_ID`, then `Finding_Ty`, then `Finding_Nm`, then `Finding_Txt`, then `Review_Status`, then `Review_Txt`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Finding_Cnt)` onto **Text (Label)** on the Marks card.
-1. Drag `Row_Kind` onto **Filters**, tick only **Finding**, OK.
-1. Double-click the sheet title and replace it with: **Findings and the decisions taken (8.02)**
-
-### 5.42 Not picked reasons
-
-Uses the table(s): Refinement. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Not picked reasons**.
-1. **Columns:** `SUM(Refine_Case_Cnt)`.
-1. **Rows:** `Finding_Ty`, then `Finding_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Row_Kind` onto **Filters**, tick only **Total**, OK.
-1. Double-click the sheet title and replace it with: **Why cases were left out, topped up or replaced**
-
-### 5.43 Replacements
-
-Uses the table(s): Sample. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Replacements**.
-1. **Columns:** `SUM(Smp_Case_Cnt)`.
-1. **Rows:** `Stat_Rsn_Txt`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `SMPL_RUN_KEY` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Drag `Selection_Stat` onto **Filters**, tick only **REPLACEMENT**, OK.
-1. Double-click the sheet title and replace it with: **Cases replaced by reviewers, by reason**
-
-### 5.44 Finalized
-
-Uses the table(s): Runs. Goes on dashboard **6 Internal controls**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Finalized**.
-1. **Columns:** `SUM(Run_Cnt)`.
-1. **Rows:** `Run_Stat`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Run_Version` onto **Filters**, tick only **Current**, OK.
-1. Double-click the sheet title and replace it with: **Samples finalized by a reviewer (human checkpoint)**
-
-### 5.45 Rules
-
-Uses the table(s): Rules. Goes on dashboard **7 Configuration**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Rules**.
-1. **Rows:** `Rule_Class_Cd`, then `Rule_ID` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete), then `Rule_Nm`, then `Parent_Path_Txt`, then `Quota_Cd`, then `Quota_Val` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete), then `Max_Val` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete), then `In_Effect`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Rule_Cnt)` onto **Text (Label)** on the Marks card.
-1. Double-click the sheet title and replace it with: **The sampling rules (10.02: shares and counts are configurable)**
-
-### 5.46 Quota vs actual
-
-Uses the table(s): Run figures. Goes on dashboard **7 Configuration**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Quota vs actual**.
-1. **Columns:** `SUM(Stat_Target_Cnt)` and then `SUM(Stat_Selected_Cnt)` (side by side on the same shelf, separate axes).
-1. **Rows:** `Stat_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Stat_Run_Key` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Drag `Stat_Kind` onto **Filters**, tick only **Leaf bucket**, OK.
-1. Double-click the sheet title and replace it with: **Each stratum's target and what it got**
-
-### 5.47 Caps
-
-Uses the table(s): Run figures. Goes on dashboard **7 Configuration**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Caps**.
-1. **Columns:** `SUM(Over_Cnt)` and then `SUM(Replaced_Cnt)` (side by side on the same shelf, separate axes).
-1. **Rows:** `Stat_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Stat_Run_Key` onto **Filters**, choose **All** on the General tab (the **Use all** option), OK. On the dashboard this becomes the run or batch drop-down.
-1. Drag `Stat_Ty` onto **Filters**, tick only **CAP**, OK.
-1. Double-click the sheet title and replace it with: **Picks each cap stopped, and how many were made up**
-
-### 5.48 Config changes
-
-Uses the table(s): Runs. Goes on dashboard **7 Configuration**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Config changes**.
-1. **Columns:** `MONTH(As_Of_Dt_Key)` continuous (green): in the date menu pick the second **Month** (the one showing May 2015).
-1. **Rows:** `SUM(Config_Changed_Ind)`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Double-click the sheet title and replace it with: **Runs whose configuration changed from the run before**
-
-### 5.49 Rows kept
-
-Uses the table(s): Retention. Goes on dashboard **8 Retention**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Rows kept**.
-1. **Columns:** `SUM(Row_Cnt)`.
-1. **Rows:** `Object_Nm`.
-1. **Marks** card: choose **Bar** from the drop-down.
-1. Drag `Data_Year` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete) onto **Color** on the Marks card.
-1. Double-click the sheet title and replace it with: **Rows kept per object (6.01, 6.02: 10 years)**
-
-### 5.50 Rows by year
-
-Uses the table(s): Retention. Goes on dashboard **8 Retention**.
-
-1. Create a new worksheet (the **New Worksheet** icon at the bottom) and rename its tab **Rows by year**.
-1. **Columns:** `Data_Year` as a **discrete dimension** (right-click the pill, choose Dimension, then Discrete).
-1. **Rows:** `Object_Nm`.
-1. **Marks** card: choose **Text** from the drop-down.
-1. Drag `SUM(Row_Cnt)` onto **Text (Label)** on the Marks card.
-1. Double-click the sheet title and replace it with: **Rows kept per object and year**
+1. Create a new worksheet and rename its tab **Refinement**.
+1. **Rows:** drag, in this order, `Row_Kind`, `Finding_Ty`, `Finding_Nm`, `Refine_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Review_Status`, `Finding_Txt`.
+1. On the Marks card choose **Text**.
+1. Drag `SUM(Refine_Case_Cnt)` onto **Text** on the Marks card.
+1. Drag `ATTR(Review_Txt)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(Threshold_Txt)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Double-click the title and type: **Opportunities to refine the rules and their human review**
+
+#### 5.21 Retention
+
+Tables: Retention.
+
+1. Create a new worksheet and rename its tab **Retention**.
+1. **Columns:** `Data_Year` (if it turns green, right-click it: **Dimension**, then **Discrete**).
+1. **Rows:** drag, in this order, `Object_Nm`.
+1. On the Marks card choose **Text**.
+1. Drag `SUM(Row_Cnt)` onto **Text** on the Marks card.
+1. Double-click the title and type: **Inputs and outputs kept, rows by data year (10-year retention)**
+
+### Sheets for 4 Trends and configuration
+
+#### 5.22 Run trends
+
+Tables: Runs.
+
+1. Create a new worksheet and rename its tab **Run trends**.
+1. **Columns:** `MONTH(As_Of_Dt_Key)` (right-click the pill and choose the second **Month** (May 2015)).
+1. **Rows:** `SUM(In_Scope_Cnt)`, then `In-scope change vs prior month`, then `SUM(Shortfall_Cnt)` (one below the other).
+1. On the Marks card choose **Line** on the **All** tab.
+1. On the Marks tab for `In-scope change vs prior month`, choose **Bar** and drag `Aberration (Runs)` onto **Color**.
+1. Change calculations (the ones with a triangle) compute **Table (across)**, which is the default; leave it.
+1. Drag `Curr_Ind` onto **Filters**, tick only **1**, OK.
+1. Double-click the title and type: **In-scope volume, change vs prior month and shortfall**
+
+#### 5.23 Universe trends
+
+Tables: Universe.
+
+1. Create a new worksheet and rename its tab **Universe trends**.
+1. **Columns:** `MONTH(Batch_Dt)` (right-click the pill and choose the second **Month** (May 2015)).
+1. **Rows:** `SUM(Case_Cnt)`, then `Universe change vs prior month`, then `Denial rate`, then `Late decision rate` (one below the other).
+1. On the Marks card choose **Line** on the **All** tab.
+1. On the Marks tab for `Universe change vs prior month`, choose **Bar** and drag `Aberration (Universe)` onto **Color**.
+1. Change calculations (the ones with a triangle) compute **Table (across)**, which is the default; leave it.
+1. Double-click the title and type: **Universe volume, change vs prior month, denial and late decision rates**
+
+#### 5.24 Sample trends
+
+Tables: Sample.
+
+1. Create a new worksheet and rename its tab **Sample trends**.
+1. **Columns:** `MONTH(SMPL_CYCLE_DT)` (right-click the pill and choose the second **Month** (May 2015)).
+1. **Rows:** `SUM(Smp_Case_Cnt)`, then `Out-of-network denials`, then `Clinical auditor cases` (one below the other).
+1. On the Marks card choose **Line** on the **All** tab.
+1. On the Marks tab for `SUM(Smp_Case_Cnt)`, choose **Area** and drag `Smp_Area_Group` onto **Color**.
+1. Change calculations (the ones with a triangle) compute **Table (across)**, which is the default; leave it.
+1. Double-click the title and type: **Sample size by area, OON denials, clinical auditor cases**
+
+#### 5.25 Risk trends
+
+Tables: GRE exceptions.
+
+1. Create a new worksheet and rename its tab **Risk trends**.
+1. **Columns:** `MONTH(GX_Load_Dt)` (right-click the pill and choose the second **Month** (May 2015)).
+1. **Rows:** `SUM(GX_Exception_Cnt)`, then `High-risk records` (one below the other).
+1. On the Marks card choose **Line** on the **All** tab.
+1. On the Marks tab for `SUM(GX_Exception_Cnt)`, choose **Bar** and drag `GX_Severity` onto **Color**.
+1. Change calculations (the ones with a triangle) compute **Table (across)**, which is the default; leave it.
+1. Drag `GX_Batch` onto **Filters**, **All**, OK (the dashboard shows it as the daily, weekly, monthly choice).
+1. Double-click the title and type: **Risks and errors by month and result type, and high-risk records**
+
+#### 5.26 Engine check trends
+
+Tables: Universe risks and errors.
+
+1. Create a new worksheet and rename its tab **Engine check trends**.
+1. **Columns:** `WEEK(DQ_Batch_Dt)` (right-click the pill and choose **More > Week Number** and then **Continuous**).
+1. **Rows:** `SUM(Issue_Cnt)` (one below the other).
+1. On the Marks card choose **Line** on the **All** tab.
+1. On the Marks tab for `SUM(Issue_Cnt)`, choose **Bar** and drag `Severity_Txt` onto **Color**.
+1. Change calculations (the ones with a triangle) compute **Table (across)**, which is the default; leave it.
+1. Double-click the title and type: **Engine checks by week**
+
+#### 5.27 Sampling rules
+
+Tables: Rules.
+
+1. Create a new worksheet and rename its tab **Sampling rules**.
+1. **Rows:** drag, in this order, `Seq_Nbr` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Rule_Class_Cd`, `Rule_Nm`, `Rule_Ty`, `Level_Nbr` (if it turns green, right-click it: **Dimension**, then **Discrete**), `Parent_Path_Txt`, `Quota_Cd`, `In_Effect`.
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `MIN(Quota_Val)` (right-click the pill: **Measure > Minimum**), `MIN(Max_Val)` (right-click the pill: **Measure > Minimum**).
+1. Right-click each column header, **Edit Alias...**: **Quota**, **Cap**.
+1. Drag `ATTR(Rule_Desc)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(Rule_Sql_Txt)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Sort `Seq_Nbr`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Ascending**, close.
+1. Double-click the title and type: **Sampling configuration: levels, buckets, quotas and caps (right-click a rule to see its run figures)**
+
+#### 5.28 GRE rules
+
+Tables: GRE rules.
+
+1. Create a new worksheet and rename its tab **GRE rules**.
+1. **Rows:** drag, in this order, `GR_Rule_Group`, `GR_Seq_No` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GR_Rule_ID` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GR_Rule_Nm`, `GR_Dgr_Nbr` (if it turns green, right-click it: **Dimension**, then **Discrete**), `GR_Severity`, `GR_Issue_Category`, `GR_Element_Name`, `GR_Act_Ind`.
+1. On the Marks card choose **Text**.
+1. Drag `MIN(GR_Threshold_Pct)` (right-click the pill: **Measure > Minimum**) onto **Text** on the Marks card.
+1. Drag `ATTR(GR_Business_Rule)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GR_Rule_Description)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Drag `ATTR(GR_Rule_Syntax)` (right-click the pill: **Attribute**) onto **Tooltip** on the Marks card.
+1. Sort `GR_Seq_No`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Ascending**, close.
+1. Double-click the title and type: **Data validation rules (right-click a rule to see its results)**
 
 ## Part 6: The dashboards
 
-Every dashboard is **1600 x 1000** pixels. For each one:
+Each dashboard is **1600 x 1000**. For each one:
 
-1. Click the **New Dashboard** icon at the bottom and rename the tab.
-2. In the **Dashboard** pane (left), under **Size**, choose **Fixed size**, width **1600**, height **1000**.
-3. At the bottom of the Dashboard pane, click **Floating** so the items you drop can be placed exactly.
-4. Drag each item listed below onto the dashboard. Then, with the item selected, open the **Layout** tab (next to Dashboard) and type its **Position** (x, y) and **Size** (w, h).
-5. Worksheets: drag the sheet name from the *Sheets* list. Text: drag **Text** from *Objects*. Drop-downs and sliders: see the steps under each dashboard.
+1. Click **New Dashboard** at the bottom and rename the tab.
+2. In the **Dashboard** pane, **Size**: **Fixed size**, **1600** x **1000**.
+3. At the bottom of the Dashboard pane click **Floating**, so every item can be placed exactly.
+4. Drag each item in, then on the **Layout** tab type its **Position** (x, y) and **Size** (w, h).
+5. Each sheet: on its title bar arrow choose **Fit > Entire View** for KPIs and charts, **Fit > Fit Width** for lists.
 
-### 0 About
+Every dashboard has the same header row:
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 1000 |
+| Item | x | y | w | h |
+|---|---|---|---|---|
+| Text object: the title and what it covers | 10 | 0 | 900 | 50 |
+| Navigation button 1 | 920 | 8 | 215 | 36 |
+| Navigation button 2 | 1145 | 8 | 215 | 36 |
+| Navigation button 3 | 1370 | 8 | 220 | 36 |
 
-Text object content (type it in the text editor that opens; one paragraph per line):
-
-- ODAG1 sampling dashboard *(size 18, bold)*
-- Data: one Tableau data source, ODAG1 Sampling, with 10 Custom SQL tables (custom_sql folder) and the ODAG1 data table, over the sampling tables, the ODAG1 universe, the sample table, SHRPA and the framework batches. *(size 11)*
-- Requirement coverage *(size 13, bold)*
-- 4.01 sample criteria: 1 Weekly sample, 2 Universe and funnel *(size 11)*
-- 4.03 output with functional area, clinical auditor flag, priority order; risks and errors in the universe: 1, 3 *(size 11)*
-- 4.04 every Friday, 10.01 frequency: 4 Operations and delivery *(size 11)*
-- 6.01 / 6.02 10-year retention: 8 Retention *(size 11)*
-- 7.01 to 7.04 trends, aberrations over x %, high-risk frequency: 5 Trends and aberrations *(size 11)*
-- 8.01 revalidation, 8.02 human checkpoints, 8.03 refinement: 6 Internal controls *(size 11)*
-- 9 / 10.02 configuration: 7 Configuration *(size 11)*
-- Not shown, no data yet: audit results (error rates found by auditors), contract status, concurrent review. *(size 11, italic)*
+Navigation buttons: drag **Navigation** from *Objects*. Click the button's arrow, **Edit Button...**: *Navigate to* the dashboard, *Button Style* **Text**, *Title* the dashboard name, OK. Each dashboard gets one button for each of the other three, in the order 1, 2, 3, 4. In Desktop, **Alt+click** a button to follow it while editing.
 
 ### 1 Weekly sample
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **KPI Selected** | 256 | 70 | 269 | 232 |
-| 3 | Sheet **KPI Vs Target** | 525 | 70 | 269 | 232 |
-| 4 | Sheet **KPI Clinical** | 794 | 70 | 269 | 232 |
-| 5 | Sheet **KPI Expedited** | 1062 | 70 | 269 | 232 |
-| 6 | Sheet **KPI OON** | 1331 | 70 | 269 | 232 |
-| 7 | Sheet **Sample by area** | 256 | 302 | 672 | 232 |
-| 8 | Sheet **Target vs selected** | 928 | 302 | 672 | 232 |
-| 9 | Sheet **Determination mix** | 256 | 535 | 672 | 232 |
-| 10 | Sheet **OON by area** | 928 | 535 | 672 | 232 |
-| 11 | Sheet **Case list** | 256 | 768 | 1344 | 232 |
-| 12 | Drop-down filter on `SMPL_RUN_KEY` | 0 | 70 | 256 | 90 |
-| 13 | Drop-down filter on `Stat_Run_Key` | 0 | 160 | 256 | 90 |
+Text object (two lines): **1 Weekly sample** *(size 16, bold)* / *Requirement 4 (4.01 sample selection, 4.03 sample output: prioritized cases, functional area, clinical auditor, universe risks) and 10.02 (targets and caps).* *(size 9)*
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+Buttons: **2 Universe risks and errors**, **3 Operations and controls**, **4 Trends and configuration**.
 
-- 1 Weekly sample *(size 18, bold)*
-- Requirements 4.01 and 4.03: the cases COMO audits this week *(size 10)*
+| Item | x | y | w | h |
+|---|---|---|---|---|
+| Parameter control **Batch** (Single value list) | 10 | 55 | 300 | 50 |
+| Parameter control **Weekly target** (Slider) | 320 | 55 | 300 | 50 |
+| Text object: *Pick a batch. Click a bar, bucket or area to filter; click a case to open its ODAG1 record.* | 630 | 55 | 960 | 50 |
+| Sheet **Sample KPIs** | 10 | 110 | 1580 | 90 |
+| Sheet **Sample mix** | 10 | 205 | 520 | 330 |
+| Sheet **Targets and caps** | 540 | 205 | 1050 | 330 |
+| Sheet **Universe funnel** | 10 | 540 | 520 | 220 |
+| Sheet **Universe by area** | 540 | 540 | 620 | 220 |
+| Sheet **Top CPT codes** | 1170 | 540 | 420 | 220 |
+| Sheet **Case list** | 10 | 765 | 1580 | 230 |
 
-Drop-down `SMPL_RUN_KEY`: select the sheet **KPI Selected** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **KPI Selected**, **KPI Vs Target**, **KPI Clinical**, **KPI Expedited**, **KPI OON**, **Sample by area**, **Determination mix**, **OON by area**, **Case list**. Place the card at the position in the table.
+Controls: select any sheet on the dashboard, its arrow (**More options**), **Parameters**, and pick the parameter; on the card's arrow choose the style shown. The parameter controls work for every sheet because the sheets filter on the **In batch** / **In GRE run** fields.
 
-Drop-down `Stat_Run_Key`: select the sheet **Target vs selected** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **Target vs selected**. Place the card at the position in the table.
+### 2 Universe risks and errors
 
-### 2 Universe and funnel
+Text object (two lines): **2 Universe risks and errors** *(size 16, bold)* / *Requirement 2 (2.01 to 2.04: risks and errors by rule, result type, category, risk level and priority, with the full ODAG1 record) and 1.03 (every universe field).* *(size 9)*
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Universe heat map** | 256 | 70 | 672 | 310 |
-| 3 | Sheet **What the sample did** | 928 | 70 | 672 | 310 |
-| 4 | Sheet **Exclusions** | 256 | 380 | 672 | 310 |
-| 5 | Sheet **Exclusion check** | 928 | 380 | 672 | 310 |
-| 6 | Sheet **Universe vs sample share** | 256 | 690 | 672 | 310 |
-| 7 | Sheet **Sampling fraction** | 928 | 690 | 672 | 310 |
-| 8 | Drop-down filter on `BTCH_ID` | 0 | 70 | 256 | 90 |
-| 9 | Drop-down filter on `Stat_Run_Key` | 0 | 160 | 256 | 90 |
+Buttons: **1 Weekly sample**, **3 Operations and controls**, **4 Trends and configuration**.
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+| Item | x | y | w | h |
+|---|---|---|---|---|
+| Parameter control **GRE run** (Single value list) | 10 | 55 | 300 | 50 |
+| Parameter control **Batch** (Single value list) | 320 | 55 | 300 | 50 |
+| Filter card `GX_Batch` (Multiple values (dropdown)) | 630 | 55 | 300 | 50 |
+| Parameter control **High-risk compliance flags** (Slider) | 940 | 55 | 300 | 50 |
+| Text object: *Click a risk or engine check to show that record's ODAG1 rows at the bottom. Click a rule to filter the list.* | 1250 | 55 | 340 | 50 |
+| Sheet **Risk KPIs** | 10 | 110 | 780 | 90 |
+| Sheet **Results by type** | 10 | 205 | 380 | 260 |
+| Sheet **GRE results by rule** | 400 | 205 | 390 | 260 |
+| Sheet **Engine checks** | 10 | 470 | 780 | 270 |
+| Sheet **Risk and error list** | 800 | 110 | 790 | 630 |
+| Sheet **ODAG1 record** | 10 | 745 | 1580 | 250 |
 
-- 2 Universe and funnel *(size 18, bold)*
-- Requirement 4.01: what the universe held and how the rules narrowed it *(size 10)*
+Controls: select any sheet on the dashboard, its arrow (**More options**), **Parameters**, and pick the parameter; on the card's arrow choose the style shown. The parameter controls work for every sheet because the sheets filter on the **In batch** / **In GRE run** fields.
 
-Drop-down `BTCH_ID`: select the sheet **Universe heat map** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **Universe heat map**, **What the sample did**, **Exclusion check**, **Universe vs sample share**. Place the card at the position in the table.
+Filter card `GX_Batch`: select the sheet **Risk and error list**, its arrow, **Filters**, `GX_Batch`. On the card's arrow choose **Multiple Values (dropdown)**, rename the card title to **Schedule (daily, weekly, monthly)**, and **Apply to Worksheets > Selected Worksheets**: **Risk KPIs**, **Results by type**, **Risk and error list**.
 
-Drop-down `Stat_Run_Key`: select the sheet **Exclusions** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **Exclusions**, **Sampling fraction**. Place the card at the position in the table.
+### 3 Operations and controls
 
-### 3 Universe risks and errors
+Text object (two lines): **3 Operations and controls** *(size 16, bold)* / *Requirement 1 (1.02 pulls by frequency), 2.06 and 4.04 (runs on schedule), 3 and 6 (storage and retention), 8 (revalidation, human sign-off, refinement) and 10.01.* *(size 9)*
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Issues by type** | 256 | 70 | 672 | 310 |
-| 3 | Sheet **Issues by week** | 928 | 70 | 672 | 310 |
-| 4 | Sheet **Decision timeliness** | 256 | 380 | 672 | 310 |
-| 5 | Sheet **Average decision days** | 928 | 380 | 672 | 310 |
-| 6 | Sheet **Issue list** | 256 | 690 | 1344 | 310 |
-| 7 | Drop-down filter on `DQ_BTCH_ID` | 0 | 70 | 256 | 90 |
-| 8 | Drop-down filter on `BTCH_ID` | 0 | 160 | 256 | 90 |
-| 9 | Slider for parameter **Standard decision days** | 0 | 250 | 256 | 90 |
-| 10 | Slider for parameter **Expedited decision days** | 0 | 340 | 256 | 90 |
+Buttons: **1 Weekly sample**, **2 Universe risks and errors**, **4 Trends and configuration**.
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+| Item | x | y | w | h |
+|---|---|---|---|---|
+| Parameter control **Batch** (Single value list) | 10 | 55 | 300 | 50 |
+| Parameter control **GRE run** (Single value list) | 320 | 55 | 300 | 50 |
+| Parameter control **Delivery deadline hour (Friday, CT)** (Slider) | 630 | 55 | 300 | 50 |
+| Text object: *Click a run, batch or pull to make it the current batch (right-click: open the weekly sample). Click a GRE run to make it current.* | 940 | 55 | 650 | 50 |
+| Sheet **Universe pulls** | 10 | 110 | 780 | 210 |
+| Sheet **Run log** | 800 | 110 | 790 | 210 |
+| Sheet **Batches** | 10 | 325 | 780 | 200 |
+| Sheet **Revalidation** | 800 | 325 | 790 | 200 |
+| Sheet **GRE run log** | 10 | 530 | 780 | 215 |
+| Sheet **GRE errors** | 800 | 530 | 790 | 215 |
+| Sheet **Refinement** | 10 | 750 | 1050 | 245 |
+| Sheet **Retention** | 1070 | 750 | 520 | 245 |
 
-- 3 Universe risks and errors *(size 18, bold)*
-- Requirement 4.03: risks and errors identified in the universe report itself *(size 10)*
+Controls: select any sheet on the dashboard, its arrow (**More options**), **Parameters**, and pick the parameter; on the card's arrow choose the style shown. The parameter controls work for every sheet because the sheets filter on the **In batch** / **In GRE run** fields.
 
-Drop-down `DQ_BTCH_ID`: select the sheet **Issues by type** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **Issues by type**, **Issues by week**, **Issue list**. Place the card at the position in the table.
+### 4 Trends and configuration
 
-Drop-down `BTCH_ID`: select the sheet **Decision timeliness** on the dashboard, click its arrow (**More options**), **Filters**, choose the field. Then on the new filter card click its arrow: **Single Value (dropdown)**, and **Apply to Worksheets > Selected Worksheets**, tick: **Decision timeliness**, **Average decision days**. Place the card at the position in the table.
+Text object (two lines): **4 Trends and configuration** *(size 16, bold)* / *Requirement 7 (7.01 to 7.04: trends, aberrations over the alert threshold, high-risk frequency), 2.03 and 4.02 (one-year look back), 9 and 10.02 (configuration).* *(size 9)*
 
-Slider **Standard decision days**: Dashboard pane, select any sheet, its arrow, **Parameters**, **Standard decision days**. On the card's arrow choose **Slider**. Place it at the position in the table.
+Buttons: **1 Weekly sample**, **2 Universe risks and errors**, **3 Operations and controls**.
 
-Slider **Expedited decision days**: Dashboard pane, select any sheet, its arrow, **Parameters**, **Expedited decision days**. On the card's arrow choose **Slider**. Place it at the position in the table.
+| Item | x | y | w | h |
+|---|---|---|---|---|
+| Parameter control **Alert threshold (% change)** (Slider) | 10 | 55 | 300 | 50 |
+| Parameter control **Standard decision days** (Slider) | 320 | 55 | 300 | 50 |
+| Parameter control **Expedited decision days** (Slider) | 630 | 55 | 300 | 50 |
+| Filter card `GX_Batch` (Multiple values (dropdown)) | 940 | 55 | 300 | 50 |
+| Text object: *Move the sliders to change the aberration and timeliness thresholds. Right-click a rule to jump to its results.* | 1250 | 55 | 340 | 50 |
+| Sheet **Run trends** | 10 | 110 | 780 | 290 |
+| Sheet **Universe trends** | 800 | 110 | 790 | 290 |
+| Sheet **Sample trends** | 10 | 405 | 520 | 200 |
+| Sheet **Risk trends** | 540 | 405 | 520 | 200 |
+| Sheet **Engine check trends** | 1070 | 405 | 520 | 200 |
+| Sheet **Sampling rules** | 10 | 610 | 780 | 385 |
+| Sheet **GRE rules** | 800 | 610 | 790 | 385 |
 
-### 4 Operations and delivery
+Controls: select any sheet on the dashboard, its arrow (**More options**), **Parameters**, and pick the parameter; on the card's arrow choose the style shown. The parameter controls work for every sheet because the sheets filter on the **In batch** / **In GRE run** fields.
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Delivery** | 256 | 70 | 448 | 310 |
-| 3 | Sheet **Run day** | 704 | 70 | 448 | 310 |
-| 4 | Sheet **Batches** | 1152 | 70 | 448 | 310 |
-| 5 | Sheet **Run duration** | 256 | 380 | 672 | 310 |
-| 6 | Sheet **Batch list** | 928 | 380 | 672 | 310 |
-| 7 | Sheet **Reruns and overrides** | 256 | 690 | 672 | 310 |
-| 8 | Sheet **Errors** | 928 | 690 | 672 | 310 |
-| 9 | Slider for parameter **Delivery deadline hour (Friday, CT)** | 0 | 70 | 256 | 90 |
+Filter card `GX_Batch`: select the sheet **Risk trends**, its arrow, **Filters**, `GX_Batch`. On the card's arrow choose **Multiple Values (dropdown)**, rename the card title to **Schedule (daily, weekly, monthly)**, and **Apply to Worksheets > Selected Worksheets**: **Risk trends**.
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+## Part 7: The actions (links between sheets)
 
-- 4 Operations and delivery *(size 18, bold)*
-- Requirements 4.03, 4.04 and 10.01: every Friday by 3 pm CT, batches, reruns *(size 10)*
+Open each dashboard, **Dashboard > Actions...**, **Add Action**, and create the actions listed for it. *Run on* **Select** fires on a click; **Menu** puts a link in the tooltip menu (right-click or hover a mark).
 
-Slider **Delivery deadline hour (Friday, CT)**: Dashboard pane, select any sheet, its arrow, **Parameters**, **Delivery deadline hour (Friday, CT)**. On the card's arrow choose **Slider**. Place it at the position in the table.
+- **Change Parameter**: *Source sheets* the sheet, *Target parameter*, *Source field*, *Aggregation* **None**, *Clearing the selection will* **Keep current value**.
+- **Go to Sheet**: *Source sheets* the sheet, *Target sheet* the dashboard.
+- **Filter**: *Source sheets* the sheet, *Target sheets* (pick the dashboard first, then the sheet), *Clearing the selection will* **Show all values**, *Filter* as listed. For **Selected fields**, add the source field and the target field as a pair.
+- An action whose source field is not on Rows uses the copy on **Detail** that Part 5 added.
 
-### 5 Trends and aberrations
+| # | Dashboard | Type | Source sheet | Run on | Target | Field | Name |
+|---|---|---|---|---|---|---|---|
+| 1 | 1 Weekly sample | Change Parameter | Case list | Select | Selected record | Record key (Sample) | Open ODAG1 record |
+| 2 | 1 Weekly sample | Go to Sheet | Case list | Select | 2 Universe risks and errors |  | Go to the ODAG1 record |
+| 3 | 1 Weekly sample | Filter | Sample mix | Select | Case list | All fields | Filter cases by area |
+| 4 | 1 Weekly sample | Filter | Targets and caps | Select | Case list | Selected fields: Stat_Nm = SMPL_STRATUM_PATH | Filter cases by bucket |
+| 5 | 1 Weekly sample | Filter | Universe by area | Select | Universe funnel, Top CPT codes | All fields | Filter funnel and CPT codes |
+| 6 | 2 Universe risks and errors | Change Parameter | Risk and error list | Select | Selected record | GX_Src_Data_Key | Show ODAG1 record (risk) |
+| 7 | 2 Universe risks and errors | Change Parameter | Engine checks | Select | Selected record | Record key (Issues) | Show ODAG1 record (engine check) |
+| 8 | 2 Universe risks and errors | Filter | GRE results by rule | Select | Risk and error list | Selected fields: GR_Rule_ID = GX_Rule_ID | Filter risks by rule |
+| 9 | 2 Universe risks and errors | Filter | Results by type | Select | Risk and error list | All fields | Filter risks by type |
+| 10 | 3 Operations and controls | Change Parameter | Run log | Select | Batch | Run_Key | Make run current |
+| 11 | 3 Operations and controls | Change Parameter | Batches | Select | Batch | Batch_Btch_ID | Make batch current |
+| 12 | 3 Operations and controls | Change Parameter | Universe pulls | Select | Batch | BTCH_ID (ODAG1 data) | Make pull current |
+| 13 | 3 Operations and controls | Go to Sheet | Run log | Menu | 1 Weekly sample |  | Open the weekly sample for this run |
+| 14 | 3 Operations and controls | Change Parameter | GRE run log | Select | GRE run | GA_Run_Key | Make GRE run current |
+| 15 | 3 Operations and controls | Go to Sheet | GRE run log | Menu | 2 Universe risks and errors |  | Open the risks and errors for this GRE run |
+| 16 | 3 Operations and controls | Filter | Refinement | Menu | Sampling rules (on 4 Trends and configuration) | Selected fields: Refine_Rule_ID = Rule_ID | Show this rule |
+| 17 | 4 Trends and configuration | Filter | Sampling rules | Menu | Targets and caps (on 1 Weekly sample) | Selected fields: Rule_ID = Stat_Rule_ID | Show run figures for this rule |
+| 18 | 4 Trends and configuration | Filter | GRE rules | Menu | GRE results by rule (on 2 Universe risks and errors) | Selected fields: GR_Rule_ID = GR_Rule_ID | Show results for this rule |
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Universe volume** | 256 | 70 | 672 | 232 |
-| 3 | Sheet **Volume change** | 928 | 70 | 672 | 232 |
-| 4 | Sheet **Denial rate** | 256 | 302 | 672 | 232 |
-| 5 | Sheet **Late decisions trend** | 928 | 302 | 672 | 232 |
-| 6 | Sheet **Sample mix trend** | 256 | 535 | 672 | 232 |
-| 7 | Sheet **Risk trend** | 928 | 535 | 672 | 232 |
-| 8 | Sheet **Shortfall trend** | 256 | 768 | 448 | 232 |
-| 9 | Sheet **Top CPT codes** | 704 | 768 | 448 | 232 |
-| 10 | Sheet **OON denials trend** | 1152 | 768 | 448 | 232 |
-| 11 | Slider for parameter **Alert threshold (% change)** | 0 | 70 | 256 | 90 |
+How you use them:
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+- **Exception to actual data.** On **2 Universe risks and errors**, click a row in *Risk and error list* or *Engine checks*: *ODAG1 record* at the bottom shows every column of that record, for every version and every pull. On **1 Weekly sample**, click a case in *Case list*: Tableau opens dashboard 2 with that record shown.
+- **Batch everywhere.** Pick a batch in any Batch drop-down, or click a run, batch or weekly pull on dashboard 3: all four dashboards follow, because the parameter is shared.
+- **GRE run everywhere.** Pick a GRE run, or click one in *GRE run log* on dashboard 3.
+- **Rules.** Right-click a sampling rule (dashboard 4) to see its targets and caps on dashboard 1; a GRE rule to see its results on dashboard 2; a refinement finding (dashboard 3) to see its rule on dashboard 4.
 
-- 5 Trends and aberrations *(size 18, bold)*
-- Requirements 7.01 to 7.04: monthly, quarterly and yearly trends and alerts *(size 10)*
+The drill-through needs the ODAG1 GRE rules to list `SRC_DATA_KEY` in `src_key_cols` (they do), so each exception's key reads `SRC_DATA_KEY=...`. Exceptions from the ODAG1_FILE rules are on the NAS file; they show the record only if the file carries the same SRC_DATA_KEY.
 
-Slider **Alert threshold (% change)**: Dashboard pane, select any sheet, its arrow, **Parameters**, **Alert threshold (% change)**. On the card's arrow choose **Slider**. Place it at the position in the table.
+## Part 8: Hide the sheets and check
 
-### 6 Internal controls
+1. Right-click each dashboard tab, **Hide All Sheets**. Only the 4 dashboards remain as tabs; the sheets are still in the workbook (right-click a dashboard item, **Go to Sheet** to edit one).
+2. Drag the dashboard tabs into the order 1, 2, 3, 4 and save.
+3. Open **1 Weekly sample**: the KPIs show the latest batch. Change the batch: every sheet changes.
+4. Click a case in the case list: dashboard 2 opens with that record's ODAG1 rows at the bottom.
+5. On dashboard 2 pick a GRE run, click a risk: the ODAG1 record changes. Click a rule in *GRE results by rule*: the list filters to it.
+6. On dashboard 3 click a run in the run log, then go to dashboard 1: it shows that batch.
+7. On dashboard 4 move **Alert threshold (% change)**: the aberration colours change.
+8. If a sheet shows a red error, open it (**Go to Sheet**) and check its pills against Part 5. If the GRE sheets are empty, check that HSABC_V has rows whose rule_group starts with ODAG1, and that the GRE run drop-down holds a run.
+9. **File > Save**, close Tableau, and open the file again to make sure it opens cleanly.
+10. Before putting the workbook in git, take the server name out (PowerShell):
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Revalidation status** | 0 | 70 | 533 | 310 |
-| 3 | Sheet **Finalized** | 533 | 70 | 533 | 310 |
-| 4 | Sheet **Refinement findings** | 1067 | 70 | 533 | 310 |
-| 5 | Sheet **Revalidation list** | 0 | 380 | 800 | 310 |
-| 6 | Sheet **Open findings** | 800 | 380 | 800 | 310 |
-| 7 | Sheet **Not picked reasons** | 0 | 690 | 800 | 310 |
-| 8 | Sheet **Replacements** | 800 | 690 | 800 | 310 |
+    ```
+    $f = "C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\ODAG1_Sampling_Dashboard_v2.twb"; (Get-Content $f -Raw) -replace "server='[^']*'", "server='TERADATA_SERVER'" | Set-Content $f -Encoding utf8
+    ```
 
-Text object content (type it in the text editor that opens; one paragraph per line):
+## Part 9: What each requirement uses
 
-- 6 Internal controls *(size 18, bold)*
-- Requirements 8.01 to 8.03: revalidation, human checkpoints, refinement *(size 10)*
+From *Clinical Audit Sample Optimization* (Phase 1, HealthSpring UM).
 
-### 7 Configuration
+| Requirement | Where | Sheets |
+|---|---|---|
+| 1.01 to 1.03 Universe pull, frequency, fields | 3 Operations and controls, 2 Universe risks and errors | Universe pulls (run type, batch, file, version, rows, decision period), ODAG1 record (every field) |
+| 2.01 Review the daily, weekly, monthly universe | 2 Universe risks and errors | Risk KPIs, Risk and error list, Schedule filter |
+| 2.02 Cases in error or at risk, by rule | 2 Universe risks and errors, 4 Trends and configuration | Risk and error list, GRE results by rule, GRE rules (the rules themselves) |
+| 2.03 One-year look back | 4 Trends and configuration | Risk trends, Engine check trends (monthly, by result type) |
+| 2.04 Dashboard summary and detail: rule, result type, category, risk scoring, priority | 2 Universe risks and errors | Risk KPIs, Results by type, Risk and error list (Record risk, sorted by risk), ODAG1 record |
+| 2.05 Notify teams | not a dashboard item | done by the Airflow jobs; the dashboard shows the same output |
+| 2.06, 4.04 Runs every day and Friday, many users | 3 Operations and controls | Run log, GRE run log, Universe pulls |
+| 3.01, 3.02, 6.01, 6.02 Store inputs and outputs 10 years | 3 Operations and controls | Retention (rows kept by data year), Universe pulls |
+| 4.01 Weekly sample criteria and mix | 1 Weekly sample | Sample mix, Targets and caps, Universe funnel, Universe by area, Top CPT codes |
+| 4.02 Validate against history | 3 Operations and controls, 4 Trends and configuration | Revalidation, trends |
+| 4.03 Sample output by Friday 3pm CT: prioritized cases, functional area, clinical auditor, universe risks | 1 Weekly sample, 2 Universe risks and errors, 3 Operations and controls | Case list (priority order), Sample KPIs, Engine checks, Run log (Delivery on time or late) |
+| 5 Queue in the audit tool | not a dashboard item | stretch requirement, outside Tableau |
+| 7.01 Shared dashboards | all | the 4 dashboards |
+| 7.02 Aberrations over x% vs prior month | 4 Trends and configuration | Run trends, Universe trends (Alert threshold slider) |
+| 7.03, 7.04 Trends and frequency of high-risk errors | 4 Trends and configuration | Risk trends, Sample trends, Engine check trends |
+| 8.01 to 8.03 Revalidation, human checkpoints, refinement | 3 Operations and controls | Revalidation, Run log (finalized by, overrides), Refinement |
+| 9 Scalable | 4 Trends and configuration | Sampling rules, GRE rules (configuration, not code) |
+| 10.01, 10.02 Configurable frequency and case mix | 3 Operations and controls, 4 Trends and configuration | Run log (run type), Sampling rules, Targets and caps |
 
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Rules** | 256 | 70 | 1344 | 310 |
-| 3 | Sheet **Quota vs actual** | 256 | 380 | 672 | 310 |
-| 4 | Sheet **Caps** | 928 | 380 | 672 | 310 |
-| 5 | Sheet **Config changes** | 256 | 690 | 1344 | 310 |
-| 6 | Slider for parameter **Weekly target** | 0 | 70 | 256 | 90 |
+Not covered by the data yet: 2.04 *results that would invalidate the CMS submission* needs a marker on the GRE rule (for example a category value); once the rules carry it, add it as a filter on *Risk and error list*.
 
-Text object content (type it in the text editor that opens; one paragraph per line):
-
-- 7 Configuration *(size 18, bold)*
-- Requirements 9 and 10: what is configured and how it performs *(size 10)*
-
-Slider **Weekly target**: Dashboard pane, select any sheet, its arrow, **Parameters**, **Weekly target**. On the card's arrow choose **Slider**. Place it at the position in the table.
-
-### 8 Retention
-
-| Item | What to drag | x | y | w | h |
-|---|---|---|---|---|---|
-| 1 | Text object (text below) | 0 | 0 | 1600 | 70 |
-| 2 | Sheet **Rows kept** | 0 | 70 | 1600 | 465 |
-| 3 | Sheet **Rows by year** | 0 | 535 | 1600 | 465 |
-
-Text object content (type it in the text editor that opens; one paragraph per line):
-
-- 8 Retention *(size 18, bold)*
-- Requirements 6.01 and 6.02: inputs and outputs kept for 10 years *(size 10)*
-
-## Part 7: Final checks
-
-1. Open every dashboard. Every sheet shows data or an empty chart, never a red error.
-2. Change the run drop-down on **1 Weekly sample**: the KPIs, charts and case list change together.
-3. Change the batch drop-down on **2 Universe and funnel** and **3 Universe risks and errors**.
-4. Move the sliders on **4 Operations and delivery** and **5 Trends and aberrations**: the on-time and aberration colours react.
-5. **File > Save**. Close Tableau and open the file again to make sure it opens without errors.
-6. If you want the workbook back in git, remove the server name first (PowerShell):
-
-   ```
-   $f = "C:\Script\frameworks\GOV_RGLTRY\Sampling\airflow_resources\docs\tableau\ODAG1_Sampling_Dashboard_v2.twb"; (Get-Content $f -Raw) -replace "server='[^']*'", "server='TERADATA_SERVER'" | Set-Content $f -Encoding utf8
-   ```
