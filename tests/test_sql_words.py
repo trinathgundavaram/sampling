@@ -6,7 +6,7 @@ RESERVED = {"SEL", "DEL", "INS", "UPD", "ABS", "ALL", "AND", "ANY", "CASE", "CAS
             "MONTH", "NULL", "ORDER", "RIGHT", "SAMPLE", "SECOND", "SELECT", "SUM", "TIME", "TITLE", "TOP", "USER",
             "VALUE", "WHERE", "YEAR"}
 SOURCES = sorted((Path(__file__).parent.parent / "airflow" / "sampling").glob("*.py"))
-SOURCES.append(Path(__file__).parent.parent / "airflow_resources" / "docs" / "tableau" / "ODAG1_dashboard_views.sql")
+SOURCES.append(Path(__file__).parent.parent / "airflow_resources" / "docs" / "tableau" / "ODAG1_dashboard_custom_sql.sql")
 
 
 def test_no_alias_is_a_teradata_reserved_word():

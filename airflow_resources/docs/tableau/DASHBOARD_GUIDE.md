@@ -4,32 +4,49 @@ Two files:
 
 | File | What it is |
 |---|---|
-| `ODAG1_dashboard_views.sql` | 10 reporting views in HSLABBOSS (`V_SMPL_DSH_*`). Run once, by hand, like the table DDL. |
-| `ODAG1_Sampling_Dashboard.twb` | Tableau workbook: 9 dashboards, 50 worksheets, one data source per view. |
+| `ODAG1_Sampling_Dashboard.twb` | Tableau workbook: 9 dashboards, 50 worksheets, one data source with one Teradata connection. |
+| `ODAG1_dashboard_custom_sql.sql` | A readable copy of the workbook's Custom SQL. Not run: nothing is created in Teradata for the dashboard. |
 
 ## Setup
 
-1. Run `ODAG1_dashboard_views.sql` in HSLABBOSS. The views use `REPLACE VIEW`, so it can be run again. The HSLABBOSS DDL (`local_hslabboss/ODAG1_WKLY_HSLABBOSS_ddl.sql`) drops these views, so run this file again after the DDL and DML.
-2. Open the workbook in Tableau Desktop (2023.3 or later).
-3. Each data source points at the placeholder server `TERADATA_SERVER`, database `HSLABBOSS`. On first open, Tableau cannot reach it: choose Edit Connection, enter the production Teradata host, set Authentication to **LDAP**, sign in with your network user and password, and save the workbook locally. Do not commit the host name to git.
-4. Publish to Tableau Server and set extracts to refresh weekly on Friday after the sampling run, and monthly on the 1st after the refinement run.
+1. Open the workbook in Tableau Desktop (2023.3 or later).
+2. The data source **ODAG1 Sampling** has one connection, to the placeholder server `TERADATA_SERVER`, database `HSLABBOSS`. On first open, Tableau cannot reach it: choose Edit Connection, enter the production Teradata host, set Authentication to **LDAP**, sign in with your network user and password, and save the workbook locally. Do not commit the host name to git.
+3. Publish to Tableau Server and set the extract to refresh weekly on Friday after the sampling run, and monthly on the 1st after the refinement run. Use an extract: the risks and errors table reads the universe once per check (12 times) on a live connection.
 
-## The views
+## The data model
 
-| View | Grain | Built from |
+Nothing is created in Teradata. The workbook reads only the sampling metadata tables, the ODAG1 universe table and the ODAG1 sample table, through Custom SQL. All other logic is in Tableau: the ten tables below are logical tables of one data source, joined by Tableau relationships.
+
+| Table | Grain | Reads |
 |---|---|---|
-| V_SMPL_DSH_UNIVERSE | One row per current ODAG1 universe row | ODAG1, SampleSelection |
-| V_SMPL_DSH_DQ | One row per universe row and issue | V_SMPL_DSH_UNIVERSE |
-| V_SMPL_DSH_SAMPLE | One row per current sampled case | ODAG1_Sample, SampleRun, SampleSelection, RunStat |
-| V_SMPL_DSH_RUN | One row per run, reruns included | SampleRun |
-| V_SMPL_DSH_RUN_STAT | One row per figure of a current run | RunStat, SampleRun |
-| V_SMPL_DSH_REVAL | One row per revalidation | SampleRevalidation |
-| V_SMPL_DSH_REFINE | One row per refinement finding or total | SamplingRefinement |
-| V_SMPL_DSH_RULE | One row per rule version | SamplingRule |
-| V_SMPL_DSH_BATCH | One row per framework batch | RequestControl, SampleRun |
-| V_SMPL_DSH_RETENTION | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
+| Universe | One row per current ODAG1 universe row | ODAG1, SampleSelection |
+| Universe risks and errors | One row per universe row and issue | ODAG1, SampleSelection (the Universe SQL, once per check) |
+| Sample | One row per current sampled case | ODAG1_Sample, SampleRun, SampleSelection, RunStat |
+| Runs | One row per run, reruns included | SampleRun |
+| Run figures | One row per figure of a current run | RunStat, SampleRun |
+| Revalidation | One row per revalidation | SampleRevalidation |
+| Refinement | One row per refinement finding or total | SamplingRefinement |
+| Rules | One row per rule version | SamplingRule |
+| Batches | One row per framework batch | RequestControl, SampleRun |
+| Retention | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
 
-Derived fields in the universe and sample views follow the rule table: functional area (rules 6 to 17; Concurrent Review, rule 11, comes before the areas read from `ISS_DESC`, as in the engine), request type, IP/PAC type, determination, expedited or standard, network, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The universe holds the batch's `WKLY` rows only, as the engine's scope does (`RUN_TY` = the batch's run type). The expected exclusion follows rule 3: any row whose `AUTHZN_REVSN_NUM` is not 1, or is empty, is excluded (the SHRPA auto-approved and no-PA exclusions 211 and 212 were dropped on 2026-11-18, so the views no longer read SHRPA).
+Relationships (Universe is the root):
+
+| From | To | On |
+|---|---|---|
+| Universe | Universe risks and errors | `Case_Key` = `DQ_Case_Key` |
+| Universe | Sample | `Case_Key` = `Smp_Case_Key` |
+| Universe | Runs | `Smpl_Run_ID` = `Runs_Smpl_Run_ID` |
+| Runs | Run figures | `Runs_Smpl_Run_ID` = `Stat_Smpl_Run_ID` |
+| Runs | Revalidation | `Runs_Smpl_Run_ID` = `Reval_Smpl_Run_ID` |
+| Runs | Batches | `Runs_Smpl_Run_ID` = `Batch_Smpl_Run_ID` |
+| Run figures | Rules | `Stat_Rule_ID` = `Rule_ID` |
+| Rules | Refinement | `Rule_ID` = `Refine_Rule_ID` |
+| Runs | Retention | `Model_Link` = `Retention_Link` (both 1: retention counts have no key) |
+
+A field name is unique across the data source, so a column that two tables share keeps its name in the first table (Universe, then Runs, Rules, Sample, Run figures, Universe risks and errors, Revalidation, Refinement, Batches) and gets the table's prefix in the others (`Smp_`, `Stat_`, `DQ_`, `Reval_`, `Refine_`, `Rules_`, `Batch_`, `Runs_`), with the original name as its caption. Each worksheet uses the fields of one table, so Tableau queries only that table. The run and batch filters that were shared by data source apply to the worksheets of their table only.
+
+Derived fields in the Universe and Sample tables follow the rule table: functional area (rules 6 to 17; Concurrent Review, rule 11, comes before the areas read from `ISS_DESC`, as in the engine), request type, IP/PAC type, determination, expedited or standard, network, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The universe holds the batch's `WKLY` rows only, as the engine's scope does (`RUN_TY` = the batch's run type). The expected exclusion follows rule 3: any row whose `AUTHZN_REVSN_NUM` is not 1, or is empty, is excluded (the SHRPA auto-approved and no-PA exclusions 211 and 212 were dropped on 2026-11-18, so the SQL no longer reads SHRPA).
 
 ## Dashboards and requirements
 
@@ -63,8 +80,8 @@ Derived fields in the universe and sample views follow the rule table: functiona
 4. The deadline uses the run's As_Of date; if that is not the Friday of the week, the deadline moves with it.
 5. The timeframe defaults (14 and 3 days) are placeholders; set them from the contract.
 6. Only MBR_ID is shown from the member; no names or addresses. Restrict the workbook on the server like any PHI report.
-7. Every comparison of a text value in the views is case-insensitive (`UPPER(TRIM(col)) = 'UPPER VALUE'`), like the rules: `Denied` and `DENIED` count the same.
-8. The dashboard derives each case's functional area itself. The universe view also shows the engine's area (`Engine_Area`, the first part of the case's bucket path) and `Area_Check` (`Agrees` / `Differs` / `Not stratified`); the data quality view lists every case where they differ, so a rule change the views do not follow shows up instead of skewing the counts.
+7. Every comparison of a text value in the SQL is case-insensitive (`UPPER(TRIM(col)) = 'UPPER VALUE'`), like the rules: `Denied` and `DENIED` count the same.
+8. The dashboard derives each case's functional area itself. The Universe table also shows the engine's area (`Engine_Area`, the first part of the case's bucket path) and `Area_Check` (`Agrees` / `Differs` / `Not stratified`); the data quality view lists every case where they differ, so a rule change the views do not follow shows up instead of skewing the counts.
 
 ## Not covered (no data yet)
 
@@ -72,4 +89,4 @@ Audit results and error rates found by auditors, contract status, concurrent rev
 
 ## Regenerating
 
-The SQL and the workbook were built from one field list, so every field a sheet uses exists in its view. When a view changes, update the matching data source in the workbook (Data > Refresh).
+The SQL and the workbook were built from one field list, so every field a sheet uses exists in its table. To change a table, edit its Custom SQL in the data source (Data > ODAG1 Sampling > Edit Data Source, then the table's Edit Custom SQL), and update `ODAG1_dashboard_custom_sql.sql` to match.
