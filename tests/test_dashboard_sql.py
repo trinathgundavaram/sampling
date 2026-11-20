@@ -32,3 +32,11 @@ def test_the_readable_copy_matches_the_workbook():
     text = COPY.read_text()
     for name, sql in tables.items():
         assert f"-- {name}: " in text and sql + ";" in text, name
+
+
+def test_each_table_file_matches_the_workbook():
+    tables, _ = _tables()
+    files = sorted((DOCS / "custom_sql").glob("*.sql"))
+    assert [f.stem.split("_", 1)[1].replace("_", " ") for f in files] == list(tables)
+    for f in files:
+        assert f.read_text() == tables[f.stem.split("_", 1)[1].replace("_", " ")] + "\n", f.name
