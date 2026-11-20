@@ -40,3 +40,13 @@ def test_each_table_file_matches_the_workbook():
     assert [f.stem.split("_", 1)[1].replace("_", " ") for f in files] == list(tables)
     for f in files:
         assert f.read_text() == tables[f.stem.split("_", 1)[1].replace("_", " ")] + "\n", f.name
+
+
+def test_every_field_is_mapped_to_its_table():
+    _, ds = _tables()
+    conn = ds.find("connection")
+    maps = {m.get("key"): m.get("value") for m in conn.find("cols")}
+    records = [m for m in conn.find("metadata-records") if m.get("class") == "column"]
+    assert len(maps) == len(records)
+    for m in records:
+        assert maps[m.findtext("local-name")] == f"{m.findtext('parent-name')}.[{m.findtext('remote-name')}]"
