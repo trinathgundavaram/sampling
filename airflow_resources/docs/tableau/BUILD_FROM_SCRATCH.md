@@ -477,8 +477,8 @@ Tables: ODAG1 data. Also used on **1 Overview**.
 
 1. Create a new worksheet and rename its tab **Universe KPIs**.
 1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text** on the Marks card.
-1. On the **Measure Values** card (below Marks), drag every pill off, then drag in, in this order: `ODAG1 data (Count)`, `COUNTD(AUTHZN_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**), `COUNTD(BTCH_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**), `MIN(Odag1_Rpt_Start_Dt)` (right-click the pill: **Measure > Minimum**), `MAX(Odag1_Rpt_End_Dt)` (right-click the pill: **Measure > Maximum**).
-1. Right-click each column header, **Edit Alias...**, and rename them: **Rows**, **Authorizations**, **Pulls**, **Report from**, **Report to**.
+1. On the **Measure Values** card (below Marks), drag every pill off, then drag in, in this order: `ODAG1 data (Count)`, `COUNTD(AUTHZN_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**), `COUNTD(BTCH_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**).
+1. Right-click each column header, **Edit Alias...**, and rename them: **Rows**, **Authorizations**, **Pulls**.
 1. Click **Text** on the Marks card, **...**, select all, font size **20**, **bold**, OK. Set **Fit** (toolbar) to **Entire View**.
 1. Drag `In report window` onto **Filters**, tick only **True**, OK.
 1. Drag `Odag1_Curr_Ind` onto **Filters**, tick only **Y**, OK.
@@ -489,9 +489,9 @@ Tables: ODAG1 data. Also used on **1 Overview**.
 Tables: ODAG1 data.
 
 1. Create a new worksheet and rename its tab **Universe pulls**.
-1. **Rows:** drag, in this order, `Odag1_Run_Ty`, `BTCH_ID (ODAG1 data)`, `Odag1_Batch_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `FILE_NM (ODAG1 data)`, `Odag1_Rpt_Start_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `Odag1_Rpt_End_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `Odag1_Rpt_Version`, `UNVRS_VRSN_CD (ODAG1 data)`.
-1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `ODAG1 data (Count)`, `COUNTD(AUTHZN_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**), `MIN(Odag1_Determination_Dt)` (right-click the pill: **Measure > Minimum**), `MAX(Odag1_Determination_Dt)` (right-click the pill: **Measure > Maximum**).
-1. Right-click each column header, **Edit Alias...**: **Rows**, **Authorizations**, **Decisions from**, **Decisions to**.
+1. **Rows:** drag, in this order, `Odag1_Run_Ty`, `BTCH_ID (ODAG1 data)`, `Odag1_Batch_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `FILE_NM (ODAG1 data)`, `Odag1_Rpt_Start_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `Odag1_Rpt_End_Dt` (right-click the pill: **Exact Date**, then **Discrete**), `Odag1_Rpt_Version`, `UNVRS_VRSN_CD (ODAG1 data)`, `MIN(Odag1_Determination_Dt)` (right-click the pill: **Measure > Minimum**, then right-click again: **Exact Date**, then **Discrete**), `MAX(Odag1_Determination_Dt)` (right-click the pill: **Measure > Maximum**, then right-click again: **Exact Date**, then **Discrete**).
+1. Drag `Measure Names` onto **Columns** and `Measure Values` onto **Text**. On the **Measure Values** card drag every pill off, then drag in, in this order: `ODAG1 data (Count)`, `COUNTD(AUTHZN_ID (ODAG1 data))` (right-click the pill: **Measure > Count (Distinct)**).
+1. Right-click each column header, **Edit Alias...**: **Rows**, **Authorizations**.
 1. Drag `In report window` onto **Filters**, tick only **True**, OK.
 1. Drag `Odag1_Curr_Ind` onto **Filters**, tick only **Y**, OK.
 1. Sort `BTCH_ID (ODAG1 data)`: click the pill's arrow, **Sort**, Sort By **Alphabetic** (for numbers this is by value), **Descending**, close.
