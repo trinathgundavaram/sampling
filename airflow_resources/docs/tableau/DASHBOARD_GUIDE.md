@@ -20,7 +20,7 @@ Nothing is created in Teradata. The workbook reads only the sampling metadata ta
 | Table | Grain | Reads |
 |---|---|---|
 | Universe | One row per current ODAG1 universe row | ODAG1, SampleSelection |
-| Universe risks and errors | One row per universe row and issue | ODAG1, SampleSelection (the Universe SQL, once per check) |
+| Universe risks and errors | One row per universe row and issue | ODAG1, SampleSelection, sys_calendar.calendar (the Universe SQL once, crossed with 12 check numbers) |
 | Sample | One row per current sampled case | ODAG1_Sample, SampleRun, SampleSelection, RunStat |
 | Runs | One row per run, reruns included | SampleRun |
 | Run figures | One row per figure of a current run | RunStat, SampleRun |
@@ -44,7 +44,7 @@ Relationships (Universe is the root):
 | Rules | Refinement | `Rule_ID` = `Refine_Rule_ID` |
 | Runs | Retention | `Model_Link` = `Retention_Link` (both 1: retention counts have no key) |
 
-A field name is unique across the data source, so a column that two tables share keeps its name in the first table (Universe, then Runs, Rules, Sample, Run figures, Universe risks and errors, Revalidation, Refinement, Batches) and gets the table's prefix in the others (`Smp_`, `Stat_`, `DQ_`, `Reval_`, `Refine_`, `Rules_`, `Batch_`, `Runs_`), shown as the original name with the table in brackets, for example `Run_Key (Run figures)`, so every field name in the data source is unique, as Tableau requires. The two volume alerts show as `Aberration (Universe)` and `Aberration (Runs)`. Each worksheet uses the fields of one table, so Tableau queries only that table. The run and batch filters that were shared by data source apply to the worksheets of their table only.
+A field name is unique across the data source, so a column that two tables share keeps its name in the first table (Universe, then Runs, Rules, Sample, Run figures, Universe risks and errors, Revalidation, Refinement, Batches) and gets the table's prefix in the others (`Smp_`, `Stat_`, `DQ_`, `Reval_`, `Refine_`, `Rules_`, `Batch_`, `Runs_`), shown as the original name with the table in brackets, for example `Run_Key (Run figures)`, so every field name in the data source is unique, as Tableau requires. Every table's SQL ends in an outer SELECT that casts its join keys to one type: `Case_Key` VARCHAR(1000), `Smpl_Run_ID` VARCHAR(250), `Rule_ID` INTEGER. The two volume alerts show as `Aberration (Universe)` and `Aberration (Runs)`. Each worksheet uses the fields of one table, so Tableau queries only that table. The run and batch filters that were shared by data source apply to the worksheets of their table only.
 
 Derived fields in the Universe and Sample tables follow the rule table: functional area (rules 6 to 17; Concurrent Review, rule 11, comes before the areas read from `ISS_DESC`, as in the engine), request type, IP/PAC type, determination, expedited or standard, network, initial authorization (`AUTHZN_REVSN_NUM` = 1), the clinical auditor flag and auditor type. The universe holds the batch's `WKLY` rows only, as the engine's scope does (`RUN_TY` = the batch's run type). The expected exclusion follows rule 3: any row whose `AUTHZN_REVSN_NUM` is not 1, or is empty, is excluded (the SHRPA auto-approved and no-PA exclusions 211 and 212 were dropped on 2026-11-18, so the SQL no longer reads SHRPA).
 
