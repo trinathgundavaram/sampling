@@ -1,6 +1,6 @@
 # ODAG1 weekly rules (UMCM / ODAG1 / WKLY)
 
-The 44 rules of the ODAG1 weekly sample, as loaded by `local_hslabboss/ODAG1_WKLY_HSLABBOSS_dml.sql` and `ODAG1_WKLY_inserts.sql`. Full SQL and settings are in those files. Rules 19–21 and 27–44 split each area by determination, one set of three per area.
+The 48 rules of the ODAG1 weekly sample, as loaded by `local_hslabboss/ODAG1_WKLY_HSLABBOSS_dml.sql` and `ODAG1_WKLY_inserts.sql`. Full SQL and settings are in those files. Rules 19–21 and 27–44 split each area by determination, one set of three per area. Rules 25 and 45–48 cap each Source of Truth route at 5 cases a week, one cap per route.
 
 | Rule_ID | Rule_Nm | Class | Description |
 |---|---|---|---|
@@ -46,5 +46,9 @@ The 44 rules of the ODAG1 weekly sample, as loaded by `local_hslabboss/ODAG1_WKL
 | 22 | `BH_MAX_8_PCT` | CAP | No more than 8% of the sample from behavioral health, top-up included; concurrent reviews do not count |
 | 23 | `PER_CPT_CODE` | CAP | No more than 3 cases with the same list of procedure codes |
 | 24 | `OON_MAX_10` | CAP | No more than 10 out-of-network cases in the whole sample |
-| 25 | `CAPPED_ROUTES_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed as NOPA, Genetic, IPO List or Fast Cert (Clinical_Mgt_Route in SHRPA) |
+| 25 | `NOPA_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed 'NOPA - Approve PAR. Pend OON.' (Clinical_Mgt_Route in SHRPA) |
 | 26 | `EXPEDITED_MAX_75_PCT` | CAP | No more than 75% expedited cases in each area, with IPRF, LTAC and SNF counted separately |
+| 45 | `GENETIC_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed 'Genetic: Administratively Approve - No Network Review Required' (Clinical_Mgt_Route in SHRPA) |
+| 46 | `IPO_LIST_IF_RECEIVED_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed 'IPO List. Approve and place in concurrent review if request received.' (Clinical_Mgt_Route in SHRPA) |
+| 47 | `IPO_LIST_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed 'IPO List. Approve and place in Concurrent Review (without if request received)' (Clinical_Mgt_Route in SHRPA) |
+| 48 | `FAST_CERT_MAX_5` | CAP | No more than 5 cases in the whole sample with a procedure code routed 'Fast Cert - Approve PAR. Pend OON.' (Clinical_Mgt_Route in SHRPA) |
