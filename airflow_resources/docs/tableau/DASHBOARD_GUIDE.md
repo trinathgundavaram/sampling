@@ -27,7 +27,7 @@ Nothing is created in Teradata. The workbook reads only the sampling metadata ta
 | Revalidation | One row per revalidation | SampleRevalidation |
 | Refinement | One row per refinement finding or total | SamplingRefinement |
 | Rules | One row per rule version | SamplingRule |
-| Batches | One row per framework batch | RequestControl, SampleRun |
+| Batches | One row per batch that is in RequestControl, has a current run, or both (full outer join: a batch ID passed by hand shows with status `Not in request control`; RequestControl must exist but can be empty) | RequestControl, SampleRun |
 | Retention | One row per table and data year | All sampling tables, ODAG1, ODAG1_Sample |
 
 Relationships (Universe is the root):
