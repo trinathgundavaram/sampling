@@ -89,4 +89,4 @@ Audit results and error rates found by auditors, contract status, concurrent rev
 
 ## Regenerating
 
-The SQL and the workbook were built from one field list, so every field a sheet uses exists in its table. To change a table, edit its Custom SQL in the data source (Data > ODAG1 Sampling > Edit Data Source, then the table's Edit Custom SQL), and update `ODAG1_dashboard_custom_sql.sql` to match.
+The SQL and the workbook were built from one field list, so every field a sheet uses exists in its table. To change a table, edit its Custom SQL in the data source (Data > ODAG1 Sampling > Edit Data Source, then the table's Edit Custom SQL), and update `ODAG1_dashboard_custom_sql.sql` to match. Write the Custom SQL without `<` or `>`: in Tableau Custom SQL `<...>` marks a parameter, and a table whose SQL holds them fails in the model although Preview runs it. Use `NOT (a = b)` for `a <> b` and `SIGN(a - b) = 1` for `a > b` (`= -1` for `a < b`); `tests/test_dashboard_sql.py` checks this.
